@@ -1,0 +1,109 @@
+# Palaver — rough implementation plan
+
+Draft 3 (MoQ-based design). Goal: something people can use as early as possible, without
+throwaway code. **The final crate boundaries, the relay protocol and the plan format exist from
+phase 1**; each phase replaces a trivial implementation behind a boundary with a real one.
+
+| Boundary | First implementation | Later |
+|---|---|---|
+| Rendezvous | Ticket (invite link with addresses) | mDNS, mainline DHT, TURN-like fallback |
+| Admission | Shared secret in ticket | PAKE on password |
+| Topology | Simple rule (every capable node is a transit relay; peer with the nearest two) emitted as a real plan | Scored, capacity-aware plans |
+| Conductor | Meeting creator; no succession | Hand-over, succession |
+| Routing | Default per-participant routes only | Per-track entries, caps, contingencies |
+| Rate control | Fixed bitrates, one rendition | Simulcast, shedding, marking, adaptation |
+| Media security | QUIC/TLS per hop | Frame encryption |
+| Codecs | Opus + software video | Hardware H.264 |
+| UI | egui harness | Product shell |
+
+Development flow and test tiers: [04-dev-environment-and-flow.md](04-dev-environment-and-flow.md).
+Spikes are local and thrown away; only their written conclusions are kept (`docs/spikes/`).
+
+## Phase 0 — spikes
+
+1. **Transport**: does iroh 1.0 give datagrams, per-group uni streams and usable connection
+   stats? Can two NATed nodes connect with no n0 relay, using a member as introducer? Cost of
+   quinn + own punching instead?
+2. **MoQ profile**: minimal relay over our transport trait — two relays, an in-memory client
+   each, one video track subscribed by name end to end. Can MOQtail or `moq-net` serve as wire
+   codec only? Which draft do we pin?
+3. **Relay chain**: three relays in a line (A–B–C); hop-by-hop subscribe from a routing table;
+   re-route with dedupe (target zero loss); crash recovery time.
+4. **Top-N audio**: 50 simulated publishers over a relay tree; convergence, per-link count ≤ N,
+   speaker-change latency; datagrams vs stream-per-object under 2–5% loss.
+5. **libwebrtc à la carte**: what works outside PeerConnection (audio processing expected; jitter
+   buffer, capture, codecs?) on Windows, macOS, Linux.
+6. **Simulator**: choose or build the deterministic harness.
+
+Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linux/Windows/macOS.
+
+## Phase 1 — audio through relays, headless first
+
+- `moq-wire`, `proto`, `relay-core`, `net` (QUIC + in-memory), `control` (reports and plan as
+  tracks, flood rule), `sdk`, `bot`, `guards`.
+- Ticket join; creator is conductor; real plan format.
+- Audio: capture → processing → Opus → datagram objects → relays → jitter buffer → playout;
+  top-N in its simplest form; synthetic sources.
+- Simulator tests from day one, including a three-node line with no A–C link.
+- Minimal egui app on the SDK.
+
+**Demo 1:** a voice call between a few machines from a pasted link, with bots filling the room.
+
+## Phase 2 — video, multi-relay
+
+- Video: capture, software encode, group per stream, subscribe by name, keyframe requests, tiles.
+- Default routes, hop-by-hop resolution, dedupe; every edge relay peered with ≥2 relays.
+- Roster, self mute, host role, catalog track.
+- Stats overlay; diagnostics bundle; local multi-bot end-to-end tests.
+
+**Demo 2 (first user-usable build):** 4–8 people with audio and video on Windows/macOS/Linux,
+joining by link, media crossing more than one relay.
+
+## Phase 3 — the thesis: relays and conductor move
+
+- Reports with health and link metrics; scored, capacity-aware plans; hysteresis.
+- Graceful transit-relay leave/resignation, make-before-break; simulator invariant "zero lost
+  objects" and a real-network audio-continuity test.
+- Contingency next-hops and crash recovery with a measured bound; audio over two paths.
+- Conductor hand-over within the 3 s cap; succession on crash.
+- **Rate-control spike** (end of phase): throttle the middle link of a relay chain and the
+  publisher uplink; compare receiver-side switching with relay-side track swap; decide the
+  design for phase 4.
+
+**Demo 3 (viability):** whoever carries the media — and the conductor — quits and nobody notices;
+a machine is killed and the meeting recovers in under a second.
+
+## Phase 4 — real discovery, rate control, scale to 25–50
+
+- Meeting id + password: Argon2id/HKDF, PAKE admission; mDNS and DHT rendezvous;
+  member-as-introducer punching; TURN-like fallback via a headless node.
+- Simulcast; priority shedding, congestion marking, rendition switching per the spike; uplink
+  adaptation; caps and per-track routes; hardware H.264.
+- Control hardening: plan deltas, convergence at 50 nodes.
+- Emulated-network matrix; nightly soak; distributed bot runs (cloud VM added here).
+- Frame encryption (prerequisite for any non-member relay), then optionally a public MoQ relay
+  network for rendezvous and unreachable nodes.
+
+**Demo 4:** 25–50 participants (humans plus bots) across home networks with only a meeting id and
+password, surviving relay and conductor churn.
+
+## Phase 5 — product
+
+- Product UI shell (Flutter or Slint), installers, auto-update, accessibility.
+- Moderation: remote mute enforced at the publisher's edge relay and upstream, kick, lock.
+- Screen sharing, chat/data tracks, whiteboard.
+- SDK bindings (Python first); reference recorder and transcriber participants.
+- Thin web client, if wanted.
+
+## Phase 6 — mobile
+
+- iOS/Android shells over the same SDK; platform voice processing; background rules.
+- Phones run an edge relay only, or attach as thin clients; transit duty as a last resort.
+
+## Sequencing notes
+
+- Headless before GUI in every phase.
+- Phase 3 holds the novel risk, so it precedes real discovery; if the transport spike shows
+  first-contact NAT traversal is bad, pull discovery forward.
+- Windows and macOS build in CI from phase 0; real-device media is validated on the Windows host
+  and the MacBook.
