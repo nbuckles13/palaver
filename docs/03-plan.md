@@ -21,7 +21,7 @@ Spikes are local and thrown away; only their written conclusions are kept (`docs
 
 ## Phase 0 — spikes
 
-Status: 1–3 done (see `docs/spikes/01-transport.md`, `02-moq-relay.md`); 4–6 open.
+Status: 1–4 done (see `docs/spikes/01-transport.md`, `02-moq-relay.md`, `03-topn-audio.md`); 5–6 open.
 
 1. **Transport**: does iroh 1.0 give datagrams, per-group uni streams and usable connection
    stats? Can two NATed nodes connect with no n0 relay, using a member as introducer? Cost of
@@ -41,7 +41,8 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
 
 ## Phase 1 — audio through khefs, headless first
 
-- `moq-wire`, `proto`, `khef-core`, `net` (QUIC + in-memory), `control` (reports and plan as
+- `moq-wire` (our own draft 22 codec for the profile, cross-checked against MOQtail /
+  `moqtap-codec` in tests), `proto`, `khef-core`, `net` (QUIC + in-memory), `control` (reports and plan as
   tracks, flood rule), `sdk`, `bot`, `guards`.
 - Ticket join; creator is conductor; real plan format.
 - Audio: capture → processing → Opus → datagram objects → khefs → jitter buffer → playout;
@@ -66,7 +67,7 @@ joining by link, media crossing more than one khef.
 - Reports with health and link metrics; scored, capacity-aware plans; hysteresis.
 - Graceful transit-khef leave/resignation, make-before-break; simulator invariant "zero lost
   objects" and a real-network audio-continuity test.
-- Contingency next-hops and crash recovery with a measured bound; audio over two paths.
+- Contingency next-hops and crash recovery with a measured bound; decide whether audio needs a second overlay tree.
 - Conductor hand-over within the 3 s cap; succession on crash.
 - **Rate-control spike** (end of phase): throttle the middle link of a khef chain and the
   publisher uplink; compare receiver-side switching with khef-side track swap; decide the

@@ -13,7 +13,8 @@ network in this spike, so timings are logic-only.
 | **MOQtail** 0.18.0 (Apache-2.0, "draft 22") | **Usable.** Its `model` module (~16k lines including tests) is a pure byte codec with no IO: control messages, subgroup headers and objects, datagrams, properties, range filters, `SUBSCRIBE_TRACKS`, `REQUEST_UPDATE`, `GOAWAY`. Payloads are forwarded without copying (`serialize_parts`), and parsing reports "not enough bytes" so it can be driven from a stream. Catch: the crate has no feature flags and always pulls in its own transport (`wtransport`, full `tokio`), which we would not use. |
 | **moq-net** 0.3.23 | **Not separable.** ~100k lines; the IETF encoding is interleaved with its own session, cache and routing model. |
 
-**Decided (2026-11-16):** pin **draft 22** and use MOQtail's `model` through our `moq-wire` crate,
+**Superseded later on 2026-11-16 by spike 4 (`03-topn-audio.md`): we write our own codec and keep
+MOQtail as a dev-only test oracle.** Earlier decision, for the record: pin **draft 22** and use MOQtail's `model` through our `moq-wire` crate,
 so nothing else in the workspace sees it. Depend on the `moqtail` crate directly: the client
 needs tokio anyway and the unused `wtransport` dependency is accepted. The crate's `relay` and
 `client` modules are empty; `model` has one reference into `transport` (an enum in setup). Not assessed: what

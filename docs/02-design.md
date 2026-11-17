@@ -61,7 +61,7 @@ shared):
 
 | Crate | Contents | IO? |
 |---|---|---|
-| `moq-wire` | MoQT message and object encoding for the pinned draft, isolated so a draft change touches only this crate (may wrap an external crate) | none |
+| `moq-wire` | MoQT message and object encoding for the pinned draft, our own codec covering only our profile, isolated so a draft change touches only this crate; holds the parameter table, including our extensions | none (other MoQ codecs as dev-only test oracles) |
 | `proto` | Our control payloads: report, plan, roster, commands; naming scheme; test vectors | none |
 | `khef-core` | Khef state machine: sessions, subscriptions, routing, top-N, priorities, dedupe, congestion marking | none |
 | `topology` | (roster, reports, link graph) → plan | none |
@@ -211,14 +211,41 @@ otherwise closed once the planned peerings are up.
   starts/ends tracks as the selection changes; the client learns who is speaking from the names.
 - **Top-N is our extension**, modelled on the individual "MOCHA meetings" draft; the transport
   draft has only range filters.
-- **Between khefs** the plan pre-wires an audio overlay (a loop-free tree, or two for
-  redundancy) as standing top-N subscriptions. Each khef ranks every audio track it sees and
-  forwards on each overlay link the top N it did not learn from that link. A meeting-wide top-N
-  track is top-N at every khef that sees it, so it reaches everyone; anything else stops where
-  it loses; no link carries more than N.
-- Audio is one object per group, in datagrams, sent over two overlay paths by default; receivers'
-  khefs dedupe. Silent or muted clients send nothing. Declared levels are untrusted and bounded
-  by conductor priority rules (host/pinned always pass; server-muted never pass).
+- **Between khefs** the plan pre-wires one audio overlay: a loop-free tree that reaches every
+  node, as standing top-N subscriptions. Top-N runs only on overlay links, not on every link a
+  khef holds. (A second tree for crash failover is deferred; Opus DRED may cover loss.)
+- **Every audio track is announced along the whole overlay at join**, so aliases and forwarding
+  state exist at every khef before anyone speaks. Top-N gates only the data. This is what keeps
+  the first syllable of a new speaker.
+- **Publishers always send**: speech packets while talking, Opus DTX packets (a few per second)
+  while silent. Each packet carries `audio_level`, computed on that frame with no smoothing lag.
+  Opus in-band FEC and DRED are planned from the start. One object per group, in datagrams.
+- **Selection rule** (per khef, separately for each overlay link and for its own client; the
+  candidates for a link are the tracks not learned from that link). The khef holds a selected
+  set of N tracks, each with the time it last ranked in. On each packet arrival, with every
+  track's level taken from its latest packet:
+  1. Rank the candidates by level. Each selected track among the N loudest *and* above the
+     minimum level has its time refreshed.
+  2. A track among the N loudest that is not selected, and is above the minimum level, replaces
+     the quietest selected track whose time is older than the **hold** (ties: the oldest). If no
+     selected track is that old, it is not added.
+  - **Fast in, slow out**: entry happens on the first speech packet; a track leaves only when
+    someone else needs the slot and it has not ranked in for the hold time. Slots are never
+    emptied, so when everyone is silent the set does not change, and quiet background noise is
+    consistently in or out.
+  - No timers: the rule runs on packet arrival, so it adds no delay.
+  - **Level decay**: a track's level is held for two packet intervals after its latest packet,
+    then decays linearly to zero at 100 ms, so a crashed talker or a lost end-of-speech packet
+    cannot hold a slot. Computed on arrival of any packet; still no timers.
+  - Hold time (250 ms, from spike 4) and minimum level are profile constants.
+  - Known gap: a word whose first frame is below the minimum level loses that 20 ms frame.
+    Possible fix: khefs keep the latest packet of each unselected track and send it first.
+- **Consistency is eventual.** Khefs nearer a new speaker switch first; the change crosses the
+  overlay at forwarding speed. With more than N simultaneous talkers, listeners may hear
+  different subsets. No overlay link carries more than N tracks per direction. A leaf khef
+  always forwards its own client; a transit khef ranks its client against its other links.
+- Declared levels are untrusted and bounded by conductor priority rules (host/pinned always
+  pass; server-muted never pass).
 
 ## 9. Leave and crash
 
@@ -228,7 +255,7 @@ otherwise closed once the planned peerings are up.
   path once the new one is live; the conductor then releases the leaver. Clients see nothing.
 - **Transit khef crashes** (minimal impact): detected in roughly 200–500 ms (audio flows every
   20 ms; QUIC probe). Downstream khefs apply the plan's **contingency next-hops** without
-  waiting for the conductor, which then issues a clean plan. Audio has no gap (two paths); a video
+  waiting for the conductor, which then issues a clean plan. Audio gaps until the contingency hop takes over (DRED conceals part of it); a video
   track resumes at the next group from the alternate path.
 - **A node leaves or crashes**: its client and edge khef go together and its tracks end.
 - **Conductor**: §5.
@@ -284,9 +311,15 @@ A **profile** of MoQT, deliberately small:
 - **Our extensions** (khef↔khef, and offered to our own clients): top-N filter; congestion
   mark; per-link loss sequence; the control-namespace flood rule; plan semantics.
 - **Out initially**: `FETCH` and caching beyond the current group (except the plan track); pause.
-- **Draft**: pinned to **draft 22**, the version MOQtail's codec implements. Khef logic is ours;
-  `moq-wire` wraps the `model` module of the `moqtail` crate, taken as a direct dependency
-  (spike 2). `moq-net` does not separate cleanly.
+- **Draft**: pinned to **draft 22**. Khef logic is ours, and so is the codec: `moq-wire`
+  implements only the messages in this profile (spike 4). The draft closes a session on an
+  unknown request parameter, and no existing Rust codec lets an application register one, so
+  top-N cannot go through them. MOQtail and `moqtap-codec` are dev-only dependencies for
+  cross-checking encodings in unit tests and for interop tests.
+- **Extension negotiation**: every khef and Palaver client sends a Palaver setup option in
+  `SETUP` (unknown setup options are ignored by other implementations). Our request parameters
+  (top-N) are used only on connections where both sides sent it; a peer that did not is treated
+  as a plain draft 22 endpoint.
 - **Transport**: iroh; always QUIC end to end, over a direct UDP path or an iroh-relay path.
   Introduction is done by members over the control tracks, with iroh-relay as the helper and
   fallback (spike 1); quinn as fallback; behind a trait that offers request streams, unidirectional
@@ -361,11 +394,11 @@ runs, native media.
 | Scale | 25–50 participants, single conductor; multi-khef from the start |
 | Architecture | MoQ-based: edge khef per node, named tracks, routing tables, control as tracks |
 | Subscribe resolution | Routing table, longest-prefix match; default per-participant routes; conductor not in the path; unroutable subscribes held pending |
-| Audio | Top-N selected by khefs over a pre-wired overlay; two paths by default |
+| Audio | Top-N selected by khefs over one pre-wired loop-free overlay; loudness-ranked, fast in, slow out; all audio tracks announced at join; DTX, FEC and DRED |
 | Rendition switching | Receiver-side by default; khef-side track swap allowed if the rate-control spike finds a clean way |
 | Local client↔khef | In-memory MoQ-formatted messages; no sockets, QUIC or crypto |
 | Network edge | Conformant to the pinned draft for our profile |
-| Draft / codec | Draft 22 via MOQtail's codec, wrapped in `moq-wire` |
+| Draft / codec | Draft 22; our own codec in `moq-wire` for our profile; MOQtail / `moqtap-codec` as test oracles and for interop tests |
 | Transport | iroh; members introduce, iroh-relay as helper and last-resort path; quinn as fallback |
 | Link preference | Direct, then via a transit khef, then iroh-relay path (media only if nothing else) |
 | Naming | **khef** = the MoQ relay in each node; **iroh-relay** = iroh's connection helper |
