@@ -13,7 +13,7 @@ phase 1**; each phase replaces a trivial implementation behind a boundary with a
 | Routing | Default per-participant routes only | Per-track entries, caps, contingencies |
 | Rate control | Fixed bitrates, one rendition | Simulcast, shedding, marking, adaptation |
 | Media security | QUIC/TLS per hop | Frame encryption |
-| Codecs | Opus + software video | Hardware H.264 |
+| Codecs | Opus + software H.264, then hardware H.264 on Windows (phase 2) | Hardware H.264 on the other platforms |
 | UI | egui harness | Product shell |
 
 Development flow and test tiers: [04-dev-environment-and-flow.md](04-dev-environment-and-flow.md).
@@ -21,7 +21,8 @@ Spikes are local and thrown away; only their written conclusions are kept (`docs
 
 ## Phase 0 — spikes
 
-Status: 1–4 done (see `docs/spikes/01-transport.md`, `02-moq-relay.md`, `03-topn-audio.md`); 5–6 open.
+Status: 1–5 done (see `docs/spikes/01-transport.md`, `02-moq-relay.md`, `03-topn-audio.md`,
+`04-media.md`); 6 open.
 
 1. **Transport**: does iroh 1.0 give datagrams, per-group uni streams and usable connection
    stats? Can two NATed nodes connect with no n0 relay, using a member as introducer? Cost of
@@ -33,8 +34,8 @@ Status: 1–4 done (see `docs/spikes/01-transport.md`, `02-moq-relay.md`, `03-to
    re-route with dedupe (target zero loss); crash recovery time.
 4. **Top-N audio**: 50 simulated publishers over a khef tree; convergence, per-link count ≤ N,
    speaker-change latency; datagrams vs stream-per-object under 2–5% loss.
-5. **libwebrtc à la carte**: what works outside PeerConnection (audio processing expected; jitter
-   buffer, capture, codecs?) on Windows, macOS, Linux.
+5. **Media parts**: originally "libwebrtc à la carte". Outcome: no libwebrtc; `sonora`, libopus
+   1.6, `cpal`, own jitter buffer, own video interface (Linux and Windows tested).
 6. **Simulator**: choose or build the deterministic harness.
 
 Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linux/Windows/macOS.
@@ -54,7 +55,9 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
 
 ## Phase 2 — video, multi-khef
 
-- Video: capture, software encode, group per stream, subscribe by name, keyframe requests, tiles.
+- Video: capture, encode behind our own interface (openh264 software first, then Media
+  Foundation hardware on Windows in this phase), group per stream, subscribe by name, keyframe
+  requests, tiles.
 - Default routes, hop-by-hop resolution, dedupe; every edge khef peered with ≥2 khefs.
 - Roster, self mute, host role, catalog track.
 - Stats overlay; diagnostics bundle; local multi-bot end-to-end tests.
@@ -81,7 +84,7 @@ a machine is killed and the meeting recovers in under a second.
 - Meeting id + password: Argon2id/HKDF, PAKE admission; mDNS and DHT rendezvous;
   member-as-introducer punching; iroh-relay fallback; headless node as a reachable khef.
 - Simulcast; priority shedding, congestion marking, rendition switching per the spike; uplink
-  adaptation; caps and per-track routes; hardware H.264.
+  adaptation; caps and per-track routes; hardware H.264 on the remaining platforms.
 - Control hardening: plan deltas, convergence at 50 nodes.
 - Emulated-network matrix; nightly soak; distributed bot runs (cloud VM added here).
 - Frame encryption (prerequisite for any non-member relay), then optionally a public MoQ relay

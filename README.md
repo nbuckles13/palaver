@@ -27,5 +27,6 @@ Media over QUIC evaluation that led to the current design.
   headless bot as the first consumer.
 - **Transport**: QUIC via iroh 1.0 (quinn as fallback); Media over QUIC Transport on every link,
   with our own khef implementing a small profile of one pinned draft.
-- **Media**: libwebrtc where it is the best tool (audio processing first), platform codecs, Opus.
+- **Media**: Opus 1.6 with DRED, WebRTC audio processing via a Rust port (`sonora`), H.264 with
+  hardware encoders where available; no libwebrtc.
 - **UI**: egui harness for development; product shell (Flutter or Slint) deferred.

@@ -104,9 +104,10 @@ Notes:
   To install: `clang`, `cmake`, `cargo-nextest`, `cargo-deny`, audio/video dev headers. T0–T4 all
   run here. Real devices do not (WSLg audio latency is unusable for echo work; no camera by
   default), which is why synthetic sources are in the engine.
-- **Windows native**: build and run on the Windows host of this machine for T3 and T6. Simplest is
-  a native Rust toolchain and a second clone on the Windows side, rather than cross-compiling
-  (libwebrtc ships per-platform prebuilt libraries).
+- **Windows native**: build and run on the Windows host of this machine for T3 and T6. Cross-compiling
+  from WSL works (`cargo zigbuild --target x86_64-pc-windows-gnu`, including the C parts) and the
+  result runs on the host from WSL; a native toolchain on the Windows side is the alternative.
+  Smart App Control must be off on the host, or builds signed: it blocks unsigned programs.
 - **macOS**: CI runner for T0–T3; the MacBook for T6.
 - **GitHub-hosted runners first.** Free for a public repo and they cover Linux, Windows and macOS
   for T0–T3, plus T4 on Linux (runners allow the privileges network namespaces need).

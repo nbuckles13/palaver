@@ -217,8 +217,11 @@ otherwise closed once the planned peerings are up.
 - **Every audio track is announced along the whole overlay at join**, so aliases and forwarding
   state exist at every khef before anyone speaks. Top-N gates only the data. This is what keeps
   the first syllable of a new speaker.
-- **Publishers always send**: speech packets while talking, Opus DTX packets (a few per second)
-  while silent. Each packet carries `audio_level`, computed on that frame with no smoothing lag.
+- **Publishers always send** whatever the Opus encoder emits: speech packets while talking, and
+  either DTX packets (a few per second) or continuous low-level packets while silent. Top-N
+  does not depend on DTX, only on something being sent with a level; we do not pre-process the
+  signal to force DTX. (In spike 5 DTX did not engage on one real microphone's noise floor; to
+  watch.) Each packet carries `audio_level`, computed on that frame with no smoothing lag.
   Opus in-band FEC and DRED are planned from the start. One object per group, in datagrams.
 - **Selection rule** (per khef, separately for each overlay link and for its own client; the
   candidates for a link are the tracks not learned from that link). The khef holds a selected
@@ -341,12 +344,26 @@ A **profile** of MoQT, deliberately small:
 
 ## 14. Media pipeline
 
-libwebrtc where it is the best tool, via the LiveKit Rust crates: audio processing (echo
-cancellation, noise suppression, gain) from the start, with platform voice-processing units on
-Apple/Android where better; its jitter buffer, capture and codecs if usable outside its own
-transport (spike). Otherwise `cpal`/`nokhwa`/`scap`, Opus, platform H.264 with a software
-fallback. Simulcast as separate encoder sessions, one track per rendition. Media container: MoQ's
-low-overhead container (LOC).
+No libwebrtc. The pipeline is assembled from parts behind our own traits in `media` (spike 5):
+
+- **Audio processing**: `sonora`, a pure-Rust port of WebRTC's echo canceller, noise suppression
+  and gain control. Platform voice-processing units on Apple/Android where better.
+- **Audio codec**: libopus 1.6 (C, built from source) with DTX, in-band FEC and DRED.
+- **Audio I/O**: `cpal` (WASAPI, ALSA or PulseAudio, CoreAudio). Devices differ in rate and
+  sample format, so the pipeline resamples to 48 kHz float.
+- **Jitter buffer**: our own. Adaptive playout delay and time-stretching, with concealment handed
+  to Opus (FEC, DRED, neural concealment). The `neteq` crate is reference material.
+- **Video codec**: our own encoder/decoder interface. openh264 (software) is the first backend;
+  **hardware backends follow early (phase 2)**, because a node must keep CPU for its khef.
+  Media Foundation on Windows first, then VideoToolbox, VAAPI/NVENC, MediaCodec. `moq-video`'s
+  backends (MIT/Apache) are the starting point to copy from, without its `moq-net`/`hang`
+  dependencies. Software encoders may skip frames to hold a bitrate; the pipeline tolerates it.
+- **Video capture**: not yet examined (`nokhwa`, `scap`, or `moq-video`'s capture code).
+- Simulcast as separate encoder sessions, one track per rendition. Media container: MoQ's
+  low-overhead container (LOC).
+- **Distribution notes**: unsigned Windows builds are blocked by Smart App Control, so code
+  signing is required; H.264 patent cover for a source-built openh264 needs checking (Cisco's
+  cover is understood to apply to its own binaries only).
 
 ## 15. SDK and headless clients
 
@@ -381,7 +398,8 @@ runs, native media.
    by `moq-wire` and by conformance being an edge property.
 4. **Uplink limits** on residential transit khefs at 25–50 participants.
 5. **Plan quality** on awkward link graphs; flooded control correctness at 50 nodes.
-6. **libwebrtc à la carte**: how much is usable outside its own transport is unverified.
+6. **Media parts are young**: `sonora` and the hardware codec backends are recent code; our own
+   jitter buffer is unproven until tested with real loss and jitter.
 7. **Non-standard pieces**: top-N, congestion mark; secure-objects still at -01.
 8. **Low-entropy passwords** vs offline guessing on DHT records; default to generated links.
 9. **Patents** (Topia mixed mesh/forwarding; Skype-era supernode).
@@ -408,7 +426,7 @@ runs, native media.
 | Leave | Hard cap 3 s |
 | dark_tower | Separate project; copy code, share nothing |
 | UI shell | Deferred; clean, professional, strong media support |
-| libwebrtc | Use where it makes sense |
+| Media | No libwebrtc: `sonora` + libopus 1.6 (DRED) + `cpal`; own jitter buffer; own video interface with openh264 first and hardware backends in phase 2 |
 
 ## 20. Open questions
 
