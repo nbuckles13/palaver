@@ -69,7 +69,7 @@ shared):
 | `net` | QUIC endpoint, in-memory transport, rendezvous, admission handshake | yes |
 | `media` | Capture/encode/decode/render/audio-processing/jitter traits, platform impls, synthetic sources | yes |
 | `sdk` | Public API; later UniFFI bindings | yes |
-| `sim` | Deterministic multi-node simulator | none |
+| `sim` | Deterministic multi-node simulator: our own discrete-event loop over the sans-IO cores (spike 6) | none |
 | `guards`, `e2e` | Guard tests; end-to-end scenarios | tests |
 | `apps/bot`, `apps/harness` | Headless client; egui dev UI | yes |
 
@@ -388,7 +388,8 @@ or meeting identifiers as metric labels.
 See [04-dev-environment-and-flow.md](04-dev-environment-and-flow.md): unit and guard tests,
 deterministic simulation (the workhorse: routing, top-N convergence, migration, crash, conductor
 hand-over, non-full-mesh graphs), local end-to-end with N bots, emulated networks, distributed
-runs, native media.
+runs, native media. The simulator is our own (virtual clock, seeded randomness, ordered event
+queue, link and fault model, invariants checked as it runs); see `docs/spikes/05-simulator.md`.
 
 ## 18. Risks
 

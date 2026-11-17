@@ -75,6 +75,10 @@ What makes the budgets achievable:
 - **Virtual time.** The simulator and all async tests run on a paused/virtual clock; a test that
   simulates a five-minute meeting takes milliseconds. Real `sleep` is banned in test code outside
   the `e2e` crate by a clippy `disallowed-methods` rule.
+- **Our own simulator.** A discrete-event loop over the sans-IO cores, not a framework that
+  runs async code: 60 simulated seconds of a 50-node meeting cost about 140 ms, against seconds
+  for turmoil (spike 6). Sans-IO crates must not iterate hash maps in random order (clippy
+  disallowed-types), and a self-test requires identical traces for identical seeds.
 - **No network or disk in T1–T2.** Sans-IO crates cannot open sockets anyway (layering guard).
 - **Bounded property tests.** Case counts are sized to the budget on PR; the large runs are nightly.
 - **Real time only in `e2e`.** Anything that needs wall-clock behaviour (QUIC timers, codecs, hole

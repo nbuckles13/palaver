@@ -21,8 +21,8 @@ Spikes are local and thrown away; only their written conclusions are kept (`docs
 
 ## Phase 0 — spikes
 
-Status: 1–5 done (see `docs/spikes/01-transport.md`, `02-moq-relay.md`, `03-topn-audio.md`,
-`04-media.md`); 6 open.
+Status: 1–6 done (see `docs/spikes/01-transport.md`, `02-moq-relay.md`, `03-topn-audio.md`,
+`04-media.md`, `05-simulator.md`).
 
 1. **Transport**: does iroh 1.0 give datagrams, per-group uni streams and usable connection
    stats? Can two NATed nodes connect with no n0 relay, using a member as introducer? Cost of
@@ -36,7 +36,7 @@ Status: 1–5 done (see `docs/spikes/01-transport.md`, `02-moq-relay.md`, `03-to
    speaker-change latency; datagrams vs stream-per-object under 2–5% loss.
 5. **Media parts**: originally "libwebrtc à la carte". Outcome: no libwebrtc; `sonora`, libopus
    1.6, `cpal`, own jitter buffer, own video interface (Linux and Windows tested).
-6. **Simulator**: choose or build the deterministic harness.
+6. **Simulator**: choose or build the deterministic harness. Outcome: build our own.
 
 Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linux/Windows/macOS.
 
