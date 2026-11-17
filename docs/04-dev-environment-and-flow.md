@@ -40,10 +40,10 @@ counts as failed; flaky tests are never retried; on failure, print where the log
 | Tier | What it proves | Where it runs | How | Budget |
 |---|---|---|---|---|
 | **T0 build** | Compiles, formatted, lint-clean, dependency rules hold | everywhere | fmt, clippy, `cargo deny` | seconds–1 min incremental |
-| **T1 unit** | Pure logic: codec, relay behaviour, topology, control state machines | everywhere | `cargo nextest run`: unit tests, property tests, test vectors, guards | per test: see Time budgets |
+| **T1 unit** | Pure logic: codec, khef behaviour, topology, control state machines | everywhere | `cargo nextest run`: unit tests, property tests, test vectors, guards | per test: see Time budgets |
 | **T2 simulation** | Whole-meeting behaviour: join/leave/crash/partition, non-full-mesh graphs, conductor hand-over, loudest-N convergence | everywhere, in-process | Deterministic simulator on virtual time; a failing seed replays exactly (`SIM_SEED=N cargo nextest run <test>`) | per test: see Time budgets; thousands of seeds nightly |
 | **T3 local end-to-end** | The real engine: real QUIC, real codecs, synthetic media, N bot processes on loopback | Linux, Windows, macOS | `e2e` profile: tests spawn bots, drive a scenario, assert on their metrics and event logs | per scenario ≤ 30 s; suite ~5 min |
-| **T4 emulated network** | NAT classes, blocked pairs, loss, jitter, bandwidth caps; hole punching; relay selection under bad links | Linux only | Same `e2e` crate, with bots in network namespaces (nftables NAT, `tc netem`); unprivileged via user namespaces or inside the dev container | ~10 min; PR on Linux, full matrix nightly |
+| **T4 emulated network** | NAT classes, blocked pairs, loss, jitter, bandwidth caps; hole punching; khef selection under bad links | Linux only | Same `e2e` crate, with bots in network namespaces (nftables NAT, `tc netem`); unprivileged via user namespaces or inside the dev container | ~10 min; PR on Linux, full matrix nightly |
 | **T5 distributed** | Real networks and real machines | several hosts | Same bot binary on each host, started/stopped/scripted over SSH with logs pulled back. Also the manual mode: "join my meeting with 20 bots" | nightly or on demand |
 | **T6 native media** | Real cameras, microphones, speakers, echo cancellation, GPU rendering, UI | Windows host and the MacBook | GUI harness; scripted where possible, otherwise a short manual checklist per milestone | per milestone |
 | Fuzz / soak | Parsers survive hostile input; long meetings with chaos stay healthy | Linux | `cargo fuzz`; bots with random leave/crash/throttle | nightly |
@@ -93,7 +93,7 @@ Notes:
   (join, publish, mute, leave, kill, throttle) plus assertions; the tiers differ only in where the
   bots run and what the network between them is.
 - **Media assertions are mechanical.** Synthetic audio carries sequence marks and synthetic video
-  carries a frame counter in the pixels, so "zero audio gap across a relay leave", "freeze ≤ X ms
+  carries a frame counter in the pixels, so "zero audio gap across a khef leave", "freeze ≤ X ms
   after a crash", latency and A/V sync are numbers, not opinions.
 - **A failed run leaves a run directory**: every bot's event log, metrics and plan history — the
   same diagnostics bundle the product exports.
@@ -114,7 +114,7 @@ Notes:
   NAT, cannot accept inbound connections, and whether two of them can hole-punch to each other is
   unverified. When phase 4 (discovery, NAT) starts, add one small cloud VM with a public address:
   it is the fixed reachable peer for the fleet, and it doubles as a live test of "headless node as
-  fallback relay". Home machines (the Windows host, the MacBook) add real NATs.
+  fallback khef". Home machines (the Windows host, the MacBook) add real NATs.
 
 ### CI
 
@@ -134,7 +134,7 @@ ownership, which Palaver does not have. The families and the lessons transfer:
 | Family (dark_tower example) | Why a test cannot hold it | Palaver equivalent |
 |---|---|---|
 | **Leak** (no secrets/PII in logs; `#[instrument]` must `skip_all`; no key material in internal messages) | The leak is in a path no test asserts on | Passwords, `K_auth`, meeting and transmit keys never reach logs, plan/report messages, the diagnostics bundle or a relay network. Names, IP addresses and meeting ids never reach logs or metric labels unredacted — this is the product's privacy promise |
-| **Boundary / scope deny** (no log or metric macros anywhere under the media hot-path directory) | Violations work fine and pass every test | Sans-IO crates use no sockets, runtime, clock or ambient randomness. `relay-core` never names a media kind or codec. No logging, blocking or unbounded queues in the forwarding path |
+| **Boundary / scope deny** (no log or metric macros anywhere under the media hot-path directory) | Violations work fine and pass every test | Sans-IO crates use no sockets, runtime, clock or ambient randomness. `khef-core` never names a media kind or codec. No logging, blocking or unbounded queues in the forwarding path |
 | **Test integrity** (test file not registered so it silently never runs; tests that accept failure as a pass; tests removed or loosened) | The suite stays green while proving less | Same, and it matters more with autonomous agents: the cheapest way to make a failing task pass is to weaken the check. Simulator invariants, scenario assertions and test vectors may not be removed, ignored or loosened without a human-visible marker |
 | **Drift** (one rule written in two places must match; codec vs test vectors) | Each side passes its own tests | Mostly avoided by one language and one `proto` crate. Remaining: wire structs vs pinned test vectors, and a wire change without a protocol-version bump |
 | **Reference integrity** (doc citations and navigation pointers resolve) | Not code | Pointers in `CLAUDE.md` and docs resolve |
@@ -149,7 +149,7 @@ ownership, which Palaver does not have. The families and the lessons transfer:
    `SystemTime`, thread RNG, unbounded channels and log macros where they must not appear.
 3. **Dependency rules.** `cargo deny` for the licence allow-list (how "permissive, no GPL" is
    enforced), advisories and duplicates; a layering check over `cargo metadata` so the sans-IO
-   crates cannot depend on a runtime or on `net`, and `relay-core` cannot depend on `media`.
+   crates cannot depend on a runtime or on `net`, and `khef-core` cannot depend on `media`.
 4. **Guard tests** in the `guards` crate. Small Rust checks for what is left: test integrity, wire-version bump,
    reference integrity. Each is one module with its own self-test.
 5. **Reviewer checklist.** Only for what needs judgement.
