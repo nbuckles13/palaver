@@ -8,6 +8,7 @@ mod frame;
 mod kvp;
 mod name;
 mod params;
+mod publish;
 mod reader;
 mod request;
 mod setup;
@@ -17,7 +18,14 @@ pub use error::{Error, Result};
 pub use frame::{Frame, MAX_BODY_BYTES, encode_frame};
 pub use kvp::{Kvp, Value, decode_kvps, encode_kvps};
 pub use name::{FullTrackName, Location, MAX_NAME_BYTES, MAX_NAMESPACE_FIELDS, Namespace};
-pub use params::{GroupOrder, LocationFilter, OK_PARAMS, Params, SUBSCRIBE_PARAMS};
+pub use params::{
+    GroupOrder, LocationFilter, OK_PARAMS, PUBLISH_PARAMS, Params, REQUEST_UPDATE_PARAMS,
+    SUBSCRIBE_PARAMS, SUBSCRIBE_TRACKS_PARAMS,
+};
+pub use publish::{
+    GOAWAY, GoAway, MAX_URI_BYTES, PUBLISH, PUBLISH_DONE, Publish, PublishDone, REQUEST_UPDATE,
+    RequestUpdate, SUBSCRIBE_TRACKS, SubscribeTracks,
+};
 pub use reader::Reader;
 pub use request::{
     ERROR_REDIRECT, MAX_REASON_BYTES, Message, REQUEST_ERROR, REQUEST_OK, Redirect, RequestError,

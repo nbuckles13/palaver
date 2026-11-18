@@ -36,6 +36,29 @@ pub const SUBSCRIBE_PARAMS: &[u64] = &[
 ];
 /// Parameters that may appear in SUBSCRIBE_OK and REQUEST_OK.
 pub const OK_PARAMS: &[u64] = &[EXPIRES, LARGEST_OBJECT];
+/// Parameters that may appear in PUBLISH.
+pub const PUBLISH_PARAMS: &[u64] = &[
+    OBJECT_DELIVERY_TIMEOUT,
+    SUBGROUP_DELIVERY_TIMEOUT,
+    EXPIRES,
+    LARGEST_OBJECT,
+    FORWARD,
+    SUBSCRIBER_PRIORITY,
+    LOCATION_FILTER,
+    GROUP_ORDER,
+];
+/// Parameters that may appear in SUBSCRIBE_TRACKS.
+pub const SUBSCRIBE_TRACKS_PARAMS: &[u64] = &[FORWARD, GROUP_ORDER, INCLUDE_PROPERTIES];
+/// Parameters that may appear in REQUEST_UPDATE. Which of them apply depends on the request
+/// being updated, which the codec does not know; the khef checks that.
+pub const REQUEST_UPDATE_PARAMS: &[u64] = &[
+    OBJECT_DELIVERY_TIMEOUT,
+    SUBGROUP_DELIVERY_TIMEOUT,
+    FORWARD,
+    SUBSCRIBER_PRIORITY,
+    LOCATION_FILTER,
+    NEW_GROUP_REQUEST,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupOrder {

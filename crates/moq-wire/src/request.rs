@@ -2,6 +2,10 @@
 
 use crate::frame::{Frame, encode_frame};
 use crate::params::{OK_PARAMS, Params, SUBSCRIBE_PARAMS};
+use crate::publish::{
+    GOAWAY, GoAway, PUBLISH, PUBLISH_DONE, Publish, PublishDone, REQUEST_UPDATE, RequestUpdate,
+    SUBSCRIBE_TRACKS, SubscribeTracks,
+};
 use crate::{Error, FullTrackName, Reader, Result, Setup, decode_kvps, put_vi64};
 
 pub const REQUEST_ERROR: u64 = 0x05;
@@ -59,9 +63,27 @@ pub struct RequestError {
 }
 
 /// Track properties run to the end of the message; check they parse, keep them encoded.
-fn track_properties(body: &mut Reader<'_>) -> Result<Vec<u8>> {
+pub(crate) fn track_properties(body: &mut Reader<'_>) -> Result<Vec<u8>> {
     decode_kvps(&mut body.clone())?;
     Ok(body.rest().to_vec())
+}
+
+/// A reason phrase (section 8.5): a length and up to 1024 bytes of text.
+pub(crate) fn encode_reason(reason: &str, out: &mut Vec<u8>) -> Result<()> {
+    if reason.len() > MAX_REASON_BYTES {
+        return Err(Error::Violation("reason phrase exceeds 1024 bytes"));
+    }
+    put_vi64(out, reason.len() as u64);
+    out.extend_from_slice(reason.as_bytes());
+    Ok(())
+}
+
+pub(crate) fn decode_reason(body: &mut Reader<'_>) -> Result<String> {
+    let len = body.vi64()?;
+    if len > MAX_REASON_BYTES as u64 {
+        return Err(Error::Violation("reason phrase exceeds 1024 bytes"));
+    }
+    Ok(String::from_utf8_lossy(body.take(len as usize)?).into_owned())
 }
 
 impl Subscribe {
@@ -114,9 +136,6 @@ impl RequestOk {
 
 impl RequestError {
     fn encode_body(&self, out: &mut Vec<u8>) -> Result<()> {
-        if self.reason.len() > MAX_REASON_BYTES {
-            return Err(Error::Violation("reason phrase exceeds 1024 bytes"));
-        }
         if self.redirect.is_some() != (self.code == ERROR_REDIRECT) {
             return Err(Error::Violation(
                 "a redirect goes with the REDIRECT error code and no other",
@@ -124,8 +143,7 @@ impl RequestError {
         }
         put_vi64(out, self.code);
         put_vi64(out, self.retry_interval);
-        put_vi64(out, self.reason.len() as u64);
-        out.extend_from_slice(self.reason.as_bytes());
+        encode_reason(&self.reason, out)?;
         if let Some(redirect) = &self.redirect {
             put_vi64(out, redirect.connect_uri.len() as u64);
             out.extend_from_slice(&redirect.connect_uri);
@@ -137,11 +155,7 @@ impl RequestError {
     fn decode_body(body: &mut Reader<'_>) -> Result<Self> {
         let code = body.vi64()?;
         let retry_interval = body.vi64()?;
-        let len = body.vi64()?;
-        if len > MAX_REASON_BYTES as u64 {
-            return Err(Error::Violation("reason phrase exceeds 1024 bytes"));
-        }
-        let reason = String::from_utf8_lossy(body.take(len as usize)?).into_owned();
+        let reason = decode_reason(body)?;
         let redirect = if code == ERROR_REDIRECT {
             let len = body.vi64()?;
             let connect_uri = body
@@ -171,6 +185,11 @@ pub enum Message {
     SubscribeOk(SubscribeOk),
     RequestOk(RequestOk),
     RequestError(RequestError),
+    RequestUpdate(RequestUpdate),
+    Publish(Publish),
+    PublishDone(PublishDone),
+    SubscribeTracks(SubscribeTracks),
+    GoAway(GoAway),
 }
 
 impl Message {
@@ -183,6 +202,11 @@ impl Message {
             Self::SubscribeOk(m) => m.encode_body(&mut body).map(|()| SUBSCRIBE_OK)?,
             Self::RequestOk(m) => m.encode_body(&mut body).map(|()| REQUEST_OK)?,
             Self::RequestError(m) => m.encode_body(&mut body).map(|()| REQUEST_ERROR)?,
+            Self::RequestUpdate(m) => m.encode_body(&mut body).map(|()| REQUEST_UPDATE)?,
+            Self::Publish(m) => m.encode_body(&mut body).map(|()| PUBLISH)?,
+            Self::PublishDone(m) => m.encode_body(&mut body).map(|()| PUBLISH_DONE)?,
+            Self::SubscribeTracks(m) => m.encode_body(&mut body).map(|()| SUBSCRIBE_TRACKS)?,
+            Self::GoAway(m) => m.encode_body(&mut body).map(|()| GOAWAY)?,
         };
         encode_frame(ty, &body, out)
     }
@@ -196,6 +220,13 @@ impl Message {
             SUBSCRIBE_OK => Self::SubscribeOk(SubscribeOk::decode_body(&mut frame.body)?),
             REQUEST_OK => Self::RequestOk(RequestOk::decode_body(&mut frame.body)?),
             REQUEST_ERROR => Self::RequestError(RequestError::decode_body(&mut frame.body)?),
+            REQUEST_UPDATE => Self::RequestUpdate(RequestUpdate::decode_body(&mut frame.body)?),
+            PUBLISH => Self::Publish(Publish::decode_body(&mut frame.body)?),
+            PUBLISH_DONE => Self::PublishDone(PublishDone::decode_body(&mut frame.body)?),
+            SUBSCRIBE_TRACKS => {
+                Self::SubscribeTracks(SubscribeTracks::decode_body(&mut frame.body)?)
+            }
+            GOAWAY => Self::GoAway(GoAway::decode_body(&mut frame.body)?),
             _ => return Err(Error::Violation("unknown or unsupported message type")),
         };
         frame.finish()?;
