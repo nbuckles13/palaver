@@ -11,5 +11,10 @@ repository.workspace = true
 [dependencies]
 palaver-moq-wire = { workspace = true }
 
+[features]
+# Compiles `sign::fake`, a stand-in for signatures that is NOT cryptography. For the simulator
+# and tests only. The guards crate checks that nothing which ships can turn this on.
+fake-crypto = []
+
 [lints]
 workspace = true
