@@ -9,7 +9,10 @@ use moqtap_codec::object_properties::{PropertyValue, parse_object_properties};
 use moqtap_codec::types::TrackNamespace;
 use moqtap_codec::varint::{Moqt18, VarInt};
 use moqtap_codec::version::DraftVersion;
-use palaver_moq_wire::{Kvp, Namespace, Reader, Value, decode_kvps, encode_kvps, put_vi64};
+use palaver_moq_wire::{
+    Frame, Kvp, Namespace, PALAVER_EXTENSIONS, PalaverExtensions, Reader, Setup as OurSetup, Value,
+    decode_kvps, encode_kvps, put_vi64,
+};
 
 /// Boundary values of every encoded length, plus a deterministic pseudo-random spread.
 fn interesting_integers() -> Vec<u64> {
@@ -180,4 +183,51 @@ fn the_oracle_parses_our_pairs_as_object_properties() {
             (other, _) => panic!("type {} parsed as {other:?}", pair.ty),
         }
     }
+}
+
+/// A whole SETUP message, framing included: identical bytes, and each side reads the other's.
+/// The oracle does not know our extension option and must carry it as an unknown one.
+#[test]
+fn setup_messages_match_the_oracle() {
+    let ours_value = OurSetup {
+        implementation: Some(String::from("palaver/0.0.0")),
+        max_filter_ranges: 4,
+        max_request_updates: 2,
+        palaver: Some(PalaverExtensions {
+            version: 1,
+            audio_top_n: 3,
+        }),
+    };
+    let mut ours = vec![];
+    ours_value.encode(&mut ours).unwrap();
+
+    let int = |ty: u64, v: u64| TapKvp {
+        key: VarInt::from_u64_moqt(ty),
+        value: KvpValue::Varint(VarInt::from_u64_moqt(v)),
+    };
+    let bytes = |ty: u64, v: &[u8]| TapKvp {
+        key: VarInt::from_u64_moqt(ty),
+        value: KvpValue::Bytes(v.to_vec()),
+    };
+    // version 1, top-N of 3, each as a one-byte integer
+    let options = vec![
+        int(0x06, 4),
+        bytes(0x07, b"palaver/0.0.0"),
+        int(0x08, 2),
+        bytes(PALAVER_EXTENSIONS, &[1, 3]),
+    ];
+    let mut theirs = BytesMut::new();
+    ControlMessage::Setup(Setup {
+        options: options.clone(),
+    })
+    .encode(&mut theirs)
+    .unwrap();
+    assert_eq!(ours, theirs, "moqtap-codec encodes SETUP differently");
+
+    let decoded = OurSetup::decode(Frame::decode(&mut Reader::new(&theirs)).unwrap()).unwrap();
+    assert_eq!(decoded, ours_value);
+    let ControlMessage::Setup(decoded) = ControlMessage::decode(&mut &ours[..]).unwrap() else {
+        panic!("not a SETUP message");
+    };
+    assert_eq!(decoded.options, options);
 }
