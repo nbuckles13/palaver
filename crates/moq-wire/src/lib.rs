@@ -3,6 +3,7 @@
 //! Sans-IO and allocation-light: decoding reads from a byte slice through [`Reader`], encoding
 //! appends to a `Vec<u8>`. Section numbers in comments refer to draft-ietf-moq-transport-22.
 
+mod datagram;
 mod error;
 mod frame;
 mod kvp;
@@ -14,9 +15,10 @@ mod request;
 mod setup;
 mod varint;
 
+pub use datagram::{Datagram, DatagramBody, ObjectStatus, PROPERTY_AUDIO_LEVEL, int_property};
 pub use error::{Error, Result};
 pub use frame::{Frame, MAX_BODY_BYTES, encode_frame};
-pub use kvp::{Kvp, Value, decode_kvps, encode_kvps};
+pub use kvp::{Kvp, KvpIter, Value, decode_kvps, encode_kvps};
 pub use name::{FullTrackName, Location, MAX_NAME_BYTES, MAX_NAMESPACE_FIELDS, Namespace};
 pub use params::{
     GroupOrder, LocationFilter, OK_PARAMS, PUBLISH_PARAMS, Params, REQUEST_UPDATE_PARAMS,

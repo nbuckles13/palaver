@@ -22,16 +22,26 @@ pub struct Kvp<'a> {
     pub value: Value<'a>,
 }
 
-/// Decode pairs until `r` is empty. `r` must cover exactly the pairs (use [`Reader::sub`] when
-/// a length precedes them), since nothing in the encoding marks the end.
-pub fn decode_kvps<'a>(r: &mut Reader<'a>) -> Result<Vec<Kvp<'a>>> {
-    let mut out = vec![];
-    let mut ty = 0u64;
-    while !r.is_empty() {
-        ty = ty
+/// Reads pairs one at a time without allocating. `r` must cover exactly the pairs (use
+/// [`Reader::sub`] when a length precedes them), since nothing in the encoding marks the end.
+#[derive(Debug, Clone)]
+pub struct KvpIter<'a> {
+    r: Reader<'a>,
+    ty: u64,
+}
+
+impl<'a> KvpIter<'a> {
+    pub fn new(r: Reader<'a>) -> Self {
+        Self { r, ty: 0 }
+    }
+
+    fn pair(&mut self) -> Result<Kvp<'a>> {
+        let r = &mut self.r;
+        self.ty = self
+            .ty
             .checked_add(r.vi64()?)
             .ok_or(Error::Violation("key-value type exceeds 2^64 - 1"))?;
-        let value = if ty.is_multiple_of(2) {
+        let value = if self.ty.is_multiple_of(2) {
             Value::Int(r.vi64()?)
         } else {
             let len = r.vi64()?;
@@ -40,9 +50,30 @@ pub fn decode_kvps<'a>(r: &mut Reader<'a>) -> Result<Vec<Kvp<'a>>> {
             }
             Value::Bytes(r.take(len as usize)?)
         };
-        out.push(Kvp { ty, value });
+        Ok(Kvp { ty: self.ty, value })
     }
-    Ok(out)
+}
+
+impl<'a> Iterator for KvpIter<'a> {
+    type Item = Result<Kvp<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.r.is_empty() {
+            return None;
+        }
+        let pair = self.pair();
+        if pair.is_err() {
+            self.r.rest(); // stop after the first error
+        }
+        Some(pair)
+    }
+}
+
+/// Decode pairs until `r` is empty; see [`KvpIter`] for what `r` must cover.
+pub fn decode_kvps<'a>(r: &mut Reader<'a>) -> Result<Vec<Kvp<'a>>> {
+    let pairs = KvpIter::new(r.clone()).collect();
+    r.rest();
+    pairs
 }
 
 /// Encode pairs, which must be sorted by type (equal types may repeat).
@@ -108,6 +139,17 @@ mod tests {
         // 2:7 | +3 len 2 "ab" | +0 len 1 "c" | +0x3efd (two bytes) : 87
         assert_eq!(wire, [2, 7, 3, 2, b'a', b'b', 0, 1, b'c', 0xbe, 0xfd, 87]);
         assert_eq!(decode_kvps(&mut Reader::new(&wire)).unwrap(), pairs);
+    }
+
+    #[test]
+    fn the_iterator_yields_pairs_then_stops_at_the_first_error() {
+        // 2:7, then odd type 3 claiming 9 bytes with 1 present, inside a declared region
+        let wire = [2, 7, 1, 9, 0xaa];
+        let mut outer = Reader::new(&wire);
+        let mut it = KvpIter::new(outer.sub(wire.len()).unwrap());
+        assert_eq!(it.next(), Some(Ok(int(2, 7))));
+        assert!(matches!(it.next(), Some(Err(Error::Violation(_)))));
+        assert_eq!(it.next(), None);
     }
 
     #[test]
