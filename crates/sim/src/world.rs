@@ -63,6 +63,11 @@ impl<E: Ord> World<E> {
         }));
     }
 
+    /// When the next event is due, if there is one.
+    pub fn next_at(&self) -> Option<Micros> {
+        self.queue.peek().map(|Reverse(next)| next.at)
+    }
+
     /// Deliver the next event, advancing the clock to its time. `None` when the queue is empty.
     pub fn step(&mut self) -> Option<(NodeId, E)> {
         let Reverse(next) = self.queue.pop()?;
@@ -70,6 +75,11 @@ impl<E: Ord> World<E> {
         self.delivered += 1;
         self.note(next.at ^ (u64::from(next.to) << 48));
         Some((next.to, next.event))
+    }
+
+    /// Move the clock forward to `time` if it is later than now. Events already due stay due.
+    pub fn advance_to(&mut self, time: Micros) {
+        self.now = self.now.max(time);
     }
 
     /// Mix a value into the trace fingerprint. Handlers call this with what they observed, so

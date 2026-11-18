@@ -3,6 +3,7 @@
 //! A discrete-event loop: a virtual clock, seeded randomness, and an event queue with a total
 //! order, so one seed always produces the same run. See `docs/spikes/05-simulator.md`.
 
+pub mod audio;
 mod rng;
 mod world;
 
