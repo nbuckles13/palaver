@@ -30,7 +30,7 @@ pub enum ObjectStatus {
 }
 
 impl ObjectStatus {
-    fn code(self) -> u64 {
+    pub(crate) fn code(self) -> u64 {
         match self {
             Self::Normal => 0x0,
             Self::EndOfGroup => 0x3,
@@ -38,7 +38,7 @@ impl ObjectStatus {
         }
     }
 
-    fn from_code(code: u64) -> Result<Self> {
+    pub(crate) fn from_code(code: u64) -> Result<Self> {
         match code {
             0x0 => Ok(Self::Normal),
             0x3 => Ok(Self::EndOfGroup),
@@ -49,7 +49,7 @@ impl ObjectStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DatagramBody<'a> {
+pub enum ObjectBody<'a> {
     Payload(&'a [u8]),
     Status(ObjectStatus),
 }
@@ -66,16 +66,16 @@ pub struct Datagram<'a> {
     pub end_of_group: bool,
     /// Object properties as encoded key-value pairs; empty means none.
     pub properties: &'a [u8],
-    pub body: DatagramBody<'a>,
+    pub body: ObjectBody<'a>,
 }
 
 impl<'a> Datagram<'a> {
     fn check(&self) -> Result<()> {
         match self.body {
-            DatagramBody::Status(_) if self.end_of_group => Err(Error::Violation(
+            ObjectBody::Status(_) if self.end_of_group => Err(Error::Violation(
                 "a status datagram cannot also be marked end of group",
             )),
-            DatagramBody::Status(status)
+            ObjectBody::Status(status)
                 if status != ObjectStatus::Normal && !self.properties.is_empty() =>
             {
                 Err(Error::Violation("only normal objects can have properties"))
@@ -100,7 +100,7 @@ impl<'a> Datagram<'a> {
         if self.priority.is_none() {
             flags |= DEFAULT_PRIORITY;
         }
-        if matches!(self.body, DatagramBody::Status(_)) {
+        if matches!(self.body, ObjectBody::Status(_)) {
             flags |= STATUS;
         }
         put_vi64(out, flags);
@@ -116,7 +116,7 @@ impl<'a> Datagram<'a> {
             put_vi64(out, self.properties.len() as u64);
             out.extend_from_slice(self.properties);
         }
-        if let DatagramBody::Status(status) = self.body {
+        if let ObjectBody::Status(status) = self.body {
             put_vi64(out, status.code());
         }
         Ok(())
@@ -125,7 +125,7 @@ impl<'a> Datagram<'a> {
     /// Append the whole datagram.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         self.encode_header(out)?;
-        if let DatagramBody::Payload(payload) = self.body {
+        if let ObjectBody::Payload(payload) = self.body {
             out.extend_from_slice(payload);
         }
         Ok(())
@@ -173,9 +173,9 @@ impl<'a> Datagram<'a> {
             if !r.is_empty() {
                 return Err(Error::Violation("a status datagram carries no payload"));
             }
-            DatagramBody::Status(status)
+            ObjectBody::Status(status)
         } else {
-            DatagramBody::Payload(r.rest())
+            ObjectBody::Payload(r.rest())
         };
         let datagram = Self {
             track_alias,
@@ -245,7 +245,7 @@ mod tests {
             priority: None,
             end_of_group: true,
             properties: &props,
-            body: DatagramBody::Payload(&payload),
+            body: ObjectBody::Payload(&payload),
         };
         let bytes = wire(&d);
         // flags, alias, group (2), properties length, property type, level
@@ -269,7 +269,7 @@ mod tests {
                 priority: (bits & 2 != 0).then_some(200),
                 end_of_group: bits & 4 != 0,
                 properties: if bits & 8 != 0 { &props } else { &[] },
-                body: DatagramBody::Payload(b"opus"),
+                body: ObjectBody::Payload(b"opus"),
             };
             assert_eq!(Datagram::decode(&wire(&d)), Ok(d), "bits {bits:04b}");
         }
@@ -289,7 +289,7 @@ mod tests {
                 priority: Some(0),
                 end_of_group: false,
                 properties: &[],
-                body: DatagramBody::Status(status),
+                body: ObjectBody::Status(status),
             };
             assert_eq!(Datagram::decode(&wire(&d)), Ok(d));
         }
@@ -300,7 +300,7 @@ mod tests {
             priority: None,
             end_of_group: false,
             properties: &[],
-            body: DatagramBody::Payload(&[]),
+            body: ObjectBody::Payload(&[]),
         };
         assert_eq!(Datagram::decode(&wire(&empty)), Ok(empty));
     }
@@ -315,7 +315,7 @@ mod tests {
             priority: Some(32),
             end_of_group: true,
             properties: &props,
-            body: DatagramBody::Payload(b"frame"),
+            body: ObjectBody::Payload(b"frame"),
         };
         let bytes = wire(&original);
         let received = Datagram::decode(&bytes).unwrap();
@@ -375,7 +375,7 @@ mod tests {
             priority: Some(1),
             end_of_group: false,
             properties: &props,
-            body: DatagramBody::Payload(&[]),
+            body: ObjectBody::Payload(&[]),
         };
         let bytes = wire(&d);
         for cut in 0..bytes.len() {
@@ -396,13 +396,13 @@ mod tests {
             priority: None,
             end_of_group: true,
             properties: &[],
-            body: DatagramBody::Status(ObjectStatus::Normal),
+            body: ObjectBody::Status(ObjectStatus::Normal),
         };
         assert!(matches!(base.encode(&mut vec![]), Err(Error::Violation(_))));
         let with_props = Datagram {
             end_of_group: false,
             properties: &props,
-            body: DatagramBody::Status(ObjectStatus::EndOfTrack),
+            body: ObjectBody::Status(ObjectStatus::EndOfTrack),
             ..base
         };
         assert!(matches!(

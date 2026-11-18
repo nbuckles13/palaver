@@ -13,9 +13,10 @@ mod publish;
 mod reader;
 mod request;
 mod setup;
+mod subgroup;
 mod varint;
 
-pub use datagram::{Datagram, DatagramBody, ObjectStatus, PROPERTY_AUDIO_LEVEL, int_property};
+pub use datagram::{Datagram, ObjectBody, ObjectStatus, PROPERTY_AUDIO_LEVEL, int_property};
 pub use error::{Error, Result};
 pub use frame::{Frame, MAX_BODY_BYTES, encode_frame};
 pub use kvp::{Kvp, KvpIter, Value, decode_kvps, encode_kvps};
@@ -34,4 +35,8 @@ pub use request::{
     RequestOk, SUBSCRIBE, SUBSCRIBE_OK, Subscribe, SubscribeOk,
 };
 pub use setup::{PALAVER_EXTENSIONS, PalaverExtensions, SETUP, Setup, negotiated_palaver_version};
+pub use subgroup::{
+    SubgroupHeader, SubgroupId, SubgroupObject, SubgroupReader, SubgroupWriter, UniStream,
+    uni_stream,
+};
 pub use varint::{put_vi64, vi64_len};
