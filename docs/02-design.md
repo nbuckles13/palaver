@@ -325,7 +325,9 @@ A **profile** of MoQT, deliberately small:
   (top-N) are used only on connections where both sides sent it; a peer that did not is treated
   as a plain draft 22 endpoint. The option is type `0x50414C57` (odd, so it carries bytes; not a
   grease value) holding a version and the sender's audio top-N; fields added by later versions
-  are ignored by older ones, and the lower of the two versions is the one in force.
+  are ignored by older ones, and the lower of the two versions is the one in force. The number
+  is self-assigned: the draft's setup option registry has no private-use range and asks for a
+  provisional registration, which we should request before interoperating with others.
 - **Transport**: iroh; always QUIC end to end, over a direct UDP path or an iroh-relay path.
   Introduction is done by members over the control tracks, with iroh-relay as the helper and
   fallback (spike 1); quinn as fallback; behind a trait that offers request streams, unidirectional

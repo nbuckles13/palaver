@@ -14,6 +14,10 @@ const MAX_FILTER_RANGES: u64 = 0x06;
 const MOQT_IMPLEMENTATION: u64 = 0x07;
 const MAX_REQUEST_UPDATES: u64 = 0x08;
 /// Our extension's setup option ("PALW"): odd, so it carries bytes, and not a grease value.
+///
+/// Self-assigned. The registry (section 16.4) has no private-use range and asks implementations
+/// that need a custom option to request a provisional registration; do that before this is
+/// used against other implementations.
 pub const PALAVER_EXTENSIONS: u64 = 0x5041_4c57;
 
 /// What a Palaver endpoint declares about our extensions.
