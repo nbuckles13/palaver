@@ -10,5 +10,11 @@ repository.workspace = true
 
 [dependencies]
 
+# Other MoQ codecs, used only by tests to cross-check our encodings (test oracles).
+[dev-dependencies]
+bytes = "1"
+moqtail = "0.18.0"
+moqtap-codec = { version = "0.13.0", default-features = false, features = ["draft22"] }
+
 [lints]
 workspace = true
