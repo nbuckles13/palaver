@@ -1,1 +1,12 @@
 //! The khef state machine: sessions, subscriptions, routing, top-N, priorities, dedupe.
+//!
+//! Everything here is on or next to the forwarding path, so beyond the workspace lints this
+//! crate refuses arithmetic that can overflow and indexing that can panic.
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)
+)]
+
+pub mod top_n;
+
+pub use top_n::{Micros, TopN, TopNConfig};
