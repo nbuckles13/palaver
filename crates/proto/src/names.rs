@@ -35,7 +35,9 @@ fn field(bytes: &[u8]) -> Option<Vec<u8>> {
     (!bytes.is_empty() && bytes.len() <= MAX_FIELD_BYTES).then(|| bytes.to_vec())
 }
 
-/// The opaque value that identifies a meeting on the wire, derived from the meeting secret.
+/// The opaque value that identifies a meeting on the wire. It is derived from the meeting
+/// secret (the derivation lives with admission, not here), so every member computes the same
+/// tag and it means nothing to anyone outside the meeting.
 /// Redacted in logs: it would let two log lines be tied to the same meeting.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MeetingTag(Redacted<Vec<u8>>);
@@ -51,7 +53,9 @@ impl MeetingTag {
     }
 }
 
-/// A node's short id within one meeting.
+/// A node's short id within one meeting: the first 16 bytes of a hash of its per-meeting
+/// public key (computed where the key lives, not here), so an id can be checked against the
+/// key that signs for it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParticipantId(Vec<u8>);
 

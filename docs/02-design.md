@@ -111,8 +111,18 @@ namespace = ( meeting, kind,  source, participant )    name = rendition
             ( m-7f3a , ctl  , plan )                 /  0
 ```
 
-`meeting` is an opaque value derived from the meeting secret and `participant` a short node id;
-nothing human-readable is on the wire. After subscription a track is a numeric alias. A standard
+`meeting` is an opaque **meeting tag** and `participant` a short node id; nothing human-readable
+is on the wire.
+
+- **Meeting tag**: derived from the meeting secret (a key-derivation output, truncated), so every
+  member computes it without negotiation, it reveals nothing to a relay outside the meeting,
+  and two meetings cannot collide. It is kept in every name even though the khef network is
+  per-meeting today, because a reachable headless khef or a public relay may carry several
+  meetings. A breakout gets its own tag, derived from the same secret plus a breakout id.
+- **Participant id**: the first 16 bytes of a hash of the node's per-meeting public key. It is
+  self-certifying: reports are signed, so anyone can check that an id belongs to the key that
+  signed, and no member can claim another's id. A device that rejoins with the same key keeps
+  its id; a new key is a new participant. After subscription a track is a numeric alias. A standard
 catalog track lists each participant's available tracks.
 
 ## 5. Control plane
