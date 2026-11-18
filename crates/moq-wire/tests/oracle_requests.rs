@@ -6,16 +6,18 @@
 
 use bytes::BytesMut;
 use moqtap_codec::draft22::message::{
-    ControlMessage, Redirect as TapRedirect, RequestError as TapRequestError,
-    RequestOk as TapRequestOk, Subscribe as TapSubscribe, SubscribeOk as TapSubscribeOk,
+    ControlMessage, GoAway as TapGoAway, Publish as TapPublish, PublishDone as TapPublishDone,
+    Redirect as TapRedirect, RequestError as TapRequestError, RequestOk as TapRequestOk,
+    RequestUpdate as TapRequestUpdate, Subscribe as TapSubscribe, SubscribeOk as TapSubscribeOk,
+    SubscribeTracks as TapSubscribeTracks,
 };
 use moqtap_codec::kvp::{KeyValuePair as TapKvp, KvpValue};
 use moqtap_codec::types::TrackNamespace;
 use moqtap_codec::varint::VarInt;
 use palaver_moq_wire::{
-    ERROR_REDIRECT, Frame, FullTrackName, GroupOrder, Kvp, Location, LocationFilter, Message,
-    Namespace, Params, Reader, Redirect, RequestError, RequestOk, Subscribe, SubscribeOk, Value,
-    encode_kvps, put_vi64,
+    ERROR_REDIRECT, Frame, FullTrackName, GoAway, GroupOrder, Kvp, Location, LocationFilter,
+    Message, Namespace, Params, Publish, PublishDone, Reader, Redirect, RequestError, RequestOk,
+    RequestUpdate, Subscribe, SubscribeOk, SubscribeTracks, Value, encode_kvps, put_vi64,
 };
 
 fn tap_int(ty: u64, v: u64) -> TapKvp {
@@ -255,4 +257,145 @@ fn request_error_matches_the_oracle_with_and_without_a_redirect() {
             }),
         }),
     );
+}
+
+#[test]
+fn publish_matches_the_oracle_with_every_parameter_it_allows() {
+    let mut properties = vec![];
+    encode_kvps(
+        &[Kvp {
+            ty: 0x3802,
+            value: Value::Int(7),
+        }],
+        &mut properties,
+    )
+    .unwrap();
+    assert_same(
+        Message::Publish(Publish {
+            request_id: 8,
+            track: our_track(),
+            track_alias: 17,
+            params: Params {
+                object_delivery_timeout: Some(500),
+                subgroup_delivery_timeout: Some(2000),
+                expires: Some(60_000),
+                largest_object: Some(Location {
+                    group: 300,
+                    object: 0,
+                }),
+                forward: Some(true),
+                subscriber_priority: Some(3),
+                location_filter: Some(LocationFilter::NextObject),
+                group_order: Some(GroupOrder::Ascending),
+                ..Params::default()
+            },
+            track_properties: properties,
+        }),
+        ControlMessage::Publish(TapPublish {
+            request_id: VarInt::from_u64_moqt(8),
+            track_namespace: tap_namespace(),
+            track_name: b"360p".to_vec(),
+            track_alias: VarInt::from_u64_moqt(17),
+            parameters: vec![
+                tap_int(0x02, 500),
+                tap_int(0x06, 2000),
+                tap_int(0x08, 60_000),
+                tap_raw(0x09, &[300, 0]),
+                tap_int(0x10, 1),
+                tap_int(0x20, 3),
+                tap_raw(0x21, &[5]),
+                tap_int(0x22, 1),
+            ],
+            track_properties: vec![tap_int(0x3802, 7)],
+        }),
+    );
+}
+
+#[test]
+fn publish_done_matches_the_oracle() {
+    assert_same(
+        Message::PublishDone(PublishDone {
+            status: 2,
+            stream_count: u64::MAX,
+            reason: String::from("track ended"),
+        }),
+        ControlMessage::PublishDone(TapPublishDone {
+            status_code: VarInt::from_u64_moqt(2),
+            stream_count: VarInt::from_u64_moqt(u64::MAX),
+            reason_phrase: b"track ended".to_vec(),
+        }),
+    );
+}
+
+#[test]
+fn subscribe_tracks_matches_the_oracle() {
+    let prefix: Vec<Vec<u8>> = ["m-7f3a", "audio", "main"]
+        .iter()
+        .map(|f| f.as_bytes().to_vec())
+        .collect();
+    assert_same(
+        Message::SubscribeTracks(SubscribeTracks {
+            request_id: 10,
+            prefix: Namespace::new(prefix.clone()).unwrap(),
+            params: Params {
+                forward: Some(true),
+                group_order: Some(GroupOrder::Descending),
+                include_properties: Some(false),
+                ..Params::default()
+            },
+        }),
+        ControlMessage::SubscribeTracks(TapSubscribeTracks {
+            request_id: VarInt::from_u64_moqt(10),
+            namespace_prefix: TrackNamespace(prefix),
+            parameters: vec![tap_int(0x10, 1), tap_int(0x22, 2), tap_int(0x35, 0)],
+        }),
+    );
+}
+
+#[test]
+fn request_update_matches_the_oracle_with_every_parameter_it_allows() {
+    assert_same(
+        Message::RequestUpdate(RequestUpdate {
+            request_id: 6,
+            params: Params {
+                object_delivery_timeout: Some(250),
+                subgroup_delivery_timeout: Some(1000),
+                forward: Some(false),
+                subscriber_priority: Some(9),
+                location_filter: Some(LocationFilter::AbsoluteStart(Location {
+                    group: 12,
+                    object: 0,
+                })),
+                new_group_request: Some(12),
+                ..Params::default()
+            },
+        }),
+        ControlMessage::RequestUpdate(TapRequestUpdate {
+            request_id: VarInt::from_u64_moqt(6),
+            parameters: vec![
+                tap_int(0x02, 250),
+                tap_int(0x06, 1000),
+                tap_int(0x10, 0),
+                tap_int(0x20, 9),
+                tap_raw(0x21, &[2, 12, 0]),
+                tap_int(0x32, 12),
+            ],
+        }),
+    );
+}
+
+#[test]
+fn goaway_matches_the_oracle_with_and_without_a_uri() {
+    for (uri, timeout) in [(&b""[..], 3000u64), (&b"moqt://khef.example/m"[..], 0)] {
+        assert_same(
+            Message::GoAway(GoAway {
+                new_session_uri: uri.to_vec(),
+                timeout,
+            }),
+            ControlMessage::GoAway(TapGoAway {
+                new_session_uri: uri.to_vec(),
+                timeout: VarInt::from_u64_moqt(timeout),
+            }),
+        );
+    }
 }
