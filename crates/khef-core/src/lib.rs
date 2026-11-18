@@ -7,6 +7,8 @@
     deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)
 )]
 
+pub mod dedupe;
 pub mod top_n;
 
+pub use dedupe::Dedupe;
 pub use top_n::{Micros, TopN, TopNConfig};
