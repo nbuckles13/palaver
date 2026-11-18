@@ -222,6 +222,8 @@ otherwise closed once the planned peerings are up.
   does not depend on DTX, only on something being sent with a level; we do not pre-process the
   signal to force DTX. (In spike 5 DTX did not engage on one real microphone's noise floor; to
   watch.) Each packet carries `audio_level`, computed on that frame with no smoothing lag.
+  It is object property `0x78` (in the draft's application range, one byte on the wire) with an
+  integer value from 0 to 127; a typical audio datagram header is 7 bytes.
   Opus in-band FEC and DRED are planned from the start. One object per group, in datagrams.
 - **Selection rule** (per khef, separately for each overlay link and for its own client; the
   candidates for a link are the tracks not learned from that link). The khef holds a selected
