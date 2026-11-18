@@ -10,10 +10,10 @@ repository.workspace = true
 
 [dependencies]
 
-# Other MoQ codecs, used only by tests to cross-check our encodings (test oracles).
+# An independent MoQ codec, used only by tests to cross-check our encodings (test oracle).
+# Kept to one small crate on purpose; MOQtail would add about 160 packages for its transport.
 [dev-dependencies]
 bytes = "1"
-moqtail = "0.18.0"
 moqtap-codec = { version = "0.13.0", default-features = false, features = ["draft22"] }
 
 [lints]

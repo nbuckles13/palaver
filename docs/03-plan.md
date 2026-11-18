@@ -42,7 +42,7 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
 
 ## Phase 1 — audio through khefs, headless first
 
-- `moq-wire` (our own draft 22 codec for the profile, cross-checked against MOQtail /
+- `moq-wire` (our own draft 22 codec for the profile, cross-checked against
   `moqtap-codec` in tests), `proto`, `khef-core`, `net` (QUIC + in-memory), `control` (reports and plan as
   tracks, flood rule), `sdk`, `bot`, `guards`.
 - Ticket join; creator is conductor; real plan format.
