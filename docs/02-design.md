@@ -84,7 +84,21 @@ K_topic = HKDF(root, "topic" ‖ time_epoch)   → rendezvous key; encrypts anno
 K_auth  = HKDF(root, "auth")                 → never published; input to a PAKE
 ```
 
-- **Rendezvous** is pluggable and merged: invite ticket (inviter's key and addresses), mDNS/LAN,
+- **Ticket**: the meeting secret, the iroh-relay URL, and one or more entry points, each a
+  public key with its addresses. It is a snapshot built from the current roster whenever someone
+  copies an invite (the copying node plus one or two others), not something that updates after
+  it is shared. It keeps working while any entry point is reachable at a listed address or
+  through the iroh-relay by key.
+- **Addresses**: a node is identified by its key; its addresses are hints. It advertises a
+  capped list (about eight): private and public IPv4 and routable IPv6, one per usable
+  interface; not loopback (a test option may add it, for machines with no network) and not
+  IPv6 link-local. A peer tries all of them and uses whichever answers. A node on two networks
+  therefore bridges them with no special handling. Every member learns every other member's
+  addresses; in code they are redacted like names. Addresses a node *observes* for its
+  neighbours (the introducer function) are added with NAT traversal.
+- **Derivations**: SHA-256 and HKDF. The meeting tag is an HKDF output of the meeting secret;
+  a participant id is the first 16 bytes of the SHA-256 of the node's public key.
+- **Rendezvous** is pluggable and merged: invite ticket (as above), mDNS/LAN,
   mainline DHT under `K_topic`, optionally Nostr relays or a public MoQ relay network.
 - **Reachability**: public STUN-like address discovery, port mapping, IPv6, hole punching with
   members as introducers. An **iroh-relay** (enabled by default, URL list configurable) covers
@@ -184,6 +198,28 @@ conductor issues a plan with the roster entry, default routes and planned peerin
 form, hole punching coordinated over the entry link; (7) the entry link is kept if planned,
 otherwise closed once the planned peerings are up.
 
+### Startup, step by step (phase 1, one network)
+
+- **Create**: the creator derives the tag and its id, starts endpoint, khef and client, and is
+  conductor. Its first plan is term 1 with a roster of one. The conductor logic is an ordinary
+  client of its own khef: it reads reports and publishes the plan through subscriptions like
+  any other node.
+- **Connect**: khef-to-khef connections use a Palaver protocol identifier with a version,
+  distinct from the standard MoQ one, which is kept for a future standard client edge.
+- **Admission in phase 1**: each side proves knowledge of the meeting secret, bound to the
+  connection, before any MoQ message. The password handshake replaces this in phase 4.
+- **Control flood**: on connect each khef sends `SUBSCRIBE_TRACKS` for the control prefix. The
+  other side answers with a `PUBLISH` per control track and sends the latest group it holds of
+  each, then new ones as they arrive. Control objects travel on streams, not datagrams (a plan
+  is several kilobytes). An object is never sent back to the neighbour it came from.
+- **Roster**: the conductor adds any admitted node whose report verifies, and drops a node
+  after 3 seconds without a report. Host approval and meeting lock come later.
+- **Peerings**: on one network the node with the lower participant id dials. With NAT
+  traversal both dial at once and one connection is kept by the same tie-break.
+- **Audio wiring**: for each overlay link in the plan, each khef sends `SUBSCRIBE_TRACKS` for
+  the audio prefix; every audio track is announced with `PUBLISH`; top-N gates only the
+  datagrams. N comes from the plan, which every node holds.
+
 ### Conductor leave, crash, partition
 
 - **Leave**: publish a final plan naming the successor with `term + 1` (the successor already
@@ -246,9 +282,17 @@ otherwise closed once the planned peerings are up.
   starts/ends tracks as the selection changes; the client learns who is speaking from the names.
 - **Top-N is our extension**, modelled on the individual "MOCHA meetings" draft; the transport
   draft has only range filters.
-- **Between khefs** the plan pre-wires one audio overlay: a loop-free tree that reaches every
+- **Between khefs** the plan pre-wires the audio overlay: loop-free trees that each reach every
   node, as standing top-N subscriptions. Top-N runs only on overlay links, not on every link a
-  khef holds. (A second tree for crash failover is deferred; Opus DRED may cover loss.)
+  khef holds.
+- **Two trees, with no node in the middle of both.** Losing any one node, the conductor's
+  included, cuts at most one tree, so audio continues with no gap and no re-plan. Audio is sent
+  on both and deduplicated at each khef; it is small enough that twice costs little. Phase 1
+  runs one tree; the second arrives in phase 3 with crash handling. Until then, losing a node
+  in the middle of the tree stops audio between the parts it joined until a new plan is issued,
+  and if that node was the conductor no plan comes (takeover is also phase 3).
+- **Audio timing**: one object per group, the group id being the frame counter, advancing
+  through silence. The receiver gets timing from it with no extra field.
 - **Every audio track is announced along the whole overlay at join**, so aliases and forwarding
   state exist at every khef before anyone speaks. Top-N gates only the data. This is what keeps
   the first syllable of a new speaker.
@@ -358,10 +402,12 @@ A **profile** of MoQT, deliberately small:
   cross-checking encodings in tests (it brings 8 packages; MOQtail was dropped as a second
   oracle because its transport brings about 160, and can be added temporarily to break a tie).
 - **Extension negotiation**: every khef and Palaver client sends a Palaver setup option in
-  `SETUP` (unknown setup options are ignored by other implementations). Our request parameters
-  (top-N) are used only on connections where both sides sent it; a peer that did not is treated
-  as a plain draft 22 endpoint. The option is type `0x50414C57` (odd, so it carries bytes; not a
-  grease value) holding a version and the sender's audio top-N; fields added by later versions
+  `SETUP` (unknown setup options are ignored by other implementations). Our behaviour beyond
+  the draft (top-N selection on the audio prefix, the control flood) applies only on
+  connections where both sides sent it; a peer that did not is treated as a plain draft 22
+  endpoint. The option is type `0x50414C57` (odd, so it carries bytes; not a grease value)
+  holding a version. The N of top-N is not here: it comes from the plan, which every node
+  holds. Fields added by later versions
   are ignored by older ones, and the lower of the two versions is the one in force. The number
   is self-assigned: the draft's setup option registry has no private-use range and asks for a
   provisional registration, which we should request before interoperating with others.
@@ -455,7 +501,7 @@ queue, link and fault model, invariants checked as it runs); see `docs/spikes/05
 | Scale | 25–50 participants, single conductor; multi-khef from the start |
 | Architecture | MoQ-based: edge khef per node, named tracks, routing tables, control as tracks |
 | Subscribe resolution | Routing table, longest-prefix match; default per-participant routes; conductor not in the path; unroutable subscribes held pending |
-| Audio | Top-N selected by khefs over one pre-wired loop-free overlay; loudness-ranked, fast in, slow out; all audio tracks announced at join; DTX, FEC and DRED |
+| Audio | Top-N selected by khefs over a pre-wired overlay of two loop-free trees sharing no middle node (one tree in phase 1); loudness-ranked, fast in, slow out; all audio tracks announced at join; DTX, FEC and DRED |
 | Rendition switching | Receiver-side by default; khef-side track swap allowed if the rate-control spike finds a clean way |
 | Local client↔khef | In-memory MoQ-formatted messages; no sockets, QUIC or crypto |
 | Network edge | Conformant to the pinned draft for our profile |

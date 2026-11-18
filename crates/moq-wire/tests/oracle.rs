@@ -193,10 +193,7 @@ fn setup_messages_match_the_oracle() {
         implementation: Some(String::from("palaver/0.0.0")),
         max_filter_ranges: 4,
         max_request_updates: 2,
-        palaver: Some(PalaverExtensions {
-            version: 1,
-            audio_top_n: 3,
-        }),
+        palaver: Some(PalaverExtensions { version: 1 }),
     };
     let mut ours = vec![];
     ours_value.encode(&mut ours).unwrap();
@@ -209,12 +206,12 @@ fn setup_messages_match_the_oracle() {
         key: VarInt::from_u64_moqt(ty),
         value: KvpValue::Bytes(v.to_vec()),
     };
-    // version 1, top-N of 3, each as a one-byte integer
+    // version 1 as a one-byte integer
     let options = vec![
         int(0x06, 4),
         bytes(0x07, b"palaver/0.0.0"),
         int(0x08, 2),
-        bytes(PALAVER_EXTENSIONS, &[1, 3]),
+        bytes(PALAVER_EXTENSIONS, &[1]),
     ];
     let mut theirs = BytesMut::new();
     ControlMessage::Setup(Setup {
