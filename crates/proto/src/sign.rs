@@ -7,8 +7,8 @@
 //! into another meeting, or as a newer one.
 //!
 //! This crate does no cryptography. Keys, signing and hashing are supplied through the
-//! [`Signer`] and [`Verifier`] traits by whoever owns the node's identity; the simulator
-//! supplies fakes.
+//! [`Signer`] and [`Verifier`] traits by whoever owns the node's identity. The simulator and
+//! tests use `sign::fake`, which exists only in test builds and under the `fake-crypto` feature.
 
 use crate::fields::DecodeError;
 use crate::{MeetingTag, ParticipantId};
@@ -135,7 +135,9 @@ impl<'a> Sealed<'a> {
 }
 
 /// A stand-in for real signatures, for tests and the simulator. NOT cryptography: the "public
-/// key" is all it takes to sign.
+/// key" is all it takes to sign. Compiled only for this crate's tests and under the
+/// `fake-crypto` feature, which the guards crate keeps out of anything that ships.
+#[cfg(any(test, feature = "fake-crypto"))]
 pub mod fake {
     use super::*;
 

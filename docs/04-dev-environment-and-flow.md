@@ -162,6 +162,10 @@ ownership, which Palaver does not have. The families and the lessons transfer:
    crates cannot depend on a runtime or on `net`, and `khef-core` cannot depend on `media`.
 4. **Guard tests** in the `guards` crate. Small Rust checks for what is left: test integrity, wire-version bump,
    reference integrity. Each is one module with its own self-test.
+   Also there: **test-only features**. `palaver-proto`'s `fake-crypto` feature compiles a signer
+   anyone can forge, for the simulator and tests. No test can notice it switched on in a real
+   build, because tests use it too, so a guard over `cargo metadata` checks that only the
+   simulator may enable it and that nothing which ships depends on the simulator.
 5. **Reviewer checklist.** Only for what needs judgement.
 
 **Rules for guards themselves** (dark_tower learned each the hard way):

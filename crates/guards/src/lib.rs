@@ -11,3 +11,4 @@
 pub mod integrity;
 pub mod layering;
 pub mod repo;
+pub mod test_only;
