@@ -317,8 +317,9 @@ A **profile** of MoQT, deliberately small:
 - **Draft**: pinned to **draft 22**. Khef logic is ours, and so is the codec: `moq-wire`
   implements only the messages in this profile (spike 4). The draft closes a session on an
   unknown request parameter, and no existing Rust codec lets an application register one, so
-  top-N cannot go through them. MOQtail and `moqtap-codec` are dev-only dependencies for
-  cross-checking encodings in unit tests and for interop tests.
+  top-N cannot go through them. `moqtap-codec` is a dev-only dependency for
+  cross-checking encodings in tests (it brings 8 packages; MOQtail was dropped as a second
+  oracle because its transport brings about 160, and can be added temporarily to break a tie).
 - **Extension negotiation**: every khef and Palaver client sends a Palaver setup option in
   `SETUP` (unknown setup options are ignored by other implementations). Our request parameters
   (top-N) are used only on connections where both sides sent it; a peer that did not is treated
@@ -417,7 +418,7 @@ queue, link and fault model, invariants checked as it runs); see `docs/spikes/05
 | Rendition switching | Receiver-side by default; khef-side track swap allowed if the rate-control spike finds a clean way |
 | Local client↔khef | In-memory MoQ-formatted messages; no sockets, QUIC or crypto |
 | Network edge | Conformant to the pinned draft for our profile |
-| Draft / codec | Draft 22; our own codec in `moq-wire` for our profile; MOQtail / `moqtap-codec` as test oracles and for interop tests |
+| Draft / codec | Draft 22; our own codec in `moq-wire` for our profile; `moqtap-codec` as the test oracle |
 | Transport | iroh; members introduce, iroh-relay as helper and last-resort path; quinn as fallback |
 | Link preference | Direct, then via a transit khef, then iroh-relay path (media only if nothing else) |
 | Naming | **khef** = the MoQ relay in each node; **iroh-relay** = iroh's connection helper |
