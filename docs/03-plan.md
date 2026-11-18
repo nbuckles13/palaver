@@ -45,7 +45,12 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
 - `moq-wire` (our own draft 22 codec for the profile, cross-checked against
   `moqtap-codec` in tests), `proto`, `khef-core`, `net` (QUIC + in-memory), `control` (reports and plan as
   tracks, flood rule), `sdk`, `bot`, `guards`.
-- Ticket join; creator is conductor; real plan format.
+- Ticket join (several entry points, multiple addresses per node); creator is conductor; real
+  plan format; one audio overlay tree. Known limit until phase 3: if a node in the middle of
+  the tree leaves, audio between the parts it joined stops until a new plan, and if it was the
+  conductor there is none.
+- `moq-wire` also needs subgroup streams in this phase: control tracks are too large for
+  datagrams.
 - Audio: capture → processing → Opus → datagram objects → khefs → jitter buffer → playout;
   top-N in its simplest form; synthetic sources.
 - Simulator tests from day one, including a three-node line with no A–C link.
@@ -70,7 +75,8 @@ joining by link, media crossing more than one khef.
 - Reports with health and link metrics; scored, capacity-aware plans; hysteresis.
 - Graceful transit-khef leave/resignation, make-before-break; simulator invariant "zero lost
   objects" and a real-network audio-continuity test.
-- Contingency next-hops and crash recovery with a measured bound; decide whether audio needs a second overlay tree.
+- Contingency next-hops and crash recovery with a measured bound; the second audio overlay tree
+  (no node in the middle of both), so losing any one node leaves audio uninterrupted.
 - Conductor hand-over within the 3 s cap; succession on crash.
 - **Rate-control spike** (end of phase): throttle the middle link of a khef chain and the
   publisher uplink; compare receiver-side switching with khef-side track swap; decide the

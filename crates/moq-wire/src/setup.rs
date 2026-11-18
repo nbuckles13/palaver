@@ -20,20 +20,18 @@ const MAX_REQUEST_UPDATES: u64 = 0x08;
 /// used against other implementations.
 pub const PALAVER_EXTENSIONS: u64 = 0x5041_4c57;
 
-/// What a Palaver endpoint declares about our extensions.
+/// What a Palaver endpoint declares about our extensions. Only a version: the N of top-N audio
+/// selection comes from the plan, which every node holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PalaverExtensions {
     /// Version of the extension set the sender implements.
     pub version: u64,
-    /// The N the sender uses for top-N audio selection; 0 if it does not use it.
-    pub audio_top_n: u64,
 }
 
 impl PalaverExtensions {
     fn encode(&self) -> Vec<u8> {
         let mut out = vec![];
         put_vi64(&mut out, self.version);
-        put_vi64(&mut out, self.audio_top_n);
         out
     }
 
@@ -41,10 +39,7 @@ impl PalaverExtensions {
     fn decode(bytes: &[u8]) -> Result<Self> {
         let mut outer = Reader::new(bytes);
         let mut r = outer.sub(bytes.len())?;
-        Ok(Self {
-            version: r.vi64()?,
-            audio_top_n: r.vi64()?,
-        })
+        Ok(Self { version: r.vi64()? })
     }
 }
 
@@ -155,10 +150,7 @@ mod tests {
             implementation: Some(String::from("palaver/0.0.0")),
             max_filter_ranges: 4,
             max_request_updates: 2,
-            palaver: Some(PalaverExtensions {
-                version: 1,
-                audio_top_n: 3,
-            }),
+            palaver: Some(PalaverExtensions { version: 1 }),
         }
     }
 
@@ -255,10 +247,7 @@ mod tests {
         encode_frame(SETUP, &body, &mut bytes).unwrap();
         assert_eq!(
             parse(&bytes).unwrap().palaver,
-            Some(PalaverExtensions {
-                version: 2,
-                audio_top_n: 5
-            })
+            Some(PalaverExtensions { version: 2 })
         );
     }
 
@@ -268,7 +257,7 @@ mod tests {
         encode_kvps(
             &[Kvp {
                 ty: PALAVER_EXTENSIONS,
-                value: Value::Bytes(&[1]),
+                value: Value::Bytes(&[0x80]), // the first byte of a two-byte integer
             }],
             &mut body,
         )
@@ -290,10 +279,7 @@ mod tests {
         let plain = Setup::default();
         let v1 = full();
         let v2 = Setup {
-            palaver: Some(PalaverExtensions {
-                version: 2,
-                audio_top_n: 3,
-            }),
+            palaver: Some(PalaverExtensions { version: 2 }),
             ..Setup::default()
         };
         assert_eq!(negotiated_palaver_version(&v1, &plain), None);
