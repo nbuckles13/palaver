@@ -65,6 +65,11 @@ impl ParticipantId {
         field(bytes).map(Self)
     }
 
+    /// The id for a node whose public key hashes to `hash` (the first 16 bytes of the hash).
+    pub fn from_key_hash(hash: [u8; 16]) -> Self {
+        Self(hash.to_vec())
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

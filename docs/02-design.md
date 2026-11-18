@@ -138,6 +138,31 @@ catalog track lists each participant's available tracks.
 - **Dissemination**: the `(m, ctl)` prefix has one hard-wired rule needing no plan — forward to
   every neighbour, dedupe by (track, group, object). The conductor needs a path to each node, not
   a connection. Plans go as deltas with full snapshots on join and on mismatch.
+- **Encoding**: numbered fields as MoQ key-value pairs (even numbers carry integers, odd ones
+  bytes; a nested structure is a bytes field; a repeated field repeats its number). A reader
+  skips numbers it does not know, so nodes on different app versions can share a meeting. A
+  number is never reused.
+- **Signing**: the object is `payload | signature`, signed as sent with the node's per-meeting
+  key, so no canonical encoding is needed. The signed bytes also carry a label for the kind of
+  object, the meeting tag and the sequence number, which stops replay as another kind, into
+  another meeting, or as a newer object. A report carries its public key, and the receiver
+  checks the key hashes to the participant id in the track name. A plan is signed by its
+  conductor, whose key is in the roster. `proto` does no cryptography: signing and verifying
+  come through traits.
+- **Who may issue a plan**: a node adopts a plan of the same term only from the same conductor
+  with a later generation, and a plan of the next term only if its conductor is on the held
+  plan's successor list. A joiner has nothing to check against and adopts the first verified
+  plan it receives.
+- **On tracks**: each report is one object in a new group, the group id being its sequence
+  number. A plan's group id is its term (high half) and generation, so ids keep rising across a
+  change of conductor. A khef keeps the latest group of every control track, so a joiner
+  subscribing from the current group gets the plan and every report without `FETCH`.
+- **Cadence**: a node sends a report once a second, and at once on change. Phase 1 sends whole
+  plans, not deltas.
+- **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
+  RTT), unreachable peers, last plan applied. Plan: term and generation, conductor, roster,
+  peerings, audio overlay tree and N, successor list. The rest of the lists above arrives as
+  new field numbers.
 - **Everyone holds the whole plan; transit khefs and successors hold all reports.**
 - No gossip library: one conductor means nothing to agree on, and 50 nodes are few enough to
   flood. Multiple conductors (later) would each own a disjoint set of publishers; shared state
