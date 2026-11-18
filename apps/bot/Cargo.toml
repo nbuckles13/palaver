@@ -1,0 +1,15 @@
+[package]
+name = "palaver-bot"
+description = "Headless reference client: synthetic or file media, scripted behaviour, metrics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+palaver-sdk = { workspace = true }
+
+[lints]
+workspace = true

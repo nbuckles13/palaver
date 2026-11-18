@@ -7,7 +7,10 @@ latency. Those roles can move without interrupting media.
 
 Why: lower cost, more privacy, no dependency on servers being up, minimal IT roll-out.
 
-Status: design exploration. Open source (licence to be chosen; permissive).
+Status: design and phase 0 spikes done; workspace skeleton in place, no working product yet.
+
+Licence: dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Contributions are accepted under the same terms.
 
 ## Documents
 

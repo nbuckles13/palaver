@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nbuckles13/palaver"
+
+[workspace.dependencies]
+palaver-moq-wire = { path = "crates/moq-wire" }
+palaver-proto = { path = "crates/proto" }
+palaver-khef-core = { path = "crates/khef-core" }
+palaver-topology = { path = "crates/topology" }
+palaver-control = { path = "crates/control" }
+palaver-net = { path = "crates/net" }
+palaver-media = { path = "crates/media" }
+palaver-sdk = { path = "crates/sdk" }
+palaver-sim = { path = "crates/sim" }
+serde_json = "1"
+
+# Guards, mechanism 2 (docs/04): lints every crate inherits.
+[workspace.lints.rust]
+# Crates that wrap a C library override this one lint and nothing else.
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "deny"

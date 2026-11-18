@@ -1,0 +1,20 @@
+# Sans-IO crate: no clock, threads, sockets, ambient randomness or randomly ordered maps.
+# Kept identical across sans-IO crates; the guards crate checks that.
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "sans-IO: time is an input" },
+    { path = "std::thread::spawn", reason = "sans-IO: single-threaded state machines" },
+    { path = "std::time::Instant::now", reason = "sans-IO: time is an input" },
+    { path = "std::time::SystemTime::now", reason = "sans-IO: time is an input" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is random; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order is random; use BTreeSet" },
+    { path = "std::net::UdpSocket", reason = "sans-IO: no sockets" },
+    { path = "std::net::TcpStream", reason = "sans-IO: no sockets" },
+    { path = "std::net::TcpListener", reason = "sans-IO: no sockets" },
+]

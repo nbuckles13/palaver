@@ -1,0 +1,5 @@
+# The e2e crate runs in real time, so real sleeps are allowed here.
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

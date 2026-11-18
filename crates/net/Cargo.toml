@@ -1,0 +1,16 @@
+[package]
+name = "palaver-net"
+description = "Transport: QUIC (iroh) and in-memory links behind one trait; admission handshake."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+palaver-moq-wire = { workspace = true }
+palaver-proto = { workspace = true }
+
+[lints]
+workspace = true

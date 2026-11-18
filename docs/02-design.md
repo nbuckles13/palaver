@@ -409,7 +409,7 @@ queue, link and fault model, invariants checked as it runs); see `docs/spikes/05
 
 | Topic | Decision |
 |---|---|
-| Name / licence | Palaver; open source, permissive; no GPL or static-LGPL dependencies |
+| Name / licence | Palaver; MIT OR Apache-2.0; no GPL or static-LGPL dependencies |
 | Scale | 25–50 participants, single conductor; multi-khef from the start |
 | Architecture | MoQ-based: edge khef per node, named tracks, routing tables, control as tracks |
 | Subscribe resolution | Routing table, longest-prefix match; default per-participant routes; conductor not in the path; unroutable subscribes held pending |

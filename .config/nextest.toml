@@ -1,0 +1,15 @@
+# Time budgets (docs/04-dev-environment-and-flow.md). A test over its hard limit is killed.
+[profile.default]
+default-filter = "not package(palaver-e2e)"
+# unit and guard tests: hard limit 1 s
+slow-timeout = { period = "500ms", terminate-after = 2 }
+fail-fast = false
+
+# simulation and integration tests, and the guards that shell out to cargo: hard limit 5 s
+[[profile.default.overrides]]
+filter = "package(palaver-sim) | package(palaver-guards) | kind(test)"
+slow-timeout = { period = "1s", terminate-after = 5 }
+
+[profile.e2e]
+default-filter = "package(palaver-e2e)"
+slow-timeout = { period = "10s", terminate-after = 3 }

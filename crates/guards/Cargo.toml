@@ -1,0 +1,15 @@
+[package]
+name = "palaver-guards"
+description = "Repository guards: checks on the code and repository that tests cannot hold."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

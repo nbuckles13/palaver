@@ -1,0 +1,15 @@
+[package]
+name = "palaver-harness"
+description = "Developer harness UI (egui) for manual sessions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+palaver-sdk = { workspace = true }
+
+[lints]
+workspace = true

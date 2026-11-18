@@ -1,0 +1,18 @@
+[package]
+name = "palaver-sim"
+description = "Deterministic multi-node simulator over the sans-IO cores."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+palaver-khef-core = { workspace = true }
+palaver-control = { workspace = true }
+palaver-topology = { workspace = true }
+palaver-proto = { workspace = true }
+
+[lints]
+workspace = true

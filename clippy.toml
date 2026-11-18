@@ -1,0 +1,10 @@
+# Workspace default. A crate with its own clippy.toml replaces this file entirely (clippy does
+# not merge), so the per-crate files repeat these keys.
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "no real sleeps outside the e2e crate; use virtual time" },
+]

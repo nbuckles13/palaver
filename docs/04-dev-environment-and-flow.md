@@ -147,10 +147,15 @@ ownership, which Palaver does not have. The families and the lessons transfer:
 
 **Mechanism, cheapest first.** A rule goes to the first mechanism that can hold it:
 
-1. **Types.** Secret material lives in a wrapper with no `Debug`/`Display`/`Serialize`; addresses
-   and names in a wrapper that redacts by default. Leaks become compile errors.
-2. **Clippy configuration.** Deny `unwrap`/`expect`/`panic` outside tests; `unsafe` forbidden
-   outside FFI crates; per-crate `disallowed-methods`/`-types`/`-macros` ban `Instant::now`,
+1. **Types.** Secret material lives in a wrapper (`proto::Secret`) with no `Display` or
+   `Serialize` and a `Debug` that prints a fixed placeholder, so structs holding one can still
+   derive `Debug`; addresses and names live in a wrapper (`proto::Redacted`) that redacts by
+   default. Reading either is an explicit call (`expose`, `reveal`), which is the audit surface.
+2. **Clippy configuration.** Deny `unwrap`/`expect`/`panic` outside tests, everywhere, including
+   crates that wrap C: every C return code becomes a `Result`. `unsafe` is forbidden outside
+   those crates; inside them each `unsafe` block needs a safety comment, there is one small crate
+   per C library exposing only a safe API, callbacks invoked from C catch panics, and the
+   stricter indexing and arithmetic lints are on (also for the forwarding path); per-crate `disallowed-methods`/`-types`/`-macros` ban `Instant::now`,
    `SystemTime`, thread RNG, unbounded channels and log macros where they must not appear.
 3. **Dependency rules.** `cargo deny` for the licence allow-list (how "permissive, no GPL" is
    enforced), advisories and duplicates; a layering check over `cargo metadata` so the sans-IO
