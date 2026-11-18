@@ -9,6 +9,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+palaver-moq-wire = { workspace = true }
 
 [lints]
 workspace = true
