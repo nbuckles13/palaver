@@ -545,13 +545,23 @@ A **profile** of MoQT, deliberately small:
     most 16 such streams). An object too large, or a stream cut short, costs the stream,
     not the session.
   - Video needs the streaming form (payload passed on as it arrives); it comes with video.
-- **Open: one alias per track, meeting-wide.** Today each khef picks its own alias for a
-  track on each link, as the draft intends, so a forwarded audio datagram has its header
-  rewritten and is copied once per outgoing link (about 87 bytes). If every khef used the
-  same alias for a track, derived from the track's name, a datagram could be forwarded
-  byte for byte: no parse beyond the level, no rewrite, one shared buffer for all links.
-  The draft allows a publisher to choose any alias; the cost is that two tracks whose
-  names hash alike collide (negligible at 62 bits, and detectable).
+- **One alias per track, meeting-wide.** The draft has each publisher pick an alias per
+  connection, so a khef forwarding a datagram would rewrite its header and copy it once per
+  outgoing link. Instead every khef uses the same alias for a track, so a datagram is
+  forwarded byte for byte: no rewrite, one shared buffer for all links, no per-link alias
+  map on the forwarding path. The session takes the alias from the khef and refuses one
+  already in use on that connection.
+- **Open: where the alias comes from.** It is in every packet, so its size matters: a
+  number up to 127 takes one byte, up to 16,383 two, and one drawn from 62 bits nine. On an
+  80-byte audio frame that is 87, 88 or 95 bytes. Options:
+  1. *From the track's name* (a hash): needs no coordination and works before a node is in
+     the plan, but must be wide to make collisions negligible and hard to contrive, so it
+     costs 8 bytes a packet (about 3 kbit/s per audio track).
+  2. *From the plan*: the conductor gives each member a small number and the alias is that
+     number with the kind of track; one or two bytes, no collisions, but only for tracks of
+     nodes the plan already lists.
+  3. *Both*: plan-assigned small aliases for media, name-derived wide ones for control
+     tracks, which must flow before a node is in the plan and whose objects are rare.
 - **Rules from the khef spike**: group ids count for the life of a track; hold data streams whose
   alias is not known yet; linger before unsubscribing upstream; release an old upstream only once
   the new one delivers a group start; bounded dedupe window.

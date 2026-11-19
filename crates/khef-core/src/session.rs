@@ -11,7 +11,9 @@
 //! The two requests khefs use with each other:
 //!
 //! - SUBSCRIBE_TRACKS: "announce to me every track under this prefix";
-//! - PUBLISH: "here is a track, and the alias its objects will carry".
+//! - PUBLISH: "here is a track, and the alias its objects will carry". The alias is a
+//!   short number standing for the track's name on the wire. The khef supplies it, the same
+//!   one for a track on every link of the meeting.
 //!
 //! And objects, two ways:
 //!
@@ -205,7 +207,6 @@ pub struct Session {
     closed: bool,
     next_stream: u64,
     next_request_id: u64,
-    next_alias: u64,
     /// The peer's control stream, once seen.
     their_control: Option<StreamId>,
     inbound: BTreeMap<StreamId, Inbound>,
@@ -239,7 +240,6 @@ impl Session {
                 Role::Client => 0,
                 Role::Server => 1,
             },
-            next_alias: 0,
             their_control: None,
             inbound: BTreeMap::new(),
             incoming: BTreeMap::new(),
@@ -319,14 +319,19 @@ impl Session {
         Some(stream)
     }
 
-    /// Announce a track to the peer. Returns the alias its objects must carry; they may be
-    /// sent at once, before the peer answers. `None` if the session is closed.
-    pub fn publish(&mut self, track: FullTrackName) -> Option<u64> {
-        if self.closed {
-            return None;
+    /// Announce a track to the peer, under `alias`. Its objects may be sent at once, before
+    /// the peer answers.
+    ///
+    /// The caller chooses the alias, and every khef in a meeting chooses the same one for
+    /// the same track (it is derived from the track's name). That is what lets a khef pass
+    /// a datagram on exactly as it arrived, to any number of links, without rewriting it.
+    ///
+    /// `false`, sending nothing, if the session is closed or `alias` is already in use for
+    /// another track we are publishing here.
+    pub fn publish(&mut self, track: FullTrackName, alias: u64) -> bool {
+        if self.closed || self.publishing(alias) {
+            return false;
         }
-        let alias = self.next_alias;
-        self.next_alias = self.next_alias.saturating_add(1);
         let message = Message::Publish(Publish {
             request_id: self.take_request_id(),
             track,
@@ -337,7 +342,9 @@ impl Session {
             },
             track_properties: Vec::new(),
         });
-        let stream = self.request(&message)?;
+        let Some(stream) = self.request(&message) else {
+            return false;
+        };
         self.outgoing.insert(
             stream,
             Outgoing::Track {
@@ -345,7 +352,7 @@ impl Session {
                 answered: false,
             },
         );
-        Some(alias)
+        true
     }
 
     /// Tell the peer a track we announced has ended.
