@@ -15,6 +15,11 @@
 //!   came before it (DRED);
 //! - [`Decoder::conceal`]: nothing is here, guess.
 #![allow(unsafe_code)]
+// As on the forwarding path: no arithmetic that can overflow, no indexing that can panic.
+#![cfg_attr(
+    not(test),
+    deny(clippy::arithmetic_side_effects, clippy::indexing_slicing)
+)]
 
 use core::ffi::c_int;
 use core::ptr::NonNull;
