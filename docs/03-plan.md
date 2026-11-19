@@ -73,6 +73,8 @@ joining by link, media crossing more than one khef.
 ## Phase 3 — the thesis: khefs and conductor move
 
 - Reports with health and link metrics; scored, capacity-aware plans; hysteresis.
+- Hitless rebalancing of a working meeting, for latency and to move load off congested
+  links: make-before-break for video routes and for the audio tree (design section 6).
 - Graceful transit-khef leave/resignation, make-before-break; simulator invariant "zero lost
   objects" and a real-network audio-continuity test.
 - Contingency next-hops and crash recovery with a measured bound; the second audio overlay tree
