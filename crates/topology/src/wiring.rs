@@ -13,7 +13,8 @@
 //!   links unless that is the only way to reach someone.
 //! - **Peerings.** Every tree edge is a peering. Each node is then given peerings to its
 //!   nearest nodes until it has [`MIN_PEERINGS`], so the control flood has a second path and
-//!   a replacement tree edge is already connected when a neighbour leaves.
+//!   a replacement tree edge is already connected when a neighbour leaves. Nodes that
+//!   already have [`BUSY_PEERINGS`] are passed over while another will do.
 //!
 //! A pure function of its input: the same input gives the same wiring on every node.
 
@@ -26,6 +27,10 @@ use std::time::Duration;
 pub const MAX_AUDIO_DEGREE: usize = 4;
 /// Peerings every node is given where the graph allows.
 pub const MIN_PEERINGS: usize = 2;
+/// A node with this many peerings is passed over for extra ones while another will do.
+/// Otherwise the node everyone joined through, to which they all hold a link that is up,
+/// would be everyone's second peering and carry the whole control flood.
+pub const BUSY_PEERINGS: usize = 6;
 
 /// A connection one node says it holds to another.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,11 +206,21 @@ fn depths(edges: &BTreeSet<Pair>, root: &ParticipantId) -> BTreeMap<ParticipantI
 /// Drop edges that would close a loop, so what is kept of an old tree is still loop-free
 /// even if the old plan was not. Returns the edges kept.
 fn loop_free(edges: BTreeSet<Pair>) -> BTreeSet<Pair> {
+    // Which piece each node is in, named by one of its nodes. Joining two pieces renames one.
+    let mut piece: BTreeMap<ParticipantId, ParticipantId> = BTreeMap::new();
     let mut out = BTreeSet::new();
     for edge in edges {
-        if !depths(&out, &edge.0).contains_key(&edge.1) {
-            out.insert(edge);
+        let a = piece.get(&edge.0).unwrap_or(&edge.0).clone();
+        let b = piece.get(&edge.1).unwrap_or(&edge.1).clone();
+        if a == b {
+            continue;
         }
+        for name in piece.values_mut().filter(|name| **name == b) {
+            *name = a.clone();
+        }
+        piece.insert(edge.0.clone(), a.clone());
+        piece.insert(edge.1.clone(), a);
+        out.insert(edge);
     }
     out
 }
@@ -241,25 +256,27 @@ fn grow_tree(graph: &Graph, root: &ParticipantId, tree: &mut BTreeSet<Pair>) {
 
 /// Give every node its nearest peers until it has [`MIN_PEERINGS`].
 fn add_peerings(graph: &Graph, peerings: &mut BTreeSet<Pair>) {
+    let mut degrees = degrees(peerings);
     for node in &graph.members {
-        loop {
-            let degrees = degrees(peerings);
-            if degree(&degrees, node) >= MIN_PEERINGS {
-                break;
-            }
+        while degree(&degrees, node) < MIN_PEERINGS {
             let best = graph
                 .members
                 .iter()
                 .filter(|other| *other != node && !peerings.contains(&pair(node, other)))
                 .filter_map(|other| {
                     let cost = graph.cost(node, other)?;
-                    Some((cost, degree(&degrees, other), other))
+                    let peers = degree(&degrees, other);
+                    Some((peers >= BUSY_PEERINGS, cost, peers, other))
                 })
                 .min();
-            match best {
-                Some((.., other)) => peerings.insert(pair(node, other)),
-                None => break,
+            let Some((.., other)) = best else {
+                break;
             };
+            peerings.insert(pair(node, other));
+            for end in [node, other] {
+                let count = degrees.entry(end.clone()).or_default();
+                *count = count.saturating_add(1);
+            }
         }
     }
 }
@@ -711,5 +728,20 @@ mod tests {
             ..Input::default()
         });
         assert_sound(&w, &ids(1..=5));
+    }
+
+    #[test]
+    fn the_node_everyone_joined_through_does_not_become_everyones_second_peering() {
+        // Everyone holds an up, direct link to node 1, as after joining through it.
+        let members = ids(1..=30);
+        let w = wire(&Input {
+            members: members.clone(),
+            root: Some(id(1)),
+            links: (2..=30).map(|n| direct(n, 1, 2)).collect(),
+            ..Input::default()
+        });
+        assert_sound(&w, &members);
+        let hub = w.peerings.iter().filter(|e| e.0 == id(1)).count();
+        assert!(hub <= BUSY_PEERINGS, "node 1 has {hub} peerings");
     }
 }
