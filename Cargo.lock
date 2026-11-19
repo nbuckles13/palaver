@@ -77,6 +77,9 @@ dependencies = [
 [[package]]
 name = "palaver-media"
 version = "0.0.0"
+dependencies = [
+ "palaver-proto",
+]
 
 [[package]]
 name = "palaver-moq-wire"
