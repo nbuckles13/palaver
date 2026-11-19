@@ -8,6 +8,7 @@
 //! Each check is a pure function over data (a dependency graph, a map of file contents), so
 //! the self-tests feed it fixtures; one test per guard feeds it the real repository.
 
+pub mod c_wrappers;
 pub mod integrity;
 pub mod layering;
 pub mod repo;

@@ -19,14 +19,16 @@ palaver-control = { path = "crates/control" }
 palaver-node = { path = "crates/node" }
 palaver-net = { path = "crates/net" }
 palaver-media = { path = "crates/media" }
+palaver-opus = { path = "crates/opus" }
 palaver-sdk = { path = "crates/sdk" }
 palaver-sim = { path = "crates/sim" }
 serde_json = "1"
 
 # Guards, mechanism 2 (docs/04): lints every crate inherits.
 [workspace.lints.rust]
-# Crates that wrap a C library override this one lint and nothing else.
-unsafe_code = "forbid"
+# Denied everywhere. A crate that wraps a C library allows it for itself, and the guards
+# crate checks that no other crate does (`deny`, not `forbid`, is what lets one crate opt out).
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

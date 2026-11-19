@@ -1,0 +1,16 @@
+[package]
+name = "palaver-opus"
+description = "Safe wrapper over libopus: encode, decode, and the three ways of filling a lost frame."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Bundles libopus 1.6 and builds it from source with cmake and a C compiler. DRED needs 1.5+.
+opusic-sys = { version = "0.7", features = ["dred"] }
+
+[lints]
+workspace = true
