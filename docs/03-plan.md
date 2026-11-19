@@ -114,6 +114,43 @@ password, surviving khef and conductor churn.
 - iOS/Android shells over the same SDK; platform voice processing; background rules.
 - Phones run an edge khef only, or attach as thin clients; transit duty as a last resort.
 
+## Backlog
+
+Topics that need a design before they can be scheduled.
+
+### Post-mortem debugging of packet flows
+
+Someone says "I couldn't hear Carol for ten seconds around 10:03". With no server, the only
+evidence is what each node kept. We need to be able to work out, afterwards and from the
+nodes' own records, where the packets went and where they stopped. Much of what decides a
+packet's fate is dynamic, so the records must let it be reconstructed:
+
+- **Alias to track, over time.** Aliases are assigned by the conductor and change with the
+  plan. A packet-level record is only readable alongside the plan that was in force.
+- **The path, over time.** Which tree or route a track took under each plan generation, and
+  when each node applied each plan (nodes apply a plan at different moments).
+- **Per hop, per track**: received, forwarded, and dropped with the reason (not selected by
+  top-N, unknown alias, duplicate, late, queue full, stream reset, link down).
+- **Top-N decisions**: who was selected on each link and when it changed.
+- **Link history**: up, down, silent, fillers; and the roster's view of it, with holds.
+- **At the receiver**: what the jitter buffer did (rebuilt, concealed, skipped, held) and
+  what the decoder was given.
+- **The control plane's own traffic**: which reports and plans arrived where and when.
+
+Questions to settle:
+
+- **Clocks.** Nodes share no clock. How are records from several nodes lined up: offsets
+  measured between neighbours, or a common reference carried in reports?
+- **Joining several nodes' records** into one account of the meeting, with redaction
+  intact: the same participant must be the same token in every node's bundle, without the
+  token revealing who it is.
+- **Cost.** What can be kept always (counters, changes of state) and what only on demand
+  or for the last few minutes (per-packet records); no media payload, ever.
+- **One format** for the simulator's trace and a real node's, so the same tool reads both
+  and a real failure can be replayed in the simulator.
+- **Who can collect it.** A participant can export their own node's bundle; whether a host
+  can ask others for theirs, and what consent that needs.
+
 ## Sequencing notes
 
 - Headless before GUI in every phase.

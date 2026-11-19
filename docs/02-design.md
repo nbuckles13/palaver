@@ -245,8 +245,8 @@ catalog track lists each participant's available tracks.
   - Phase 1 sends whole plans, not deltas.
 - **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
   RTT), unreachable peers, last plan applied, up to eight addresses, iroh-relay URL. Plan: term and generation, conductor, roster,
-  peerings, audio overlay tree and N, successor list, each member's number and the next
-  number to give. The rest of the lists above arrives as
+  peerings, audio overlay tree and N, successor list, each member's tracks with their
+  aliases, and the next free aliases. Report also: the media tracks the node can send. The rest of the lists above arrives as
   new field numbers.
 - **Everyone holds the whole plan; transit khefs and successors hold all reports.**
 - No gossip library: one conductor means nothing to agree on, and 50 nodes are few enough to
@@ -552,21 +552,33 @@ A **profile** of MoQT, deliberately small:
   forwarded byte for byte: no rewrite, one shared buffer for all links, no per-link alias
   map on the forwarding path. The session takes the alias from the khef and refuses one
   already in use on that connection.
-- **Where the alias comes from** (`proto::Track::alias`). It is in every packet, so its
-  size matters: a number up to 127 takes one byte, up to 16,383 two, and one drawn from 62
-  bits nine. On an 80-byte audio frame that is 87, 88 or 95 bytes.
-  - *Media tracks*: from the plan. The conductor gives each member a number when it joins,
-    never given to another member of the meeting (the plan carries the next number, so a new
-    conductor continues from it). The alias is that number times eight plus which of the
-    member's tracks it is (microphone, screen audio, three camera renditions, screen video).
-    One byte for the first 16 members to join, two for the first 2,048. Media flows only
-    once the plan wires a node, so the number is always known in time.
-  - *Report tracks*: from the participant id, which is already a hash of the node's key. A
-    report must flow before its node is in any plan, and reports are rare enough that nine
-    bytes do not matter. Contriving a clash takes about 2^60 tries.
-  - *The plan track*: a fixed number.
-  - The three ranges cannot collide. A hash of the track's name was considered for
-    everything and dropped: wide enough to be safe, it costs 8 bytes in every audio packet.
+- **Where the alias comes from: the conductor assigns it.**
+  - *Offer*: a node's report lists every media track it can send, including those it is
+    not sending now (all simulcast renditions, a screen share not yet started); at most 32.
+  - *Assign*: the plan gives each offered track an alias, listed under its member. A
+    track keeps its alias for as long as it is offered. A new track takes the next free
+    one; an alias is never given twice in a meeting (the plan carries the next free numbers,
+    so a later conductor carries on from them), so a late packet of a track that has gone
+    cannot be taken for another's.
+  - *Size is the conductor's policy*, since the alias is in every packet: a number up to
+    127 takes one byte, up to 16,383 two. Audio tracks, whose packets are about 80 bytes,
+    are given the small ones (one byte for the first 128 audio tracks of a meeting); every
+    other track takes numbers from 16,384 up (three bytes), which is nothing to a video
+    packet. The policy can change without khefs changing.
+  - *Khefs do not choose or check*: they look the alias up in the plan when they announce
+    a track, and forward. A track that is not in the plan has no alias and cannot be sent,
+    so this is also where a cap on what a member may publish will live.
+  - *No fixed list of renditions*: a track is whatever a node offers, by name.
+  - *Report and plan tracks* must flow before a node is in any plan, so they do not wait
+    for the conductor: a report track's alias is taken from the participant id (already a
+    hash of the node's key; contriving a clash takes about 2^60 tries), the plan track's
+    is fixed, both above anything a plan may assign.
+  - Cost: about 10 bytes in the plan per track, so 3 to 4 KB more for a 50-person meeting
+    with eight tracks each while plans are sent whole. Adding a track mid-meeting takes a
+    round trip through the conductor; offering everything up front avoids that.
+  - Considered and dropped: a hash of the track's name (wide enough to be safe, it costs 8
+    bytes in every audio packet), and a formula over a per-member number (every node must
+    then agree on the formula and on a fixed list of renditions).
 - **Rules from the khef spike**: group ids count for the life of a track; hold data streams whose
   alias is not known yet; linger before unsubscribing upstream; release an old upstream only once
   the new one delivers a group start; bounded dedupe window.
@@ -640,6 +652,9 @@ track: path, bitrate, loss by hop, jitter, RTT. Meeting health view from reports
 redacted diagnostics bundle. Optional OTLP sink, off by default. Version negotiated at admission;
 the conductor picks a meeting-wide version; too-old clients are refused clearly. No participant
 or meeting identifiers as metric labels.
+
+Working out afterwards why media did not get somewhere is not designed yet; see "Post-mortem
+debugging of packet flows" in the backlog of the plan.
 
 ## 17. Testing
 

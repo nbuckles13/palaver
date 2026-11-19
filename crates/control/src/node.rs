@@ -18,8 +18,8 @@
 //! Sans-IO: the caller hands in received objects and the current time, and asks what to send.
 
 use palaver_proto::{
-    DecodeError, Edge, Link, MeetingTag, Member, ParticipantId, Plan, PlanStamp, Redacted, Report,
-    Signer, Timestamp, Verifier,
+    AssignedTrack, DecodeError, Edge, Link, MediaTrack, MeetingTag, Member, ParticipantId, Plan,
+    PlanStamp, Redacted, Report, Signer, Timestamp, Verifier, WIDE_ALIAS_START,
 };
 use palaver_topology::{Input, ReportedLink, wire};
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,6 +66,8 @@ pub struct LocalView {
     pub unreachable: Vec<ParticipantId>,
     pub addresses: Vec<Redacted<SocketAddr>>,
     pub relay_url: Option<String>,
+    /// Every media track this node can send, whether or not it is sending it now.
+    pub tracks: Vec<MediaTrack>,
 }
 
 /// Something for the caller to do.
@@ -110,7 +112,8 @@ struct Heard {
 }
 
 /// Whether two reports from one node would lead the conductor to the same plan: the same
-/// identity, the same links by the same kind of path, the same unreachable nodes. Round-trip
+/// identity, the same tracks on offer, the same links by the same kind of path, the same
+/// unreachable nodes. Round-trip
 /// times are left out: they move all the time, and matter only when an edge is next chosen.
 fn same_for_planning(old: &Report, new: &Report) -> bool {
     let paths = |report: &Report| -> Vec<_> {
@@ -122,6 +125,7 @@ fn same_for_planning(old: &Report, new: &Report) -> bool {
     };
     old.key == new.key
         && old.name == new.name
+        && old.tracks == new.tracks
         && old.unreachable == new.unreachable
         && paths(old) == paths(new)
 }
@@ -393,8 +397,9 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             Member {
                 key: self.signer.public_key(),
                 name: self.config.name.clone(),
-                number: 0,
+                tracks: Vec::new(),
             },
+            self.view.tracks.clone(),
         )];
         let mut links: Vec<ReportedLink> = Vec::new();
         let mut unreachable: Vec<Edge> = Vec::new();
@@ -419,8 +424,9 @@ impl<S: Signer, V: Verifier> Node<S, V> {
                 Member {
                     key: report.key,
                     name: report.name.clone(),
-                    number: 0,
+                    tracks: Vec::new(),
                 },
+                report.tracks.clone(),
             ));
         }
         // A link is up only while both ends list it; one end's word is a link that is coming
@@ -436,31 +442,61 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         unreachable
             .retain(|pair| !self.lost.contains_key(&pair.0) && !self.lost.contains_key(&pair.1));
         roster.sort_by(|a, b| a.0.cmp(&b.0));
-        // Members keep the number they have; newcomers take the next ones, in id order. A
-        // number is never given twice, even after its member has left.
-        let held_numbers: BTreeMap<ParticipantId, u64> = self
+        // Every track on offer gets an alias. A track keeps the one it has; a new one takes
+        // the next: a small alias for audio, whose packets are small, a wide one otherwise.
+        // An alias is never given twice, even after its track or its member has gone.
+        let held_tracks: BTreeMap<ParticipantId, &[AssignedTrack]> = self
             .plan
             .iter()
             .flat_map(|held| &held.roster)
-            .map(|member| (self.verifier.participant_id(&member.key), member.number))
+            .map(|member| {
+                (
+                    self.verifier.participant_id(&member.key),
+                    member.tracks.as_slice(),
+                )
+            })
             .collect();
-        let mut next_member_number = self.plan.as_ref().map_or(0, |held| held.next_member_number);
-        for (id, member) in &mut roster {
-            member.number = match held_numbers.get(id) {
-                Some(number) => *number,
-                None => {
-                    let number = next_member_number;
-                    next_member_number = next_member_number.saturating_add(1);
-                    number
+        let (mut next_small_alias, mut next_wide_alias) = match &self.plan {
+            Some(held) => (held.next_small_alias, held.next_wide_alias),
+            None => (0, WIDE_ALIAS_START),
+        };
+        for (id, member, offered) in &mut roster {
+            let held = held_tracks.get(id).copied().unwrap_or(&[]);
+            for track in offered.iter() {
+                if member
+                    .tracks
+                    .iter()
+                    .any(|assigned| assigned.track == *track)
+                {
+                    continue; // offered twice
                 }
-            };
+                let alias = match held.iter().find(|assigned| assigned.track == *track) {
+                    Some(assigned) => assigned.alias,
+                    None => {
+                        // When the small ones run out, audio takes wide ones too.
+                        let small = track.audio && next_small_alias < WIDE_ALIAS_START;
+                        let next = if small {
+                            &mut next_small_alias
+                        } else {
+                            &mut next_wide_alias
+                        };
+                        let alias = *next;
+                        *next = next.saturating_add(1);
+                        alias
+                    }
+                };
+                member.tracks.push(AssignedTrack {
+                    track: track.clone(),
+                    alias,
+                });
+            }
         }
         let (previous_peerings, previous_audio_overlay) = match &self.plan {
             Some(held) => (held.peerings.clone(), held.audio_overlay.clone()),
             None => (Vec::new(), Vec::new()),
         };
         let wiring = wire(&Input {
-            members: roster.iter().map(|(id, _)| id.clone()).collect(),
+            members: roster.iter().map(|(id, _, _)| id.clone()).collect(),
             root: Some(self.me.clone()),
             links,
             unreachable,
@@ -473,11 +509,12 @@ impl<S: Signer, V: Verifier> Node<S, V> {
                 generation: 0,
             },
             conductor: self.me.clone(),
-            roster: roster.into_iter().map(|(_, member)| member).collect(),
+            roster: roster.into_iter().map(|(_, member, _)| member).collect(),
             peerings: wiring.peerings,
             audio_overlay: wiring.audio_overlay,
             audio_top_n: AUDIO_TOP_N,
-            next_member_number,
+            next_small_alias,
+            next_wide_alias,
             // Phase 1 has no succession.
             successors: Vec::new(),
         }
@@ -551,6 +588,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             unreachable: self.view.unreachable.clone(),
             addresses: self.view.addresses.clone(),
             relay_url: self.view.relay_url.clone(),
+            tracks: self.view.tracks.clone(),
         };
         let object = report.seal(&self.config.meeting, &self.signer);
         self.next_sequence = self.next_sequence.saturating_add(1);
@@ -670,7 +708,7 @@ mod tests {
             .map(|m| Member {
                 key: FakeIdentity(m).public_key(),
                 name: Redacted::new(format!("node {m}")),
-                number: u64::from(m),
+                tracks: vec![],
             })
             .collect();
         let plan = Plan {
@@ -680,7 +718,8 @@ mod tests {
             peerings: vec![Edge(id_of(1), id_of(2))],
             audio_overlay: vec![Edge(id_of(1), id_of(2))],
             audio_top_n: 3,
-            next_member_number: 100,
+            next_small_alias: 0,
+            next_wide_alias: WIDE_ALIAS_START,
             successors: successors.iter().map(|s| id_of(*s)).collect(),
         };
         (
@@ -935,8 +974,7 @@ mod tests {
     fn links(node: &mut Node<FakeIdentity, FakeVerifier>, peers: &[u8]) {
         let view = LocalView {
             links: peers.iter().map(|peer| direct(*peer)).collect(),
-            unreachable: node.view().unreachable.clone(),
-            ..LocalView::default()
+            ..node.view().clone()
         };
         node.set_view(view);
     }
@@ -1455,13 +1493,14 @@ mod tests {
                 .map(|m| Member {
                     key: FakeIdentity(m).public_key(),
                     name: Redacted::new(format!("node {m}")),
-                    number: u64::from(m),
+                    tracks: vec![],
                 })
                 .collect(),
             peerings: edges.clone(),
             audio_overlay: edges,
             audio_top_n: 3,
-            next_member_number: 100,
+            next_small_alias: 0,
+            next_wide_alias: WIDE_ALIAS_START,
             successors: vec![],
         };
         (
@@ -1501,64 +1540,166 @@ mod tests {
         assert_eq!(opened(n.poll(at(300)), 3).applied_plan, Some(stamp(1, 1)));
     }
 
-    /// The number the plan held by `node` gives member `seed`.
-    fn number_of(node: &Node<FakeIdentity, FakeVerifier>, seed: u8) -> Option<u64> {
-        node.plan()?.member_number(&id_of(seed), &FakeVerifier)
+    fn mic() -> MediaTrack {
+        MediaTrack {
+            audio: true,
+            source: palaver_proto::Source::Main,
+            rendition: b"opus".to_vec(),
+        }
+    }
+
+    fn video(rendition: &str) -> MediaTrack {
+        MediaTrack {
+            audio: false,
+            source: palaver_proto::Source::Main,
+            rendition: rendition.as_bytes().to_vec(),
+        }
+    }
+
+    /// Tell `node` which tracks it can send, keeping its links.
+    fn offers(node: &mut Node<FakeIdentity, FakeVerifier>, tracks: &[MediaTrack]) {
+        let view = LocalView {
+            tracks: tracks.to_vec(),
+            ..node.view().clone()
+        };
+        node.set_view(view);
+    }
+
+    /// The alias the plan held by `node` gives `track` of member `seed`.
+    fn alias(node: &Node<FakeIdentity, FakeVerifier>, seed: u8, track: &MediaTrack) -> Option<u64> {
+        node.plan()?.alias_of(&track.of(id_of(seed)), &FakeVerifier)
+    }
+
+    /// A conductor (node 1) and node 2, linked, each offering a microphone and two camera
+    /// renditions; the plan issued, at time 0.
+    fn two_with_tracks() -> [Node<FakeIdentity, FakeVerifier>; 2] {
+        let (mut c, mut j) = (node(1), node(2));
+        c.create_meeting();
+        let tracks = [mic(), video("180p"), video("1080p")];
+        c.set_view(LocalView {
+            links: vec![direct(2)],
+            tracks: tracks.to_vec(),
+            ..LocalView::default()
+        });
+        j.set_view(LocalView {
+            links: vec![direct(1)],
+            tracks: tracks.to_vec(),
+            ..LocalView::default()
+        });
+        report(&mut j, &mut c, at(0));
+        drain(&mut c, at(0));
+        [c, j]
     }
 
     #[test]
-    fn members_are_numbered_as_they_join_and_keep_their_number() {
+    fn every_track_a_node_offers_gets_an_alias_small_for_audio_and_wide_for_the_rest() {
+        let [c, _] = two_with_tracks();
+        let plan = c.plan().unwrap();
+        let mut small = vec![];
+        let mut wide = vec![];
+        for seed in [1, 2] {
+            small.push(alias(&c, seed, &mic()).unwrap());
+            wide.push(alias(&c, seed, &video("180p")).unwrap());
+            wide.push(alias(&c, seed, &video("1080p")).unwrap());
+        }
+        small.sort_unstable();
+        wide.sort_unstable();
+        // Microphones take 0 and 1: one byte in every audio packet.
+        assert_eq!(small, [0, 1]);
+        assert_eq!(
+            wide,
+            (WIDE_ALIAS_START..WIDE_ALIAS_START + 4).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            (plan.next_small_alias, plan.next_wide_alias),
+            (2, WIDE_ALIAS_START + 4)
+        );
+        // A track nobody offered has none.
+        assert_eq!(alias(&c, 2, &video("720p")), None);
+    }
+
+    #[test]
+    fn a_track_keeps_its_alias_and_a_new_one_is_a_new_plan() {
+        let [mut c, mut j] = two_with_tracks();
+        let aliases = |c: &Node<FakeIdentity, FakeVerifier>| -> Vec<Option<u64>> {
+            [mic(), video("180p"), video("1080p")]
+                .iter()
+                .map(|t| alias(c, 2, t))
+                .collect()
+        };
+        let before = aliases(&c);
+        // 2 can now also share its screen.
+        let screen = MediaTrack {
+            source: palaver_proto::Source::Screen,
+            ..video("1080p")
+        };
+        offers(
+            &mut j,
+            &[mic(), video("180p"), video("1080p"), screen.clone()],
+        );
+        report(&mut j, &mut c, at(1000));
+        let plan = issued(c.poll(at(1000)));
+        assert_eq!(
+            plan.alias_of(&screen.of(id_of(2)), &FakeVerifier),
+            Some(WIDE_ALIAS_START + 4)
+        );
+        assert_eq!(aliases(&c), before);
+    }
+
+    #[test]
+    fn an_alias_is_not_given_again_after_its_track_or_its_member_has_gone() {
+        let [mut c, mut j] = two_with_tracks();
+        let old_mic = alias(&c, 2, &mic()).unwrap();
+        let old_low = alias(&c, 2, &video("180p")).unwrap();
+        // 2 stops offering the low rendition, then offers it again.
+        offers(&mut j, &[mic(), video("1080p")]);
+        report(&mut j, &mut c, at(1000));
+        drain(&mut c, at(1000));
+        assert_eq!(alias(&c, 2, &video("180p")), None);
+        offers(&mut j, &[mic(), video("1080p"), video("180p")]);
+        report(&mut j, &mut c, at(2000));
+        drain(&mut c, at(2000));
+        let new_low = alias(&c, 2, &video("180p")).unwrap();
+        assert!(new_low > old_low);
+        assert_eq!(alias(&c, 2, &mic()), Some(old_mic), "untouched");
+
+        // 2 leaves and comes back: all its tracks get new aliases.
+        let tracks = c.view().tracks.clone();
+        c.set_view(LocalView {
+            tracks: tracks.clone(),
+            ..LocalView::default()
+        });
+        drain(&mut c, at(3000));
+        drain(&mut c, at(3500));
+        assert_eq!(alias(&c, 2, &mic()), None);
+        c.set_view(LocalView {
+            links: vec![direct(2)],
+            tracks,
+            ..LocalView::default()
+        });
+        drain(&mut c, at(9000));
+        let returned = alias(&c, 2, &mic()).unwrap();
+        assert!(returned > old_mic, "{returned}");
+        assert!(alias(&c, 2, &video("180p")).unwrap() > new_low);
+    }
+
+    #[test]
+    fn a_track_offered_twice_is_given_one_alias() {
         let mut c = node(1);
         c.create_meeting();
+        offers(&mut c, &[mic(), mic()]);
         drain(&mut c, at(0));
-        assert_eq!(number_of(&c, 1), Some(0), "the creator");
-        assert_eq!(c.plan().unwrap().next_member_number, 1);
-        // 3 joins, then 2: numbers follow the order of joining, not the ids.
-        let (mut j, mut k) = (node(2), node(3));
-        links(&mut k, &[1]);
-        report(&mut k, &mut c, at(300));
-        links(&mut c, &[3]);
-        drain(&mut c, at(300));
-        links(&mut j, &[1]);
-        report(&mut j, &mut c, at(600));
-        links(&mut c, &[2, 3]);
-        drain(&mut c, at(600));
-        assert_eq!(
-            (number_of(&c, 1), number_of(&c, 3), number_of(&c, 2)),
-            (Some(0), Some(1), Some(2))
-        );
-        assert_eq!(c.plan().unwrap().next_member_number, 3);
+        let plan = c.plan().unwrap();
+        assert_eq!(plan.roster[0].tracks.len(), 1);
+        assert_eq!(plan.next_small_alias, 1);
     }
 
     #[test]
-    fn a_number_is_not_given_again_after_its_member_leaves() {
-        let [mut c, _, _] = three();
-        let left = number_of(&c, 3).unwrap();
-        let next = c.plan().unwrap().next_member_number;
-        // 3 goes.
-        links(&mut c, &[2]);
-        drain(&mut c, at(1000));
-        drain(&mut c, at(1500));
-        assert_eq!(number_of(&c, 3), None);
-        assert_eq!(c.plan().unwrap().next_member_number, next);
-        // 4 joins: it does not get 3's number. Nor does 3 if it comes back.
-        let mut far = node(4);
-        links(&mut far, &[1]);
-        report(&mut far, &mut c, at(2000));
-        links(&mut c, &[2, 3, 4]);
-        drain(&mut c, at(2000));
-        let (three_again, four) = (number_of(&c, 3).unwrap(), number_of(&c, 4).unwrap());
-        assert!(three_again != left && four != left && three_again != four);
-        assert_eq!(c.plan().unwrap().next_member_number, next + 2);
-    }
-
-    #[test]
-    fn members_that_join_in_the_same_plan_are_numbered_in_id_order() {
-        // All three were there for the first plan.
-        let [c, _, _] = three();
-        let mut by_id = [1u8, 2, 3];
-        by_id.sort_by_key(|seed| id_of(*seed));
-        let numbers: Vec<Option<u64>> = by_id.iter().map(|seed| number_of(&c, *seed)).collect();
-        assert_eq!(numbers, [Some(0), Some(1), Some(2)]);
+    fn a_repeat_of_the_same_offer_is_not_a_new_plan() {
+        let [mut c, mut j] = two_with_tracks();
+        let before = c.plan().unwrap().clone();
+        report(&mut j, &mut c, at(30_000));
+        assert!(plans(&mut c, at(30_000)).is_empty());
+        assert_eq!(c.plan(), Some(&before));
     }
 }

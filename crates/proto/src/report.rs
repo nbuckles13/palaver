@@ -4,7 +4,7 @@
 use crate::fields::{DecodeError, Writer, fields, push};
 use crate::plan::PlanStamp;
 use crate::sign::{Kind, PublicKey, Sealed, Signer, Verifier, seal};
-use crate::{MeetingTag, ParticipantId, Redacted};
+use crate::{MediaTrack, MeetingTag, ParticipantId, Redacted};
 use palaver_moq_wire::Value;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -13,6 +13,8 @@ use std::time::Duration;
 pub const MAX_NAME_BYTES: usize = 128;
 /// Most addresses a node advertises. A reader keeps the first this many and ignores the rest.
 pub const MAX_ADDRESSES: usize = 8;
+/// Most media tracks a node offers. A reader keeps the first this many and ignores the rest.
+pub const MAX_TRACKS: usize = 32;
 /// Longest iroh-relay URL, in bytes.
 pub const MAX_RELAY_URL_BYTES: usize = 256;
 
@@ -25,6 +27,7 @@ const LINK: u64 = 5;
 const UNREACHABLE: u64 = 7;
 const ADDRESS: u64 = 9;
 const RELAY_URL: u64 = 11;
+const TRACK: u64 = 13;
 
 const LINK_PEER: u64 = 1;
 const LINK_PATH: u64 = 2;
@@ -67,6 +70,10 @@ pub struct Report {
     pub addresses: Vec<Redacted<SocketAddr>>,
     /// The iroh-relay through which the node can be reached by key, if it uses one.
     pub relay_url: Option<String>,
+    /// Every media track the node can send, including those it is not sending now (the
+    /// simulcast renditions, a screen share not yet started), at most [`MAX_TRACKS`]. The
+    /// conductor gives each an alias in the plan; a track not listed here cannot be sent.
+    pub tracks: Vec<MediaTrack>,
 }
 
 /// An address on the wire: the IP's 4 or 16 bytes, then the port, big-endian.
@@ -154,6 +161,12 @@ impl Report {
             .take(MAX_ADDRESSES)
             .map(|a| encode_address(a.reveal()))
             .collect();
+        let tracks: Vec<Vec<u8>> = self
+            .tracks
+            .iter()
+            .take(MAX_TRACKS)
+            .map(|track| track.encode(None))
+            .collect();
         let mut w = Writer::default();
         w.bytes(KEY, &self.key.0);
         w.int(SEQUENCE, self.sequence);
@@ -173,6 +186,9 @@ impl Report {
         if let Some(url) = &self.relay_url {
             w.bytes(RELAY_URL, url.as_bytes());
         }
+        for track in &tracks {
+            w.bytes(TRACK, track);
+        }
         w.finish()
     }
 
@@ -181,6 +197,7 @@ impl Report {
         let (mut key, mut sequence, mut name, mut applied_plan) = (None, None, None, None);
         let (mut links, mut unreachable, mut addresses, mut relay_url) =
             (vec![], vec![], vec![], None);
+        let mut tracks = vec![];
         for pair in fields(payload) {
             let pair = pair?;
             match (pair.ty, pair.value) {
@@ -217,6 +234,12 @@ impl Report {
                         .map_err(|_| DecodeError::Invalid("relay URL is not UTF-8"))?;
                     relay_url = Some(url.to_owned());
                 }
+                (TRACK, Value::Bytes(b)) => {
+                    let (track, _) = MediaTrack::decode(b)?;
+                    if tracks.len() < MAX_TRACKS && !tracks.contains(&track) {
+                        tracks.push(track);
+                    }
+                }
                 _ => {}
             }
         }
@@ -229,6 +252,7 @@ impl Report {
             unreachable,
             addresses,
             relay_url,
+            tracks,
         })
     }
 
@@ -301,6 +325,18 @@ mod tests {
             unreachable: vec![id_of(4)],
             addresses: vec![addr("192.168.1.5:4433"), addr("[2001:db8::7]:4433")],
             relay_url: Some(String::from("https://relay.example./")),
+            tracks: vec![
+                MediaTrack {
+                    audio: true,
+                    source: crate::Source::Main,
+                    rendition: b"opus".to_vec(),
+                },
+                MediaTrack {
+                    audio: false,
+                    source: crate::Source::Screen,
+                    rendition: b"1080p".to_vec(),
+                },
+            ],
         }
     }
 
@@ -317,6 +353,7 @@ mod tests {
             unreachable: vec![],
             addresses: vec![],
             relay_url: None,
+            tracks: vec![],
             ..sample()
         };
         assert_eq!(Report::decode(&minimal.encode()), Ok(minimal));
@@ -563,5 +600,21 @@ mod tests {
                 "{a} with the test option"
             );
         }
+    }
+
+    #[test]
+    fn at_most_thirty_two_tracks_are_kept_and_a_repeat_is_dropped() {
+        let track = |n: usize| MediaTrack {
+            audio: false,
+            source: crate::Source::Main,
+            rendition: format!("r{n}").into_bytes(),
+        };
+        let mut report = sample();
+        report.tracks = (0..40).map(track).collect();
+        let read = Report::decode(&report.encode()).unwrap();
+        assert_eq!(read.tracks, (0..MAX_TRACKS).map(track).collect::<Vec<_>>());
+        report.tracks = vec![track(1), track(2), track(1)];
+        let read = Report::decode(&report.encode()).unwrap();
+        assert_eq!(read.tracks, [track(1), track(2)]);
     }
 }
