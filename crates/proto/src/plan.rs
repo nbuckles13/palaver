@@ -4,8 +4,9 @@
 //! added as fields later.
 
 use crate::fields::{DecodeError, Writer, fields, push};
+use crate::names::PLAN_ALIAS;
 use crate::sign::{Kind, PublicKey, Sealed, Signer, Verifier, seal};
-use crate::{MeetingTag, ParticipantId, Redacted, Track};
+use crate::{MediaTrack, MeetingTag, ParticipantId, Redacted, Track};
 use palaver_moq_wire::Value;
 
 // Field numbers. Even numbers carry integers, odd ones bytes. Never reuse a number.
@@ -13,13 +14,14 @@ const CONDUCTOR: u64 = 1;
 const STAMP: u64 = 2;
 const MEMBER: u64 = 3;
 const AUDIO_TOP_N: u64 = 4;
-const NEXT_MEMBER_NUMBER: u64 = 6;
+const NEXT_SMALL_ALIAS: u64 = 6;
+const NEXT_WIDE_ALIAS: u64 = 8;
 const PEERING: u64 = 5;
 const AUDIO_LINK: u64 = 7;
 const SUCCESSOR: u64 = 9;
 
 const MEMBER_KEY: u64 = 1;
-const MEMBER_NUMBER: u64 = 2;
+const MEMBER_TRACK: u64 = 5;
 const MEMBER_NAME: u64 = 3;
 const EDGE_A: u64 = 1;
 const EDGE_B: u64 = 3;
@@ -52,11 +54,23 @@ impl PlanStamp {
 pub struct Member {
     pub key: PublicKey,
     pub name: Redacted<String>,
-    /// A small number the conductor gives the member when it joins, never given to another
-    /// member of the same meeting. The aliases of its media tracks are built from it (see
-    /// [`Track::alias`]), which keeps them to a byte or two in every packet.
-    pub number: u64,
+    /// The media tracks the member may send, each with the alias the conductor gave it.
+    pub tracks: Vec<AssignedTrack>,
 }
+
+/// A media track and the alias every khef uses for it: the short number that stands for its
+/// name in each of its objects. The conductor assigns it and nobody else changes it, so a
+/// khef forwards a datagram exactly as it arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignedTrack {
+    pub track: MediaTrack,
+    pub alias: u64,
+}
+
+/// Aliases below this are the small ones: at most two bytes in a packet, and one byte below
+/// 128. The conductor keeps them for audio, whose packets are small. Other tracks get
+/// aliases from here up.
+pub const WIDE_ALIAS_START: u64 = 1 << 14;
 
 /// A pair of nodes: a planned connection, or a link of the audio overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,9 +88,12 @@ pub struct Plan {
     pub audio_overlay: Vec<Edge>,
     /// The N of top-N audio selection.
     pub audio_top_n: u64,
-    /// The number the next member to join will be given: one more than any given so far.
-    /// Carried in the plan so that a new conductor does not hand out a used one.
-    pub next_member_number: u64,
+    /// The next small alias and the next wide alias to assign: each one more than any
+    /// given so far, to a member still here or not. An alias is never given twice in a
+    /// meeting, so a late packet of a track that has gone cannot be taken for another's.
+    /// Carried in the plan so that a new conductor carries on from them.
+    pub next_small_alias: u64,
+    pub next_wide_alias: u64,
     /// Who takes over as conductor, in order.
     pub successors: Vec<ParticipantId>,
 }
@@ -84,19 +101,34 @@ pub struct Plan {
 impl Member {
     fn encode(&self) -> Vec<u8> {
         let mut w = Writer::default();
+        let tracks: Vec<Vec<u8>> = self
+            .tracks
+            .iter()
+            .map(|assigned| assigned.track.encode(Some(assigned.alias)))
+            .collect();
         w.bytes(MEMBER_KEY, &self.key.0);
-        w.int(MEMBER_NUMBER, self.number);
         w.bytes(MEMBER_NAME, self.name.reveal().as_bytes());
+        for track in &tracks {
+            w.bytes(MEMBER_TRACK, track);
+        }
         w.finish()
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let (mut key, mut name, mut number) = (None, None, None);
+        let (mut key, mut name, mut tracks) = (None, None, vec![]);
         for pair in fields(bytes) {
             let pair = pair?;
             match (pair.ty, pair.value) {
                 (MEMBER_KEY, Value::Bytes(b)) => key = PublicKey::from_slice(b),
-                (MEMBER_NUMBER, Value::Int(v)) => number = Some(v),
+                (MEMBER_TRACK, Value::Bytes(b)) => {
+                    let (track, alias) = MediaTrack::decode(b)?;
+                    let alias = alias.ok_or(DecodeError::Missing("track alias"))?;
+                    push(
+                        &mut tracks,
+                        AssignedTrack { track, alias },
+                        "too many tracks",
+                    )?;
+                }
                 (MEMBER_NAME, Value::Bytes(b)) => {
                     if b.len() > crate::report::MAX_NAME_BYTES {
                         return Err(DecodeError::Invalid("name too long"));
@@ -111,7 +143,7 @@ impl Member {
         Ok(Self {
             key: key.ok_or(DecodeError::Missing("member key"))?,
             name: name.ok_or(DecodeError::Missing("member name"))?,
-            number: number.ok_or(DecodeError::Missing("member number"))?,
+            tracks,
         })
     }
 }
@@ -151,7 +183,8 @@ impl Plan {
         w.bytes(CONDUCTOR, self.conductor.as_bytes());
         w.int(STAMP, self.stamp.group_id());
         w.int(AUDIO_TOP_N, self.audio_top_n);
-        w.int(NEXT_MEMBER_NUMBER, self.next_member_number);
+        w.int(NEXT_SMALL_ALIAS, self.next_small_alias);
+        w.int(NEXT_WIDE_ALIAS, self.next_wide_alias);
         for m in &members {
             w.bytes(MEMBER, m);
         }
@@ -170,7 +203,7 @@ impl Plan {
     /// Decode a payload. Fields with unknown numbers are skipped.
     pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
         let (mut conductor, mut stamp, mut audio_top_n) = (None, None, None);
-        let mut next_member_number = None;
+        let (mut next_small_alias, mut next_wide_alias) = (None, None);
         let (mut roster, mut peerings, mut audio_overlay, mut successors) =
             (vec![], vec![], vec![], vec![]);
         for pair in fields(payload) {
@@ -179,7 +212,8 @@ impl Plan {
                 (CONDUCTOR, Value::Bytes(b)) => conductor = ParticipantId::new(b),
                 (STAMP, Value::Int(v)) => stamp = Some(PlanStamp::from_group_id(v)),
                 (AUDIO_TOP_N, Value::Int(v)) => audio_top_n = Some(v),
-                (NEXT_MEMBER_NUMBER, Value::Int(v)) => next_member_number = Some(v),
+                (NEXT_SMALL_ALIAS, Value::Int(v)) => next_small_alias = Some(v),
+                (NEXT_WIDE_ALIAS, Value::Int(v)) => next_wide_alias = Some(v),
                 (MEMBER, Value::Bytes(b)) => {
                     push(&mut roster, Member::decode(b)?, "too many members")?
                 }
@@ -196,21 +230,28 @@ impl Plan {
                 _ => {}
             }
         }
-        let next_member_number =
-            next_member_number.ok_or(DecodeError::Missing("next member number"))?;
-        // Two members with one number would share their tracks' aliases.
-        let mut numbers: Vec<u64> = roster.iter().map(|m: &Member| m.number).collect();
-        numbers.sort_unstable();
-        if numbers.windows(2).any(|pair| pair.first() == pair.get(1)) {
-            return Err(DecodeError::Invalid("two members have the same number"));
+        let next_small_alias = next_small_alias.ok_or(DecodeError::Missing("next small alias"))?;
+        let next_wide_alias = next_wide_alias.ok_or(DecodeError::Missing("next wide alias"))?;
+        // Every alias stands for one track, lies in the range for plan-assigned aliases, and
+        // is below the next one to give.
+        let mut aliases: Vec<u64> = roster
+            .iter()
+            .flat_map(|member: &Member| &member.tracks)
+            .map(|assigned| assigned.alias)
+            .collect();
+        aliases.sort_unstable();
+        if aliases.windows(2).any(|pair| pair.first() == pair.get(1)) {
+            return Err(DecodeError::Invalid("two tracks have the same alias"));
         }
-        if numbers
-            .last()
-            .is_some_and(|highest| *highest >= next_member_number)
-        {
-            return Err(DecodeError::Invalid(
-                "a member number is not below the next one",
-            ));
+        let in_range = |alias: &u64| {
+            if *alias < WIDE_ALIAS_START {
+                *alias < next_small_alias
+            } else {
+                *alias < next_wide_alias && *alias < PLAN_ALIAS
+            }
+        };
+        if !aliases.iter().all(in_range) {
+            return Err(DecodeError::Invalid("an alias is not below the next one"));
         }
         Ok(Self {
             stamp: stamp.ok_or(DecodeError::Missing("stamp"))?,
@@ -219,7 +260,8 @@ impl Plan {
             peerings,
             audio_overlay,
             audio_top_n: audio_top_n.ok_or(DecodeError::Missing("audio top-N"))?,
-            next_member_number,
+            next_small_alias,
+            next_wide_alias,
             successors,
         })
     }
@@ -232,25 +274,26 @@ impl Plan {
             .find(|key| verifier.participant_id(key) == self.conductor)
     }
 
-    /// The number the plan gives the member with id `participant`.
-    pub fn member_number(
-        &self,
-        participant: &ParticipantId,
-        verifier: &dyn Verifier,
-    ) -> Option<u64> {
+    /// The roster entry of the member with id `participant`.
+    pub fn member(&self, participant: &ParticipantId, verifier: &dyn Verifier) -> Option<&Member> {
         self.roster
             .iter()
             .find(|member| verifier.participant_id(&member.key) == *participant)
-            .map(|member| member.number)
     }
 
-    /// The alias every khef uses for `track` while this plan is in force. `None` for a
-    /// media track of a node the plan does not list, or of a rendition with no alias.
+    /// The alias every khef uses for `track` while this plan is in force. For a media track
+    /// it is the one the plan assigns; `None` if the plan does not list the node or the
+    /// track, in which case the track may not be sent. For a control track it does not
+    /// depend on the plan.
     pub fn alias_of(&self, track: &Track, verifier: &dyn Verifier) -> Option<u64> {
-        let number = track
-            .participant()
-            .and_then(|participant| self.member_number(participant, verifier));
-        track.alias(number)
+        let Some(media) = track.media() else {
+            return track.control_alias();
+        };
+        self.member(track.participant()?, verifier)?
+            .tracks
+            .iter()
+            .find(|assigned| assigned.track == media)
+            .map(|assigned| assigned.alias)
     }
 
     /// The signed object to publish on the plan track, in group `self.stamp.group_id()`.
@@ -360,12 +403,37 @@ mod tests {
         FakeVerifier.participant_id(&FakeIdentity(seed).public_key())
     }
 
-    /// Member `seed` has number `seed - 1`.
+    fn mic() -> MediaTrack {
+        MediaTrack {
+            audio: true,
+            source: crate::Source::Main,
+            rendition: b"opus".to_vec(),
+        }
+    }
+
+    fn camera() -> MediaTrack {
+        MediaTrack {
+            audio: false,
+            source: crate::Source::Main,
+            rendition: b"360p".to_vec(),
+        }
+    }
+
+    /// Member `seed` has a microphone, alias `seed`, and a camera, alias `16384 + seed`.
     fn member(seed: u8, name: &str) -> Member {
         Member {
             key: FakeIdentity(seed).public_key(),
             name: Redacted::new(name.to_owned()),
-            number: u64::from(seed) - 1,
+            tracks: vec![
+                AssignedTrack {
+                    track: mic(),
+                    alias: u64::from(seed),
+                },
+                AssignedTrack {
+                    track: camera(),
+                    alias: WIDE_ALIAS_START + u64::from(seed),
+                },
+            ],
         }
     }
 
@@ -391,7 +459,8 @@ mod tests {
             peerings: [line.clone(), vec![Edge(id_of(1), id_of(3))]].concat(),
             audio_overlay: line,
             audio_top_n: 3,
-            next_member_number: 10,
+            next_small_alias: 10,
+            next_wide_alias: WIDE_ALIAS_START + 10,
             successors: vec![id_of(2), id_of(3)],
         }
     }
@@ -425,7 +494,8 @@ mod tests {
         let mut w = Writer::default();
         w.int(STAMP, 1);
         w.int(AUDIO_TOP_N, 3);
-        w.int(NEXT_MEMBER_NUMBER, 0);
+        w.int(NEXT_SMALL_ALIAS, 0);
+        w.int(NEXT_WIDE_ALIAS, WIDE_ALIAS_START);
         assert_eq!(
             Plan::decode(&w.finish()),
             Err(DecodeError::Missing("conductor"))
@@ -434,7 +504,8 @@ mod tests {
         let conductor = id_of(1);
         w.bytes(CONDUCTOR, conductor.as_bytes());
         w.int(AUDIO_TOP_N, 3);
-        w.int(NEXT_MEMBER_NUMBER, 0);
+        w.int(NEXT_SMALL_ALIAS, 0);
+        w.int(NEXT_WIDE_ALIAS, WIDE_ALIAS_START);
         assert_eq!(
             Plan::decode(&w.finish()),
             Err(DecodeError::Missing("stamp"))
@@ -445,7 +516,7 @@ mod tests {
         w.int(AUDIO_TOP_N, 3);
         assert_eq!(
             Plan::decode(&w.finish()),
-            Err(DecodeError::Missing("next member number"))
+            Err(DecodeError::Missing("next small alias"))
         );
     }
 
@@ -612,47 +683,81 @@ mod tests {
     }
 
     #[test]
-    fn member_numbers_must_be_distinct_and_below_the_next_one() {
+    fn aliases_must_be_distinct_and_below_the_next_one_of_their_range() {
         let mut twice = sample();
-        twice.roster[2].number = twice.roster[0].number;
+        twice.roster[2].tracks[0].alias = twice.roster[0].tracks[0].alias;
         assert_eq!(
             Plan::decode(&twice.encode()),
-            Err(DecodeError::Invalid("two members have the same number"))
+            Err(DecodeError::Invalid("two tracks have the same alias"))
         );
-        let mut beyond = sample();
-        beyond.roster[3].number = 10;
-        assert_eq!(
-            Plan::decode(&beyond.encode()),
-            Err(DecodeError::Invalid(
-                "a member number is not below the next one"
-            ))
-        );
-        // Gaps are fine: members that left took their numbers with them.
+        for (member, track, alias) in [
+            (3, 0, 10),                    // a small alias not below the next small one
+            (3, 1, WIDE_ALIAS_START + 10), // a wide one not below the next wide one
+            (3, 1, PLAN_ALIAS + 5),        // in the range kept for control tracks
+        ] {
+            let mut beyond = sample();
+            beyond.roster[member].tracks[track].alias = alias;
+            beyond.next_wide_alias = beyond.next_wide_alias.max(alias.min(PLAN_ALIAS + 9));
+            if alias == WIDE_ALIAS_START + 10 {
+                beyond.next_wide_alias = WIDE_ALIAS_START + 10;
+            }
+            assert_eq!(
+                Plan::decode(&beyond.encode()),
+                Err(DecodeError::Invalid("an alias is not below the next one")),
+                "alias {alias}"
+            );
+        }
+        // Gaps are fine: tracks that went took their aliases with them.
         let mut gaps = sample();
-        gaps.roster[3].number = 9;
+        gaps.roster[3].tracks[0].alias = 9;
         assert_eq!(Plan::decode(&gaps.encode()), Ok(gaps));
+        // A member with no tracks is fine.
+        let mut silent = sample();
+        silent.roster[1].tracks.clear();
+        assert_eq!(Plan::decode(&silent.encode()), Ok(silent));
     }
 
     #[test]
-    fn the_plan_gives_every_khef_the_same_alias_for_a_track() {
-        use crate::Source;
+    fn a_track_in_the_plan_must_have_an_alias() {
+        let mut w = Writer::default();
+        let track = mic().encode(None);
+        w.bytes(MEMBER_KEY, &[1; 32]);
+        w.bytes(MEMBER_NAME, b"Alice");
+        w.bytes(MEMBER_TRACK, &track);
+        assert_eq!(
+            Member::decode(&w.finish()),
+            Err(DecodeError::Missing("track alias"))
+        );
+    }
+
+    #[test]
+    fn the_plan_says_which_alias_stands_for_a_track() {
         let plan = sample();
-        assert_eq!(plan.member_number(&id_of(3), &FakeVerifier), Some(2));
-        assert_eq!(plan.member_number(&id_of(9), &FakeVerifier), None);
-        let audio = |seed: u8| Track::Audio {
-            source: Source::Main,
-            participant: id_of(seed),
-            rendition: b"opus".to_vec(),
+        assert_eq!(
+            plan.alias_of(&mic().of(id_of(3)), &FakeVerifier),
+            Some(3),
+            "one byte on the wire"
+        );
+        assert_eq!(
+            plan.alias_of(&camera().of(id_of(3)), &FakeVerifier),
+            Some(WIDE_ALIAS_START + 3)
+        );
+        // A node the plan does not list, and a track it does not list, may not be sent.
+        assert_eq!(plan.alias_of(&mic().of(id_of(9)), &FakeVerifier), None);
+        let screen = MediaTrack {
+            source: crate::Source::Screen,
+            ..camera()
         };
-        // Member 3 has number 2: its microphone is alias 16, one byte on the wire.
-        assert_eq!(plan.alias_of(&audio(3), &FakeVerifier), Some(16));
-        // A node the plan does not list has no media alias yet.
-        assert_eq!(plan.alias_of(&audio(9), &FakeVerifier), None);
+        assert_eq!(plan.alias_of(&screen.of(id_of(3)), &FakeVerifier), None);
         // Control tracks do not depend on the roster.
         let report = Track::Report {
             participant: id_of(9),
         };
-        assert_eq!(plan.alias_of(&report, &FakeVerifier), report.alias(None));
-        assert!(plan.alias_of(&Track::Plan, &FakeVerifier).is_some());
+        assert_eq!(
+            plan.alias_of(&report, &FakeVerifier),
+            report.control_alias()
+        );
+        assert_eq!(plan.alias_of(&Track::Plan, &FakeVerifier), Some(PLAN_ALIAS));
+        assert!(plan.member(&id_of(9), &FakeVerifier).is_none());
     }
 }
