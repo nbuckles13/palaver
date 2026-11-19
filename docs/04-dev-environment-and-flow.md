@@ -58,6 +58,12 @@ Test time is a first-class constraint, enforced by configuration rather than goo
 | Simulation test (T2), integration test | < 1 s | 5 s, and only for tests on an explicit exceptions list |
 | End-to-end scenario (T3–T4) | as short as the scenario allows | 30 s |
 
+Simulation tests run whole meetings through the sans-IO cores, so the cores (and the
+simulator) are compiled optimised in development and test builds (`Cargo.toml`, per-package
+`opt-level = 2`). Overflow checks and debug assertions stay on. Without this a 50-node
+meeting takes four times as long to simulate, which is the difference between 0.5 s and 2 s
+a test.
+
 One test's time is not ours: the guard on the real dependency graph runs `cargo metadata`
 (60 ms warm; once over 5 s on a cold CI runner, cause unknown). It keeps the 5 s limit, with
 three measures: both graph guards share one cargo process; CI runs it on Linux only, since

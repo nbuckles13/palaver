@@ -11,6 +11,8 @@ repository.workspace = true
 [dependencies]
 palaver-khef-core = { workspace = true }
 palaver-control = { workspace = true }
+palaver-node = { workspace = true }
+palaver-moq-wire = { workspace = true }
 palaver-topology = { workspace = true }
 # The simulator signs with the stand-in signer; nothing that ships may depend on this crate
 # (checked by the guards crate).

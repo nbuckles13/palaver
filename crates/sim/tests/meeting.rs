@@ -37,6 +37,11 @@ fn settle(m: &mut Meeting, limit: Duration) -> Duration {
     let start = m.now();
     loop {
         if m.settled().is_ok() {
+            assert_eq!(
+                m.stats().sessions_closed,
+                0,
+                "a session met a protocol error"
+            );
             return m.now().saturating_since(start);
         }
         let waited = m.now().saturating_since(start);
@@ -351,4 +356,170 @@ fn the_same_seed_gives_the_same_run() {
     let first = busy(31);
     assert_eq!(first, busy(31));
     assert_ne!(first.0, busy(32).0);
+}
+
+// --- Audio, over the tree the plan lays out ---
+
+/// `speaker` talks for `frames` frames, 20 ms apart, at `level`, starting at frame `first`.
+fn talk(m: &mut Meeting, speaker: u32, first: u64, frames: u64, level: u8) {
+    for frame in first..first + frames {
+        assert!(
+            m.speak(speaker, frame, level),
+            "node {speaker} has no alias"
+        );
+        m.run_for(Duration::from_millis(20));
+    }
+}
+
+/// How many frames of `speaker` node `listener` was given to play.
+fn heard(m: &Meeting, listener: u32, speaker: u32) -> usize {
+    let alias = m.microphone_alias(listener, speaker).unwrap();
+    m.heard_by(listener)
+        .iter()
+        .filter(|(a, _)| *a == alias)
+        .count()
+}
+
+#[test]
+fn a_speaker_is_heard_by_everyone_else_over_the_plans_tree() {
+    let mut m = gathered(8, 47);
+    settle(&mut m, 3 * SECOND);
+    let before = m.stats().audio_sent;
+    talk(&mut m, 3, 0, 50, 70);
+    m.run_for(Duration::from_millis(200));
+    for listener in [0, 1, 2, 4, 5, 6, 7] {
+        assert_eq!(heard(&m, listener, 3), 50, "node {listener}");
+    }
+    assert_eq!(m.heard_by(3), [], "nobody hears themselves");
+    // Each frame crossed each of the seven tree links once.
+    assert_eq!(m.stats().audio_sent - before, 50 * 7);
+    // Everyone agrees on the alias, and it is small.
+    let alias = m.microphone_alias(0, 3).unwrap();
+    assert!(alias < 128);
+    assert!((0..8).all(|node| m.microphone_alias(node, 3) == Some(alias)));
+    assert_eq!(m.stats().sessions_closed, 0);
+}
+
+#[test]
+fn audio_crosses_the_three_node_line_through_the_middle() {
+    let mut m = meeting(5);
+    m.block(0, 2);
+    m.create(0);
+    m.run_for(SECOND);
+    m.join(1, 0);
+    m.run_for(SECOND);
+    m.join(2, 1);
+    settle(&mut m, 3 * SECOND);
+    talk(&mut m, 0, 0, 25, 70);
+    talk(&mut m, 2, 0, 25, 70);
+    m.run_for(Duration::from_millis(200));
+    assert_eq!(heard(&m, 2, 0), 25);
+    assert_eq!(heard(&m, 0, 2), 25);
+    assert_eq!(heard(&m, 1, 0) + heard(&m, 1, 2), 50);
+}
+
+#[test]
+fn a_node_cannot_speak_before_the_plan_lists_it_and_can_soon_after_joining() {
+    let mut m = gathered(4, 53);
+    settle(&mut m, 3 * SECOND);
+    m.join(9, 2);
+    assert!(!m.speak(9, 0, 70), "not in any plan yet");
+    let took = settle(&mut m, 2 * SECOND);
+    assert!(took <= Duration::from_millis(300), "took {took:?}");
+    talk(&mut m, 9, 1, 10, 70);
+    m.run_for(Duration::from_millis(200));
+    for listener in 0..4 {
+        assert_eq!(heard(&m, listener, 9), 10, "node {listener}");
+    }
+    // And the joiner hears the others.
+    talk(&mut m, 0, 0, 10, 70);
+    m.run_for(Duration::from_millis(200));
+    assert_eq!(heard(&m, 9, 0), 10);
+}
+
+#[test]
+fn with_more_talkers_than_n_a_listener_hears_the_loudest_three() {
+    let mut m = gathered(8, 59);
+    settle(&mut m, 3 * SECOND);
+    assert_eq!(m.settled().unwrap().audio_top_n, 3);
+    // Four talk at once for two seconds; node 4 is the quietest.
+    for frame in 0..100 {
+        for (speaker, level) in [(1, 90), (2, 85), (3, 80), (4, 40)] {
+            assert!(m.speak(speaker, frame, level));
+        }
+        m.run_for(Duration::from_millis(20));
+    }
+    m.run_for(Duration::from_millis(200));
+    // In the second half every listener hears exactly the loudest three, whole.
+    let in_second_half = |m: &Meeting, listener: u32, speaker: u32| {
+        let alias = m.microphone_alias(listener, speaker).unwrap();
+        m.heard_by(listener)
+            .iter()
+            .filter(|(a, frame)| *a == alias && *frame >= 50)
+            .count()
+    };
+    for listener in [0, 5, 6, 7] {
+        for speaker in [1, 2, 3] {
+            assert_eq!(
+                in_second_half(&m, listener, speaker),
+                50,
+                "{listener} of {speaker}"
+            );
+        }
+        assert_eq!(
+            in_second_half(&m, listener, 4),
+            0,
+            "{listener} of the quiet one"
+        );
+    }
+    // Getting there takes time when all four start at the same instant. Slots go to whoever
+    // is heard first, a khef holds a selection for 250 ms before giving it up, and each
+    // khef on the way can only choose among what the one before it passed on. So the third
+    // loudest can be late by a hold time per hop.
+    let lost: Vec<usize> = [0, 5, 6, 7]
+        .iter()
+        .map(|listener| 100 - heard(&m, *listener, 3))
+        .collect();
+    assert!(lost.iter().all(|frames| *frames <= 40), "{lost:?}");
+    eprintln!("frames of the third loudest lost at each listener: {lost:?}");
+}
+
+#[test]
+fn when_a_node_in_the_middle_crashes_audio_resumes_once_the_tree_is_rejoined() {
+    let mut m = gathered(12, 61);
+    settle(&mut m, 3 * SECOND);
+    let plan = m.settled().unwrap().clone();
+    let degree = |node: u32| {
+        let id = Meeting::id_of(node);
+        plan.audio_overlay
+            .iter()
+            .filter(|e| e.0 == id || e.1 == id)
+            .count()
+    };
+    // A node other than the conductor and the speaker with more than one audio link.
+    let middle = (2..12).find(|n| degree(*n) > 1).unwrap();
+    let speaker = 1;
+    // The speaker talks throughout: one second before, and four after.
+    talk(&mut m, speaker, 0, 50, 70);
+    m.crash(middle);
+    talk(&mut m, speaker, 50, 200, 70);
+    m.run_for(Duration::from_millis(200));
+    m.settled().unwrap();
+    assert_eq!(m.stats().sessions_closed, 0);
+    for listener in (0..12).filter(|n| *n != speaker && *n != middle) {
+        let got = heard(&m, listener, speaker);
+        // Nobody lost more than the time it took to notice and re-plan: about 1.3 s, 65
+        // frames. Those not behind the crashed node lost nothing.
+        assert!(got >= 250 - 75, "node {listener} heard {got} of 250 frames");
+    }
+    // And the last second was heard by all, whole.
+    let alias = m.microphone_alias(0, speaker).unwrap();
+    for listener in (0..12).filter(|n| *n != speaker && *n != middle) {
+        let late = m
+            .heard_by(listener)
+            .iter()
+            .filter(|(a, frame)| *a == alias && *frame >= 200)
+            .count();
+        assert_eq!(late, 50, "node {listener}");
+    }
 }

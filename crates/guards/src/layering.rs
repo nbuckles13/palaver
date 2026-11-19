@@ -10,6 +10,7 @@ pub const SANS_IO: &[&str] = &[
     "palaver-khef-core",
     "palaver-topology",
     "palaver-control",
+    "palaver-node",
     "palaver-sim",
 ];
 
