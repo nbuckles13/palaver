@@ -81,6 +81,8 @@ struct Member {
 /// Counters over a run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
+    /// Reports published by nodes.
+    pub reports_published: u64,
     /// Control objects sent over links.
     pub objects_sent: u64,
     /// Of those, how many the receiver already had or would not take.
@@ -597,17 +599,19 @@ impl Meeting {
                     let id = Self::id_of(**peer);
                     roster.contains(*peer)
                         && member.control.report_of(&id).is_some_and(|report| {
-                            report.applied_plan == Some(plan.stamp)
-                                && plan.peerings.iter().all(|edge| {
-                                    let other = if edge.0 == id {
-                                        &edge.1
-                                    } else if edge.1 == id {
-                                        &edge.0
-                                    } else {
-                                        return true;
-                                    };
-                                    report.links.iter().any(|link| link.peer == *other)
-                                })
+                            // Not "has applied this plan": a node the plan asks nothing new
+                            // of says so only in its next regular report. A node holding
+                            // all its planned links receives plans over them.
+                            plan.peerings.iter().all(|edge| {
+                                let other = if edge.0 == id {
+                                    &edge.1
+                                } else if edge.1 == id {
+                                    &edge.0
+                                } else {
+                                    return true;
+                                };
+                                report.links.iter().any(|link| link.peer == *other)
+                            })
                         })
                 })
                 .copied()
@@ -644,6 +648,7 @@ impl Meeting {
             let me = member.id.clone();
             match member.control.poll(now) {
                 Some(Output::PublishReport { group_id, object }) => {
+                    self.stats.reports_published = self.stats.reports_published.saturating_add(1);
                     let track = Track::Report { participant: me };
                     self.flood(node, None, &track, group_id, &object);
                 }

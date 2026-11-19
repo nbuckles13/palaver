@@ -236,6 +236,44 @@ impl Plan {
         Ok(plan)
     }
 
+    /// The parts of the plan that tell `node` what to do: the peerings and audio links it is
+    /// an end of. Grows as the plan gains fields (routes, budgets).
+    fn entries_for<'a>(&'a self, node: &'a ParticipantId) -> impl Iterator<Item = (u8, &'a Edge)> {
+        let mine = move |edge: &&Edge| edge.0 == *node || edge.1 == *node;
+        let peerings = self.peerings.iter().filter(mine).map(|edge| (0, edge));
+        let audio = self.audio_overlay.iter().filter(mine).map(|edge| (1, edge));
+        peerings.chain(audio)
+    }
+
+    /// Whether this plan asks `node` to do anything `previous` did not: whether its own
+    /// entries differ. A node for which they do applies the plan and says so at once; the
+    /// conductor waits only for those nodes. Everyone else just notes the new plan.
+    pub fn changes_for(&self, previous: &Plan, node: &ParticipantId) -> bool {
+        !self.entries_for(node).eq(previous.entries_for(node))
+    }
+
+    /// The nodes this plan asks something new of, compared with `previous`: every node at
+    /// an end of an edge that was added or removed. Sorted, without duplicates.
+    pub fn changed_nodes(&self, previous: &Plan) -> Vec<ParticipantId> {
+        let mut out: Vec<ParticipantId> = Vec::new();
+        for (new, old) in [
+            (&self.peerings, &previous.peerings),
+            (&self.audio_overlay, &previous.audio_overlay),
+        ] {
+            let differing = new
+                .iter()
+                .filter(|edge| !old.contains(edge))
+                .chain(old.iter().filter(|edge| !new.contains(edge)));
+            for edge in differing {
+                out.push(edge.0.clone());
+                out.push(edge.1.clone());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Whether a node holding `self` should adopt `next`, both already verified by
     /// [`Plan::open`]:
     /// - same term: only from the same conductor, with a later generation;
@@ -455,5 +493,55 @@ mod tests {
     fn names_are_redacted_in_debug_output() {
         let out = format!("{:?}", sample());
         assert!(!out.contains("Alice") && !out.contains("Bob"), "{out}");
+    }
+
+    #[test]
+    fn a_plan_changes_things_only_for_the_nodes_at_the_ends_of_changed_edges() {
+        let before = sample(); // line 1-2-3-4, plus peering 1-3
+        // 5 joins, attached to 4 and peered with 2 as well.
+        let mut after = sample();
+        after.roster.push(member(5, "Eve"));
+        after.peerings.push(Edge(id_of(4), id_of(5)));
+        after.peerings.push(Edge(id_of(2), id_of(5)));
+        after.audio_overlay.push(Edge(id_of(4), id_of(5)));
+
+        for (node, changed) in [(1, false), (2, true), (3, false), (4, true), (5, true)] {
+            assert_eq!(
+                after.changes_for(&before, &id_of(node)),
+                changed,
+                "node {node}"
+            );
+        }
+        let mut expected = vec![id_of(2), id_of(4), id_of(5)];
+        expected.sort();
+        assert_eq!(after.changed_nodes(&before), expected);
+        // And the same set when the edges go away again.
+        assert_eq!(before.changed_nodes(&after), expected);
+        assert_eq!(before.changed_nodes(&before), []);
+    }
+
+    #[test]
+    fn a_peering_that_becomes_an_audio_link_is_a_change_for_its_ends_only() {
+        let before = sample();
+        let mut after = sample();
+        after
+            .audio_overlay
+            .retain(|e| *e != Edge(id_of(2), id_of(3)));
+        after.audio_overlay.push(Edge(id_of(1), id_of(3)));
+        assert!(after.changes_for(&before, &id_of(1)));
+        assert!(after.changes_for(&before, &id_of(2)));
+        assert!(after.changes_for(&before, &id_of(3)));
+        assert!(!after.changes_for(&before, &id_of(4)));
+    }
+
+    #[test]
+    fn a_new_stamp_or_roster_alone_changes_nothing_for_anyone() {
+        let before = sample();
+        let mut after = sample();
+        after.stamp.generation += 1;
+        after.roster.push(member(9, "Zed"));
+        for node in 1..=4 {
+            assert!(!after.changes_for(&before, &id_of(node)));
+        }
     }
 }
