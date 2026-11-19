@@ -564,16 +564,19 @@ mod tests {
                     self.in_flight.push((seq * FRAME_MS + delay, packet));
                 }
             }
+            // Latest arrival first, so the next to arrive is taken off the end.
+            self.in_flight
+                .sort_by_key(|(arrival, p)| core::cmp::Reverse((*arrival, p.seq)));
             while self.now_ms < until_ms {
                 // Deliver everything that has arrived by now, in arrival order.
-                self.in_flight.sort_by_key(|(arrival, p)| (*arrival, p.seq));
                 while self
                     .in_flight
-                    .first()
+                    .last()
                     .is_some_and(|(arrival, _)| *arrival <= self.now_ms)
                 {
-                    let (arrival, p) = self.in_flight.remove(0);
-                    self.buffer.insert(p, at(arrival));
+                    if let Some((arrival, p)) = self.in_flight.pop() {
+                        self.buffer.insert(p, at(arrival));
+                    }
                 }
                 self.played.push(self.buffer.pull(at(self.now_ms)));
                 self.now_ms += FRAME_MS;
