@@ -24,6 +24,22 @@ fn track(fields: &[&str], name: &str) -> FullTrackName {
     FullTrackName::new(ns(fields), name.as_bytes().to_vec()).unwrap()
 }
 
+/// Stands for the alias every khef derives from a track's name: the same for the same name.
+fn alias_of(track: &FullTrackName) -> u64 {
+    let mut name = vec![];
+    track.encode(&mut name);
+    name.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    }) >> 2
+}
+
+/// Announce `track` from `end` under its alias, which is returned.
+fn publish(end: &mut End, track: FullTrackName) -> u64 {
+    let alias = alias_of(&track);
+    assert!(end.session.publish(track, alias));
+    alias
+}
+
 fn encoded(message: &Message) -> Vec<u8> {
     let mut out = vec![];
     message.encode(&mut out).unwrap();
@@ -262,8 +278,8 @@ fn a_track_announced_under_a_wanted_prefix_is_taken_with_its_alias() {
     let (mut a, mut b, _) = subscribed();
     let plan = track(&["m", "ctl", "plan"], "0");
     let report = track(&["m", "ctl", "report", "p7"], "0");
-    let first = b.session.publish(plan.clone()).unwrap();
-    let second = b.session.publish(report.clone()).unwrap();
+    let first = publish(&mut b, plan.clone());
+    let second = publish(&mut b, report.clone());
     assert_ne!(first, second);
     run(&mut a, &mut b);
     assert_eq!(
@@ -296,14 +312,8 @@ fn both_ends_can_ask_and_announce_at_once() {
     run(&mut a, &mut b);
     a.session.accept_tracks(StreamId::Theirs(1));
     b.session.accept_tracks(StreamId::Theirs(1));
-    let from_a = a
-        .session
-        .publish(track(&["m", "ctl", "plan"], "0"))
-        .unwrap();
-    let from_b = b
-        .session
-        .publish(track(&["m", "ctl", "report", "p2"], "0"))
-        .unwrap();
+    let from_a = publish(&mut a, track(&["m", "ctl", "plan"], "0"));
+    let from_b = publish(&mut b, track(&["m", "ctl", "report", "p2"], "0"));
     run(&mut a, &mut b);
     assert!(a.take_events().contains(&Event::TrackOffered {
         track: track(&["m", "ctl", "report", "p2"], "0"),
@@ -317,12 +327,57 @@ fn both_ends_can_ask_and_announce_at_once() {
 }
 
 #[test]
+fn the_khef_chooses_the_alias_and_it_is_what_the_peer_is_told() {
+    let (mut a, mut b, _) = subscribed();
+    let plan = track(&["m", "ctl", "plan"], "0");
+    assert!(b.session.publish(plan.clone(), 0x1234_5678_9abc));
+    run(&mut a, &mut b);
+    assert_eq!(
+        a.take_events(),
+        [Event::TrackOffered {
+            track: plan,
+            alias: 0x1234_5678_9abc
+        }]
+    );
+    // The same alias cannot stand for a second track on this link.
+    let report = track(&["m", "ctl", "report", "p7"], "0");
+    assert!(!b.session.publish(report.clone(), 0x1234_5678_9abc));
+    assert_eq!(b.flush(), []);
+    // Once the first track has ended it can.
+    b.session.end_track(0x1234_5678_9abc);
+    assert!(b.session.publish(report, 0x1234_5678_9abc));
+    run(&mut a, &mut b);
+    assert_eq!((a.closed, b.closed), (None, None));
+}
+
+#[test]
+fn both_ends_may_use_the_same_alias_for_the_same_track() {
+    // Each end announces the plan track to the other under the alias they both derive.
+    let (mut a, mut b) = pair();
+    a.session.subscribe_tracks(ns(&["m", "ctl"])).unwrap();
+    b.session.subscribe_tracks(ns(&["m", "ctl"])).unwrap();
+    run(&mut a, &mut b);
+    a.session.accept_tracks(StreamId::Theirs(1));
+    b.session.accept_tracks(StreamId::Theirs(1));
+    let plan = track(&["m", "ctl", "plan"], "0");
+    let alias = publish(&mut a, plan.clone());
+    assert_eq!(publish(&mut b, plan), alias);
+    run(&mut a, &mut b);
+    assert_eq!((a.closed, b.closed), (None, None));
+    a.take_events();
+    b.take_events();
+    // Objects flow both ways under it.
+    assert!(a.session.send_object(alias, 1, b"from a"));
+    assert!(b.session.send_object(alias, 2, b"from b"));
+    run(&mut a, &mut b);
+    assert_eq!(b.take_events(), [object(alias, 1, b"from a")]);
+    assert_eq!(a.take_events(), [object(alias, 2, b"from b")]);
+}
+
+#[test]
 fn a_track_nobody_asked_for_is_refused() {
     let (mut a, mut b, _) = subscribed();
-    let alias = b
-        .session
-        .publish(track(&["m", "video", "main", "p7"], "360p"))
-        .unwrap();
+    let alias = publish(&mut b, track(&["m", "video", "main", "p7"], "360p"));
     run(&mut a, &mut b);
     assert_eq!(a.take_events(), []);
     assert_eq!(
@@ -337,10 +392,7 @@ fn a_track_nobody_asked_for_is_refused() {
 #[test]
 fn a_track_that_ends_is_reported_once() {
     let (mut a, mut b, _) = subscribed();
-    let alias = b
-        .session
-        .publish(track(&["m", "ctl", "report", "p7"], "0"))
-        .unwrap();
+    let alias = publish(&mut b, track(&["m", "ctl", "report", "p7"], "0"));
     run(&mut a, &mut b);
     a.take_events();
     b.session.end_track(alias);
@@ -405,10 +457,7 @@ fn giving_up_a_request_for_tracks_tells_the_peer() {
 #[test]
 fn a_reset_ends_whatever_the_stream_carried() {
     let (mut a, mut b, request) = subscribed();
-    let alias = b
-        .session
-        .publish(track(&["m", "ctl", "plan"], "0"))
-        .unwrap();
+    let alias = publish(&mut b, track(&["m", "ctl", "plan"], "0"));
     run(&mut a, &mut b);
     a.take_events();
     b.take_events();
@@ -594,7 +643,7 @@ fn a_closed_session_does_nothing_more() {
     assert_eq!(b.close_code(), Some(CloseCode::ProtocolViolation));
     assert!(b.session.is_closed() && !b.session.is_ready());
     assert_eq!(b.session.subscribe_tracks(ns(&["m", "ctl"])), None);
-    assert_eq!(b.session.publish(track(&["m", "ctl", "plan"], "0")), None);
+    assert!(!b.session.publish(track(&["m", "ctl", "plan"], "0"), 1));
     b.feed(9, StreamKind::Bidi, &[1, 2, 3]);
     assert_eq!(b.flush(), []);
 }
@@ -642,10 +691,7 @@ fn a_padding_stream_is_read_and_thrown_away() {
 /// Returns the alias.
 fn publishing() -> (End, End, u64) {
     let (mut a, mut b, _) = subscribed();
-    let alias = b
-        .session
-        .publish(track(&["m", "ctl", "plan"], "0"))
-        .unwrap();
+    let alias = publish(&mut b, track(&["m", "ctl", "plan"], "0"));
     run(&mut a, &mut b);
     a.take_events();
     b.take_events();
@@ -729,10 +775,7 @@ fn an_object_may_arrive_a_byte_at_a_time() {
 #[test]
 fn an_object_that_overtakes_its_tracks_announcement_is_held_for_it() {
     let (mut a, mut b, _) = subscribed();
-    let alias = b
-        .session
-        .publish(track(&["m", "ctl", "plan"], "0"))
-        .unwrap();
+    let alias = publish(&mut b, track(&["m", "ctl", "plan"], "0"));
     b.session.send_object(alias, 5, b"plan five");
     let wires = b.flush();
     assert_eq!(wires.len(), 2, "the PUBLISH, then the object");
@@ -769,10 +812,7 @@ fn objects_that_arrive_before_the_peers_setup_wait_for_it() {
         panic!("{wanted:?}")
     };
     b.session.accept_tracks(*request);
-    let alias = b
-        .session
-        .publish(track(&["m", "ctl", "plan"], "0"))
-        .unwrap();
+    let alias = publish(&mut b, track(&["m", "ctl", "plan"], "0"));
     b.session.send_object(alias, 1, b"early");
     wires.extend(b.flush());
     let setup_wire = wires.remove(0);
@@ -883,10 +923,7 @@ fn objects_are_sent_only_on_tracks_being_published() {
     assert!(!b.session.encode_datagram(alias, 2, &[], b"x", &mut out));
     assert_eq!(b.flush(), []);
     // Nor on one the peer refused.
-    let refused = b
-        .session
-        .publish(track(&["m", "video", "main", "p7"], "360p"))
-        .unwrap();
+    let refused = publish(&mut b, track(&["m", "video", "main", "p7"], "360p"));
     run(&mut a, &mut b);
     assert!(!b.session.send_object(refused, 1, b"x"));
 }
@@ -897,10 +934,12 @@ fn an_audio_frame_crosses_in_a_datagram_with_its_level_and_nothing_is_copied() {
     a.session.subscribe_tracks(ns(&["m", "audio"])).unwrap();
     run(&mut a, &mut b);
     b.session.accept_tracks(StreamId::Theirs(1));
-    let alias2 = b
-        .session
-        .publish(track(&["m", "audio", "main", "p8"], "opus"))
-        .unwrap();
+    // A small alias, as media tracks should have: it is in every packet.
+    let alias2 = 9;
+    assert!(
+        b.session
+            .publish(track(&["m", "audio", "main", "p8"], "opus"), alias2)
+    );
     run(&mut a, &mut b);
 
     let frame = [0x5a; 80];
@@ -911,6 +950,19 @@ fn an_audio_frame_crosses_in_a_datagram_with_its_level_and_nothing_is_copied() {
     );
     // Seven bytes of header for an 80-byte frame, the level included.
     assert_eq!(datagram.len(), 80 + 7);
+    // The alias is in every packet, so its size matters: one drawn from 62 bits takes nine
+    // bytes instead of one.
+    let wide = alias_of(&track(&["m", "audio", "main", "p9"], "opus"));
+    assert!(
+        b.session
+            .publish(track(&["m", "audio", "main", "p9"], "opus"), wide)
+    );
+    let mut larger = vec![];
+    assert!(
+        b.session
+            .encode_datagram(wide, 4321, &level(57), &frame, &mut larger)
+    );
+    assert_eq!(larger.len(), 80 + 15);
     let palaver_khef_core::session::DatagramIn::Object {
         alias: got,
         group,
