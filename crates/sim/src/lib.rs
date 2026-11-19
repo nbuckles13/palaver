@@ -4,6 +4,7 @@
 //! order, so one seed always produces the same run. See `docs/spikes/05-simulator.md`.
 
 pub mod audio;
+pub mod meeting;
 mod rng;
 mod world;
 

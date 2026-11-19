@@ -1,6 +1,7 @@
 //! What every node does on the control plane, conductor or not:
 //!
-//! - publishes its own signed report once a second, and at once when something in it changes;
+//! - publishes its own signed report once a second, and sooner when something in it changes
+//!   (but never two within [`REPORT_MIN_GAP`]);
 //! - keeps the latest verified report from every other node;
 //! - holds the current plan, adopting a new one only under the replacement rule.
 //!
@@ -20,6 +21,11 @@ use std::time::Duration;
 
 /// How often a node reports when nothing has changed. Also the conductor's heartbeat.
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(1);
+/// The least time between two reports from a node. A change is reported at once unless a
+/// report went out less than this long ago; then it waits, and several changes share one
+/// report. Without it every plan makes every node report at once, and each of those reports
+/// floods to every node.
+pub const REPORT_MIN_GAP: Duration = Duration::from_millis(200);
 /// A node whose last report is older than this is no longer considered present.
 pub const REPORT_TIMEOUT: Duration = Duration::from_secs(3);
 /// The term of a meeting's first conductor, its creator.
@@ -87,6 +93,23 @@ pub enum ReportVerdict {
 struct Heard {
     report: Report,
     at: Timestamp,
+}
+
+/// Whether two reports from one node would lead the conductor to the same plan: the same
+/// identity, the same links by the same kind of path, the same unreachable nodes. Round-trip
+/// times are left out: they move all the time, and matter only when an edge is next chosen.
+fn same_for_planning(old: &Report, new: &Report) -> bool {
+    let paths = |report: &Report| -> Vec<_> {
+        report
+            .links
+            .iter()
+            .map(|link| (link.peer.clone(), link.path))
+            .collect()
+    };
+    old.key == new.key
+        && old.name == new.name
+        && old.unreachable == new.unreachable
+        && paths(old) == paths(new)
 }
 
 /// One node's control-plane state.
@@ -184,6 +207,18 @@ impl<S: Signer, V: Verifier> Node<S, V> {
 
     /// An object arrived on the plan track in group `group_id`.
     pub fn on_plan(&mut self, group_id: u64, envelope: &[u8]) -> PlanVerdict {
+        // A plan floods in over every link, so most arrivals are copies of the one held, or
+        // older. Those are settled by the group id alone, before paying for a signature
+        // check; nothing is adopted on this path, so a forged copy gains nothing.
+        if let Some(held) = &self.plan {
+            let held_group = held.stamp.group_id();
+            if group_id == held_group {
+                return PlanVerdict::Duplicate;
+            }
+            if group_id < held_group {
+                return PlanVerdict::NotAllowed;
+            }
+        }
         let next = match Plan::open(&self.config.meeting, group_id, envelope, &self.verifier) {
             Ok(plan) => plan,
             Err(e) => return PlanVerdict::Invalid(e),
@@ -229,9 +264,18 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             &self.verifier,
         ) {
             Ok(report) => {
-                self.reports
+                let previous = self
+                    .reports
                     .insert(participant.clone(), Heard { report, at: now });
-                self.mark_stale();
+                let latest = self.reports.get(participant).map(|heard| &heard.report);
+                // Most reports are the once-a-second repeat. The conductor looks at its plan
+                // again only when one says something the plan depends on.
+                if !previous
+                    .zip(latest)
+                    .is_some_and(|(old, new)| same_for_planning(&old.report, new))
+                {
+                    self.mark_stale();
+                }
                 ReportVerdict::Accepted
             }
             Err(e) => ReportVerdict::Invalid(e),
@@ -353,10 +397,15 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         if let Some(plan) = self.poll_plan(now) {
             return Some(plan);
         }
-        let due = self
+        let wait = if self.changed {
+            REPORT_MIN_GAP
+        } else {
+            REPORT_INTERVAL
+        };
+        if self
             .last_sent
-            .is_none_or(|sent| now.saturating_since(sent) >= REPORT_INTERVAL);
-        if !self.changed && !due {
+            .is_some_and(|sent| now.saturating_since(sent) < wait)
+        {
             return None;
         }
         let report = Report {
@@ -382,8 +431,9 @@ impl<S: Signer, V: Verifier> Node<S, V> {
     /// When to call [`Node::poll`] next if nothing else happens.
     pub fn next_wake(&self, now: Timestamp) -> Timestamp {
         let report = match self.last_sent {
-            Some(sent) if !self.changed => sent.saturating_add(REPORT_INTERVAL),
-            _ => now,
+            Some(sent) if self.changed => sent.saturating_add(REPORT_MIN_GAP).max(now),
+            Some(sent) => sent.saturating_add(REPORT_INTERVAL),
+            None => now,
         };
         let Some(conducting) = &self.conducting else {
             return report;
@@ -500,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_is_reported_at_once_and_an_unchanged_view_is_not() {
+    fn a_change_is_reported_at_once_but_never_within_the_minimum_gap() {
         let mut n = node(1);
         n.poll(at(0));
         let view = LocalView {
@@ -513,19 +563,26 @@ mod tests {
             ..LocalView::default()
         };
         n.set_view(view.clone());
-        assert_eq!(n.next_wake(at(10)), at(10));
-        let report = opened(n.poll(at(10)), 1);
+        // A report went out 10 ms ago, so this one waits for the gap to pass.
+        assert_eq!(n.next_wake(at(10)), at(200));
+        assert_eq!(n.poll(at(10)), None);
+        assert_eq!(n.poll(at(199)), None);
+        let report = opened(n.poll(at(200)), 1);
         assert_eq!(report.links, view.links);
         assert_eq!(report.addresses, view.addresses);
         n.set_view(view);
-        assert_eq!(n.poll(at(20)), None);
+        assert_eq!(n.poll(at(400)), None, "an unchanged view is not a change");
         // The one-second cadence now runs from the report just sent.
-        assert_eq!(n.poll(at(1000)), None);
-        assert!(n.poll(at(1010)).is_some());
+        assert_eq!(n.poll(at(1199)), None);
+        assert!(n.poll(at(1200)).is_some());
+        // Once the gap has passed, a change is reported at once.
+        n.set_view(LocalView::default());
+        assert_eq!(n.next_wake(at(1500)), at(1500));
+        assert!(n.poll(at(1500)).is_some());
     }
 
     #[test]
-    fn a_joiner_adopts_the_first_verified_plan_and_reports_it_at_once() {
+    fn a_joiner_adopts_the_first_verified_plan_and_reports_it() {
         let mut n = node(3);
         n.poll(at(0));
         let (group, envelope) = plan(4, 7, 1, &[2], 2);
@@ -538,7 +595,7 @@ mod tests {
             })
         );
         assert_eq!(
-            opened(n.poll(at(5)), 3).applied_plan,
+            opened(n.poll(at(200)), 3).applied_plan,
             Some(PlanStamp {
                 term: 4,
                 generation: 7
@@ -781,7 +838,7 @@ mod tests {
         let group = plan.stamp.group_id();
         let object = plan.seal(&meeting(), &FakeIdentity(1));
         assert_eq!(j.on_plan(group, &object), PlanVerdict::Adopted);
-        assert_eq!(opened(j.poll(at(110)), 2).applied_plan, Some(plan.stamp));
+        assert_eq!(opened(j.poll(at(300)), 2).applied_plan, Some(plan.stamp));
         // Its own plan coming back round the flood changes nothing for the conductor.
         assert_eq!(c.on_plan(group, &object), PlanVerdict::Duplicate);
         assert!(c.is_conductor());
@@ -987,5 +1044,57 @@ mod tests {
         let (group, envelope) = plan(2, 0, 2, &[], 2);
         assert_eq!(c.on_plan(group, &envelope), PlanVerdict::NotAllowed);
         assert!(c.is_conductor());
+    }
+
+    #[test]
+    fn a_copy_of_the_plan_held_or_an_older_one_is_settled_without_checking_it() {
+        let mut n = node(3);
+        let (group, envelope) = plan(1, 5, 1, &[2], 3);
+        assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
+        // Garbage under the same group id, and under an older one: dropped, nothing changes.
+        assert_eq!(n.on_plan(group, b"not a plan"), PlanVerdict::Duplicate);
+        assert_eq!(n.on_plan(group - 1, b"not a plan"), PlanVerdict::NotAllowed);
+        // Under a newer one it is checked, and refused.
+        assert!(matches!(
+            n.on_plan(group + 1, b"not a plan"),
+            PlanVerdict::Invalid(_)
+        ));
+        assert_eq!(n.plan().map(|p| p.stamp.group_id()), Some(group));
+    }
+
+    #[test]
+    fn the_conductor_replans_on_a_report_that_matters_and_not_on_a_repeat() {
+        let (mut c, mut j, mut k) = (node(1), node(2), node(3));
+        c.create_meeting();
+        report(&mut j, &mut c, at(0));
+        report(&mut k, &mut c, at(0));
+        let before = issued(c.poll(at(0)));
+        drain(&mut c, at(0));
+        // A repeat: no reason to look at the plan, so no wake before the next report.
+        report(&mut k, &mut c, at(500));
+        assert_eq!(c.next_wake(at(500)), at(1000));
+        // 3 now says it cannot reach 1.
+        k.set_view(LocalView {
+            unreachable: vec![id_of(1)],
+            ..LocalView::default()
+        });
+        report(&mut k, &mut c, at(600));
+        assert_eq!(c.next_wake(at(600)), at(600));
+        let after = issued(c.poll(at(600)));
+        assert!(before.audio_overlay.contains(&edge(1, 3)));
+        assert!(!after.audio_overlay.contains(&edge(1, 3)));
+    }
+
+    #[test]
+    fn several_changes_inside_the_gap_share_one_report() {
+        let mut n = node(3);
+        n.poll(at(0));
+        for (ms, generation) in [(20, 0), (60, 1), (100, 2)] {
+            let (group, envelope) = plan(1, generation, 1, &[], 3);
+            assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
+            assert_eq!(n.poll(at(ms)), None);
+        }
+        assert_eq!(opened(n.poll(at(200)), 3).applied_plan, Some(stamp(1, 2)));
+        assert_eq!(n.poll(at(200)), None);
     }
 }

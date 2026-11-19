@@ -163,6 +163,11 @@ catalog track lists each participant's available tracks.
   checks the key hashes to the participant id in the track name. A plan is signed by its
   conductor, whose key is in the roster. `proto` does no cryptography: signing and verifying
   come through traits.
+- **Cheap checks first**: a plan floods in over every link, so most arrivals are copies. A
+  node settles a plan whose group id is not higher than the one it holds without checking
+  the signature, as it already does for reports. The conductor looks at its plan again only
+  when a report differs in something the plan depends on (identity, links and their path
+  kind, unreachable nodes); round-trip times alone do not trigger it.
 - **Who may issue a plan**: a node adopts a plan of the same term only from the same conductor
   with a later generation, and a plan of the next term only if its conductor is on the held
   plan's successor list. A joiner has nothing to check against and adopts the first verified
@@ -177,8 +182,11 @@ catalog track lists each participant's available tracks.
   another's reports with a forged high group id. A report is dropped from the cache 3 s
   after it arrives (its group id is remembered, so it cannot come back from a neighbour that
   still holds it); the plan is kept until replaced. The number of tracks remembered is capped.
-- **Cadence**: a node sends a report once a second, and at once on change. Phase 1 sends whole
-  plans, not deltas.
+- **Cadence**: a node sends a report once a second, and at once on change, but never two
+  within 200 ms: changes inside that gap share one report. Without the gap every plan makes
+  every node report at once (its "last plan applied" changed) and each of those reports floods
+  to every node; in the simulator a 50-node meeting forming sent 130,000 control objects in
+  two seconds. Phase 1 sends whole plans, not deltas.
 - **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
   RTT), unreachable peers, last plan applied, up to eight addresses, iroh-relay URL. Plan: term and generation, conductor, roster,
   peerings, audio overlay tree and N, successor list. The rest of the lists above arrives as
@@ -222,6 +230,18 @@ otherwise closed once the planned peerings are up.
   after 3 seconds without a report. Host approval and meeting lock come later.
 - **Peerings**: on one network the node with the lower participant id dials. With NAT
   traversal both dial at once and one connection is kept by the same tie-break.
+- **First report**: a joiner's control logic starts when its entry link is up, so its first
+  report names that link and the conductor wires it by a link that already works.
+- **Closing unplanned links**: a node closes a link the plan does not name only when both
+  ends are in the roster and both are wired as the plan says. It knows how the other end
+  stands from that node's report (plan applied, links held). Until then the link may be the
+  other end's only way to receive the plan, or to be heard of at all.
+- **Cut off**: a node left with no link at all dials the members of the last plan it saw,
+  one after another, until one answers, and carries on as a joiner would. The others cannot
+  do this for it: they cannot tell a node that was cut off from one that left.
+- These three rules were found by running the real control logic in the simulator: without
+  them the conductor hangs up on every joiner, a khef hangs up on a joiner whose planned
+  links are still being dialled, and a node whose neighbours all crash never returns.
 - **Audio wiring**: for each overlay link in the plan, each khef sends `SUBSCRIBE_TRACKS` for
   the audio prefix; every audio track is announced with `PUBLISH`; top-N gates only the
   datagrams. N comes from the plan, which every node holds.
@@ -260,7 +280,9 @@ otherwise closed once the planned peerings are up.
     ids. At most 4 tree links per node unless a node can be reached no other way, which bounds
     a node's audio uplink to 4 × N tracks.
   - *Peerings*: every tree edge, plus, for each node, its nearest nodes until it has two, so
-    the control flood has a second path and a replacement tree edge is already connected.
+    the control flood has a second path and a replacement tree edge is already connected. A
+    node that already has six is passed over while another will do; otherwise the node
+    everyone joined through would be everyone's second peering.
   - The conductor re-runs the rule when a report or its own links change or a member times
     out, and issues a plan only if the roster or wiring differs from the one in force (a
     round-trip time that moves does not cause a plan).

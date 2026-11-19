@@ -142,12 +142,14 @@ pub mod fake {
     use super::*;
 
     fn mix(key: &PublicKey, message: &[u8]) -> [u8; SIGNATURE_BYTES] {
+        // One pass over the input, then stretched to the length of a signature.
         let mut state = 0xcbf2_9ce4_8422_2325u64;
+        for byte in key.0.iter().chain(message) {
+            state = (state ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
         let mut out = [0u8; SIGNATURE_BYTES];
         for (i, slot) in out.iter_mut().enumerate() {
-            for byte in key.0.iter().chain(message).chain(&[i as u8]) {
-                state = (state ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
-            }
+            state = (state ^ i as u64).wrapping_mul(0x0000_0100_0000_01b3);
             *slot = (state >> 24) as u8;
         }
         out

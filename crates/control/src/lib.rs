@@ -4,5 +4,5 @@ mod node;
 
 pub use node::{
     AUDIO_TOP_N, Config, FIRST_TERM, LocalView, Node, Output, PlanVerdict, REPORT_INTERVAL,
-    REPORT_TIMEOUT, ReportVerdict,
+    REPORT_MIN_GAP, REPORT_TIMEOUT, ReportVerdict,
 };

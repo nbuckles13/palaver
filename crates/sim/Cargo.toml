@@ -12,7 +12,9 @@ repository.workspace = true
 palaver-khef-core = { workspace = true }
 palaver-control = { workspace = true }
 palaver-topology = { workspace = true }
-palaver-proto = { workspace = true }
+# The simulator signs with the stand-in signer; nothing that ships may depend on this crate
+# (checked by the guards crate).
+palaver-proto = { workspace = true, features = ["fake-crypto"] }
 
 [lints]
 workspace = true
