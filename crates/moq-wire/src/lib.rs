@@ -36,7 +36,7 @@ pub use request::{
 };
 pub use setup::{PALAVER_EXTENSIONS, PalaverExtensions, SETUP, Setup, negotiated_palaver_version};
 pub use subgroup::{
-    SubgroupHeader, SubgroupId, SubgroupObject, SubgroupReader, SubgroupWriter, UniStream,
-    uni_stream,
+    ObjectPrefix, PADDING_DATAGRAM, PADDING_STREAM, PrefixBody, SubgroupHeader, SubgroupId,
+    SubgroupObject, SubgroupReader, SubgroupWriter, UniStream, is_padding_datagram, uni_stream,
 };
 pub use varint::{put_vi64, vi64_len};
