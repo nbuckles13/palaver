@@ -1,5 +1,9 @@
 //! Shared types: ids, names, reports, plan, and the secret and redaction wrappers.
 
+/// Time in microseconds on the caller's clock. Sans-IO code never reads a clock; it is told
+/// the time. Only differences matter.
+pub type Micros = u64;
+
 mod fields;
 mod names;
 mod plan;

@@ -261,6 +261,12 @@ otherwise closed once the planned peerings are up.
    subscribes to its local client. A track is produced only while someone subscribes.
 3. One group of pictures per QUIC stream; a subscriber joins at the next group start. Keyframes
    are requested with `NEW_GROUP_REQUEST`, forwarded upstream and deduplicated per hop.
+   *Deferred optimisation*: serve a joiner from frames already sent instead of asking for a
+   keyframe, which costs every subscriber of the track a large frame and bunches up when many
+   people join at once. A khef would keep the current group of each video track it carries and
+   a subscriber would ask to start at the beginning of that group (a location filter, already
+   in the codec; `FETCH` only for anything older). Costs: one group per track in memory at each
+   khef, and a joiner decoding up to a group of old frames to reach the live edge.
 
 ```
 (m, video, main, p12)            → via khef B          default route for p12's camera
