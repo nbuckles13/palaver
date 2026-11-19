@@ -120,6 +120,81 @@ pub enum Track {
     Plan,
 }
 
+/// The alias of the plan track.
+pub const PLAN_ALIAS: u64 = 1 << 61;
+/// Set in the alias of every report track.
+const REPORT_ALIAS: u64 = PLAN_ALIAS | 1 << 60;
+/// How many media tracks a member can have an alias for.
+const MEDIA_SLOTS: u64 = 8;
+
+impl Track {
+    /// The participant whose track this is; `None` for the plan.
+    pub fn participant(&self) -> Option<&ParticipantId> {
+        match self {
+            Self::Audio { participant, .. }
+            | Self::Video { participant, .. }
+            | Self::Report { participant } => Some(participant),
+            Self::Plan => None,
+        }
+    }
+
+    /// Which of a member's media tracks this is, if it is one with an alias.
+    fn media_slot(&self) -> Option<u64> {
+        let (audio, source, rendition) = match self {
+            Self::Audio {
+                source, rendition, ..
+            } => (true, *source, rendition.as_slice()),
+            Self::Video {
+                source, rendition, ..
+            } => (false, *source, rendition.as_slice()),
+            _ => return None,
+        };
+        match (audio, source, rendition) {
+            (true, Source::Main, b"opus") => Some(0),
+            (true, Source::Screen, b"opus") => Some(1),
+            (false, Source::Main, b"180p") => Some(2),
+            (false, Source::Main, b"360p") => Some(3),
+            (false, Source::Main, b"1080p") => Some(4),
+            (false, Source::Screen, b"1080p") => Some(5),
+            _ => None,
+        }
+    }
+
+    /// The alias every khef in the meeting uses for this track: the short number that
+    /// stands for its name in each object. Because it is the same on every link, a khef
+    /// forwards a datagram exactly as it arrived.
+    ///
+    /// - A media track: the member's number from the plan (`member_number`) and which of
+    ///   its tracks it is. It is in every packet, so it is small: one byte for the first 16
+    ///   members to join, two for the first 2,048. `None` if the plan does not list the node
+    ///   yet (media flows only once it does), or the rendition is not one with an alias.
+    /// - A report track: taken from the participant id, which is already a hash of the
+    ///   node's key. It must work before the node is in any plan, and reports are rare
+    ///   enough that its nine bytes do not matter.
+    /// - The plan track: a fixed number.
+    ///
+    /// The three kinds cannot collide with each other.
+    pub fn alias(&self, member_number: Option<u64>) -> Option<u64> {
+        match self {
+            Self::Plan => Some(PLAN_ALIAS),
+            Self::Report { participant } => {
+                let mut prefix = [0u8; 8];
+                for (slot, byte) in prefix.iter_mut().zip(participant.as_bytes()) {
+                    *slot = *byte;
+                }
+                Some(REPORT_ALIAS | u64::from_be_bytes(prefix) >> 4)
+            }
+            Self::Audio { .. } | Self::Video { .. } => {
+                let slot = self.media_slot()?;
+                member_number?
+                    .checked_mul(MEDIA_SLOTS)
+                    .and_then(|base| base.checked_add(slot))
+                    .filter(|alias| *alias < PLAN_ALIAS)
+            }
+        }
+    }
+}
+
 /// A track of one meeting, convertible to and from its MoQ name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TrackName {
@@ -409,5 +484,92 @@ mod tests {
         let out = format!("{name:?}");
         assert!(!out.contains("7f3a") && !out.contains("109"), "{out}");
         assert!(out.contains("Plan"), "{out}");
+    }
+
+    fn media(audio: bool, source: Source, participant: u8, rendition: &str) -> Track {
+        let participant = ParticipantId::new(&[participant; 16]).unwrap();
+        let rendition = rendition.as_bytes().to_vec();
+        if audio {
+            Track::Audio {
+                source,
+                participant,
+                rendition,
+            }
+        } else {
+            Track::Video {
+                source,
+                participant,
+                rendition,
+            }
+        }
+    }
+
+    #[test]
+    fn media_aliases_are_small_and_distinct_within_and_between_members() {
+        let tracks = [
+            media(true, Source::Main, 1, "opus"),
+            media(true, Source::Screen, 1, "opus"),
+            media(false, Source::Main, 1, "180p"),
+            media(false, Source::Main, 1, "360p"),
+            media(false, Source::Main, 1, "1080p"),
+            media(false, Source::Screen, 1, "1080p"),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for number in 0..300u64 {
+            for track in &tracks {
+                let alias = track.alias(Some(number)).unwrap();
+                assert!(seen.insert(alias), "alias {alias} twice");
+                // One byte on the wire for the first 16 members, two up to 2,048.
+                let bytes = palaver_moq_wire::vi64_len(alias);
+                assert_eq!(bytes, if number < 16 { 1 } else { 2 }, "member {number}");
+            }
+        }
+        assert_eq!(
+            palaver_moq_wire::vi64_len(tracks[0].alias(Some(2047)).unwrap()),
+            2
+        );
+        assert_eq!(
+            palaver_moq_wire::vi64_len(tracks[0].alias(Some(2048)).unwrap()),
+            3
+        );
+    }
+
+    #[test]
+    fn a_media_track_has_no_alias_without_a_member_number_or_a_known_rendition() {
+        assert_eq!(media(true, Source::Main, 1, "opus").alias(None), None);
+        assert_eq!(media(false, Source::Main, 1, "720p").alias(Some(3)), None);
+        assert_eq!(media(true, Source::Main, 1, "aac").alias(Some(3)), None);
+        // A number so large the alias would run into the control range.
+        assert_eq!(
+            media(true, Source::Main, 1, "opus").alias(Some(u64::MAX / 4)),
+            None
+        );
+    }
+
+    #[test]
+    fn control_aliases_need_no_plan_and_cannot_collide_with_media_or_each_other() {
+        assert_eq!(Track::Plan.alias(None), Some(PLAN_ALIAS));
+        let report = |bytes: &[u8]| Track::Report {
+            participant: ParticipantId::new(bytes).unwrap(),
+        };
+        let a = report(&[0x11; 16]).alias(None).unwrap();
+        let b = report(&[0x12; 16]).alias(None).unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, PLAN_ALIAS);
+        // The same with or without a member number: a report flows before the plan lists
+        // its node.
+        assert_eq!(report(&[0x11; 16]).alias(Some(5)), Some(a));
+        // Above every media alias, and within what a varint can carry.
+        let highest_media = media(false, Source::Screen, 1, "1080p")
+            .alias(Some(1 << 40))
+            .unwrap();
+        assert!(highest_media < PLAN_ALIAS && PLAN_ALIAS < a);
+        // Ids that differ only after the first seven and a half bytes share an alias; real
+        // ids are hashes, so that takes 2^60 tries to contrive.
+        let mut near = [0x11; 16];
+        near[15] = 0xff;
+        assert_eq!(report(&near).alias(None), Some(a));
+        // A short id still has one.
+        assert!(report(&[7]).alias(None).is_some());
     }
 }

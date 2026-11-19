@@ -245,7 +245,8 @@ catalog track lists each participant's available tracks.
   - Phase 1 sends whole plans, not deltas.
 - **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
   RTT), unreachable peers, last plan applied, up to eight addresses, iroh-relay URL. Plan: term and generation, conductor, roster,
-  peerings, audio overlay tree and N, successor list. The rest of the lists above arrives as
+  peerings, audio overlay tree and N, successor list, each member's number and the next
+  number to give. The rest of the lists above arrives as
   new field numbers.
 - **Everyone holds the whole plan; transit khefs and successors hold all reports.**
 - No gossip library: one conductor means nothing to agree on, and 50 nodes are few enough to
@@ -551,17 +552,21 @@ A **profile** of MoQT, deliberately small:
   forwarded byte for byte: no rewrite, one shared buffer for all links, no per-link alias
   map on the forwarding path. The session takes the alias from the khef and refuses one
   already in use on that connection.
-- **Open: where the alias comes from.** It is in every packet, so its size matters: a
-  number up to 127 takes one byte, up to 16,383 two, and one drawn from 62 bits nine. On an
-  80-byte audio frame that is 87, 88 or 95 bytes. Options:
-  1. *From the track's name* (a hash): needs no coordination and works before a node is in
-     the plan, but must be wide to make collisions negligible and hard to contrive, so it
-     costs 8 bytes a packet (about 3 kbit/s per audio track).
-  2. *From the plan*: the conductor gives each member a small number and the alias is that
-     number with the kind of track; one or two bytes, no collisions, but only for tracks of
-     nodes the plan already lists.
-  3. *Both*: plan-assigned small aliases for media, name-derived wide ones for control
-     tracks, which must flow before a node is in the plan and whose objects are rare.
+- **Where the alias comes from** (`proto::Track::alias`). It is in every packet, so its
+  size matters: a number up to 127 takes one byte, up to 16,383 two, and one drawn from 62
+  bits nine. On an 80-byte audio frame that is 87, 88 or 95 bytes.
+  - *Media tracks*: from the plan. The conductor gives each member a number when it joins,
+    never given to another member of the meeting (the plan carries the next number, so a new
+    conductor continues from it). The alias is that number times eight plus which of the
+    member's tracks it is (microphone, screen audio, three camera renditions, screen video).
+    One byte for the first 16 members to join, two for the first 2,048. Media flows only
+    once the plan wires a node, so the number is always known in time.
+  - *Report tracks*: from the participant id, which is already a hash of the node's key. A
+    report must flow before its node is in any plan, and reports are rare enough that nine
+    bytes do not matter. Contriving a clash takes about 2^60 tries.
+  - *The plan track*: a fixed number.
+  - The three ranges cannot collide. A hash of the track's name was considered for
+    everything and dropped: wide enough to be safe, it costs 8 bytes in every audio packet.
 - **Rules from the khef spike**: group ids count for the life of a track; hold data streams whose
   alias is not known yet; linger before unsubscribing upstream; release an old upstream only once
   the new one delivers a group start; bounded dedupe window.
