@@ -1,0 +1,22 @@
+[package]
+name = "palaver-node"
+description = "One node's core: the khef and the control logic driven together, with the start-up rules."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+palaver-moq-wire = { workspace = true }
+palaver-proto = { workspace = true }
+palaver-khef-core = { workspace = true }
+palaver-control = { workspace = true }
+
+# Tests sign with the stand-in signer. A dev-dependency, so it never reaches a shipped build.
+[dev-dependencies]
+palaver-proto = { workspace = true, features = ["fake-crypto"] }
+
+[lints]
+workspace = true

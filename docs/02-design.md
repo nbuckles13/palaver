@@ -66,6 +66,7 @@ shared):
 | `khef-core` | Khef state machine: sessions, subscriptions, routing, top-N, priorities, dedupe, congestion marking | none |
 | `topology` | (roster, reports, link graph) → plan | none |
 | `control` | Membership, conductor election and hand-over | sans-IO core + driver |
+| `node` | One node's core: the khef and the control logic driven together, and the rules that join them (carry out the plan, report links, find the meeting when alone) | none |
 | `net` | QUIC endpoint, in-memory transport, rendezvous, admission handshake | yes |
 | `media` | Capture/encode/decode/render/audio-processing/jitter traits, platform impls, synthetic sources | yes |
 | `sdk` | Public API; later UniFFI bindings | yes |
@@ -449,6 +450,13 @@ otherwise closed once the planned peerings are up.
   overlay at forwarding speed. With more than N simultaneous talkers, listeners may hear
   different subsets. No overlay link carries more than N tracks per direction. A leaf khef
   always forwards its own client; a transit khef ranks its client against its other links.
+  - *The hold compounds per hop.* Measured in the full simulation: when four talkers start
+    in the same instant with N = 3, the quietest may take a slot first. Each khef holds a
+    selection for 250 ms before giving it up, and a khef further on can only choose among
+    what the one before it passes. So the third loudest reached listeners one hop away
+    260 ms late and listeners two hops away 520 ms late; after that everyone heard exactly
+    the loudest three. This only happens when more than N start together. If it matters,
+    the hold could apply only at the khef nearest each talker.
 - Declared levels are untrusted and bounded by conductor priority rules (host/pinned always
   pass; server-muted never pass).
 
@@ -536,6 +544,12 @@ A **profile** of MoQT, deliberately small:
   Introduction is done by members over the control tracks, with iroh-relay as the helper and
   fallback (spike 1); quinn as fallback; behind a trait that offers request streams, unidirectional
   streams and datagrams.
+- **The node** (`palaver_node::Node`) owns the khef and the control logic, which do not know
+  of each other. Control objects go up from the khef to be checked and come down to be
+  flooded; an adopted plan is carried out (dial planned peers, tell the khef where audio
+  goes, close unplanned links once both ends are wired); link changes go into the node's
+  report. It is sans-IO, so the simulator runs the same code the product will: every
+  simulated node is a real `Node`, and what crosses the simulated links is real MoQ.
 - **The khef** (`khef_core::Khef`) holds a session and a link watch per neighbour and ties
   them to the flood and to top-N:
   - *Control*: an object that arrives is handed up to the node's control logic, which

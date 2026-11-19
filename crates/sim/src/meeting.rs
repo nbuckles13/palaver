@@ -1,85 +1,89 @@
-//! A whole meeting's control plane in the simulator: every node runs the real
-//! [`palaver_control::Node`] and [`palaver_khef_core::Flood`], joined by simulated links.
+//! A whole meeting in the simulator: every node is a real [`palaver_node::Node`], which is
+//! the real khef and the real control logic driven together, and what crosses the simulated
+//! links is what would cross real ones: MoQ sessions on streams, and datagrams.
 //!
-//! What stands in for the parts not built yet (`net`, `sdk`) is deliberately thin and follows
-//! the design's start-up rules:
+//! The simulator supplies only what the network and the operating system would:
 //!
-//! - a joiner dials one entry node; a link that comes up gives each end the other's latest
-//!   control objects;
-//! - an object is checked by the receiving node's control logic and flooded only if accepted;
-//! - a joiner's control logic starts when its entry link is up, so its first report names
-//!   that link;
-//! - when a node adopts a plan it dials the planned peers it has no link to (the lower
-//!   participant id dials);
-//! - a link the plan does not name is closed only once both ends are wired as the plan says,
-//!   which each end learns from the other's report;
-//! - a node left with no link at all dials the members of the last plan it saw until one
-//!   answers;
-//! - a dial to a node it cannot reach fails after a timeout and is reported as unreachable;
-//! - every node watches its links with the real [`LinkWatch`]: an idle link carries a filler
-//!   every 200 ms, and a neighbour that crashes is noticed when its links fall silent.
+//! - connections: a dial succeeds after a delay, or fails after a timeout if the two nodes
+//!   cannot reach each other or the other is not running;
+//! - streams that deliver their bytes in order after a delay, and datagrams that may
+//!   overtake one another;
+//! - a clock.
+//!
+//! Everything else is the nodes' own doing, including noticing that a neighbour has crashed
+//! (its links fall silent).
 //!
 //! Signatures are the stand-in kind (`fake-crypto`): the simulator tests behaviour, not
 //! cryptography.
 
 use crate::{NodeId, Rng, World};
-use palaver_control::{
-    Config, LocalView, Node, Output, PlanVerdict, REPORT_TIMEOUT, ReportVerdict,
-};
-use palaver_khef_core::{Flood, LinkWatch, LinkWatchConfig, Offer};
+use palaver_khef_core::{Action, AudioOut, LinkWatchConfig, Role, StreamId, StreamKind};
+use palaver_moq_wire::{PalaverExtensions, Setup};
+use palaver_node::{Config, Counters, Node, Output};
 use palaver_proto::sign::fake::{FakeIdentity, FakeVerifier};
 use palaver_proto::{
-    Link, MeetingTag, ParticipantId, PathKind, Plan, Redacted, Signer, Timestamp, Track, Verifier,
+    MediaTrack, MeetingTag, ParticipantId, PathKind, Plan, Redacted, Signer, Source, Timestamp,
+    Verifier,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 /// Most nodes a simulated meeting can hold: the stand-in identities have one seed byte.
 pub const MAX_NODES: NodeId = 256;
-/// Control tracks a simulated khef remembers.
-const MAX_CONTROL_TRACKS: usize = 1024;
+/// The length of a filler datagram.
+const FILLER_BYTES: usize = 5;
 
-/// How long a khef keeps the latest object of a control track.
-fn lifetime(track: &Track) -> Option<Duration> {
-    match track {
-        Track::Report { .. } => Some(REPORT_TIMEOUT),
-        _ => None,
-    }
-}
-
+/// What can reach a node. A link is named by the node at its other end and by which
+/// connection between the two it is, so that bytes still on their way when a connection is
+/// replaced are not taken for the new one's.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Event {
-    /// The node's control logic asked to be called.
+    /// The node asked to be called.
     Wake,
-    /// A control object arriving from a neighbour.
-    Object {
-        from: NodeId,
-        track: Track,
-        group: u64,
-        payload: Vec<u8>,
+    /// A connection to `peer` is established. `dialled` if this end dialled it.
+    LinkUp {
+        peer: NodeId,
+        connection: u64,
+        dialled: bool,
     },
-    /// A connection to `peer` is established.
-    LinkUp { peer: NodeId },
-    /// The connection to `peer` is gone.
-    LinkDown { peer: NodeId },
+    /// The other end closed the connection.
+    LinkDown { peer: NodeId, connection: u64 },
     /// A dial to `peer` gave up.
     DialFailed { peer: NodeId },
-    /// A filler from a neighbour with nothing else to send.
-    Filler { from: NodeId },
+    Data {
+        from: NodeId,
+        connection: u64,
+        stream: StreamId,
+        unidirectional: bool,
+        bytes: Vec<u8>,
+        fin: bool,
+    },
+    Reset {
+        from: NodeId,
+        connection: u64,
+        stream: StreamId,
+    },
+    Datagram {
+        from: NodeId,
+        connection: u64,
+        bytes: Vec<u8>,
+    },
 }
 
 struct Member {
-    id: ParticipantId,
-    control: Node<FakeIdentity, FakeVerifier>,
-    flood: Flood<Track, NodeId>,
-    links: BTreeSet<NodeId>,
-    /// One per link: is the other end still sending?
-    watches: BTreeMap<NodeId, LinkWatch>,
-    dialing: BTreeSet<NodeId>,
-    unreachable: BTreeSet<NodeId>,
-    /// The node holds a link the plan does not name, kept until the other end is wired.
-    surplus_links: bool,
-    /// The earliest wake already scheduled, so each poll does not schedule another.
+    node: Node<FakeIdentity, FakeVerifier>,
+    /// The connections this node holds, by the node at the other end.
+    links: BTreeMap<NodeId, u64>,
+    /// The kind of each stream this node opened and has not finished, by connection and
+    /// number.
+    kinds: BTreeMap<(u64, u64), StreamKind>,
+    /// The connections on which this node has opened its control stream.
+    control_streams: BTreeSet<u64>,
+    /// Audio frames this node's client was given to play: (alias, frame).
+    heard: Vec<(u64, u64)>,
+    /// What the node had counted when last looked at.
+    counted: Counters,
+    /// The earliest wake already scheduled, so each call does not schedule another.
     wake_at: Option<Timestamp>,
 }
 
@@ -88,13 +92,15 @@ struct Member {
 pub struct Stats {
     /// Reports published by nodes.
     pub reports_published: u64,
-    /// Control objects sent over links.
+    /// Control objects sent over links, each on a stream of its own.
     pub objects_sent: u64,
-    /// Their size in all, in bytes, without transport overhead.
+    /// Bytes sent on streams: control objects and the MoQ messages around them.
     pub bytes_sent: u64,
+    /// Audio datagrams sent over links.
+    pub audio_sent: u64,
     /// Fillers sent on links with nothing else to carry.
     pub fillers_sent: u64,
-    /// Of those, how many the receiver already had or would not take.
+    /// Control objects the receiver already had or would not take.
     pub objects_dropped: u64,
     /// Plans issued by conductors.
     pub plans_issued: u64,
@@ -102,6 +108,8 @@ pub struct Stats {
     pub links_made: u64,
     /// Dials that failed.
     pub dials_failed: u64,
+    /// MoQ sessions closed for a protocol error. Always a bug somewhere.
+    pub sessions_closed: u64,
 }
 
 /// A simulated meeting.
@@ -114,10 +122,15 @@ pub struct Meeting {
     by_id: BTreeMap<ParticipantId, NodeId>,
     /// Pairs that cannot connect, lower node first.
     blocked: BTreeSet<(NodeId, NodeId)>,
+    connections: u64,
+    /// When the last bytes sent on each stream will arrive, so that later ones do not
+    /// arrive first: by sender, connection and the sender's name for the stream.
+    stream_clock: BTreeMap<(NodeId, u64, StreamId), Timestamp>,
     stats: Stats,
     /// One-way delay of every link.
     pub link_delay: Duration,
-    /// Extra random delay per object, up to this much; lets objects overtake each other.
+    /// Extra random delay, up to this much. Lets datagrams, and bytes on different streams,
+    /// overtake each other.
     pub link_jitter: Duration,
     /// How long a successful dial takes.
     pub dial_time: Duration,
@@ -132,6 +145,14 @@ fn ordered(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     (a.min(b), a.max(b))
 }
 
+/// A stream as the other end of the connection names it.
+fn flipped(stream: StreamId) -> StreamId {
+    match stream {
+        StreamId::Ours(n) => StreamId::Theirs(n),
+        StreamId::Theirs(n) => StreamId::Ours(n),
+    }
+}
+
 impl Meeting {
     pub fn new(seed: u64) -> Option<Self> {
         let world = World::new(seed);
@@ -143,6 +164,8 @@ impl Meeting {
             nodes: BTreeMap::new(),
             by_id: BTreeMap::new(),
             blocked: BTreeSet::new(),
+            connections: 0,
+            stream_clock: BTreeMap::new(),
             stats: Stats::default(),
             link_delay: Duration::from_millis(5),
             link_jitter: Duration::from_millis(2),
@@ -170,6 +193,15 @@ impl Meeting {
         FakeVerifier.participant_id(&FakeIdentity(node as u8).public_key())
     }
 
+    /// The microphone track every simulated node offers.
+    pub fn microphone() -> MediaTrack {
+        MediaTrack {
+            audio: true,
+            source: Source::Main,
+            rendition: b"opus".to_vec(),
+        }
+    }
+
     fn add(&mut self, node: NodeId) -> bool {
         if node >= MAX_NODES || self.by_id.values().any(|n| *n == node) {
             return false;
@@ -178,20 +210,25 @@ impl Meeting {
             meeting: self.tag.clone(),
             name: Redacted::new(format!("node {node}")),
             first_sequence: 1,
+            setup: Setup {
+                palaver: Some(PalaverExtensions { version: 1 }),
+                ..Setup::default()
+            },
+            link_watch: self.link_watch,
+            tracks: vec![Self::microphone()],
+            addresses: Vec::new(),
+            relay_url: None,
         };
-        let id = Self::id_of(node);
-        self.by_id.insert(id.clone(), node);
+        self.by_id.insert(Self::id_of(node), node);
         self.nodes.insert(
             node,
             Member {
-                id,
-                control: Node::new(config, FakeIdentity(node as u8), FakeVerifier),
-                flood: Flood::new(lifetime, MAX_CONTROL_TRACKS),
-                links: BTreeSet::new(),
-                watches: BTreeMap::new(),
-                dialing: BTreeSet::new(),
-                unreachable: BTreeSet::new(),
-                surplus_links: false,
+                node: Node::new(config, FakeIdentity(node as u8), FakeVerifier),
+                links: BTreeMap::new(),
+                kinds: BTreeMap::new(),
+                control_streams: BTreeSet::new(),
+                heard: Vec::new(),
+                counted: Counters::default(),
                 wake_at: None,
             },
         );
@@ -204,10 +241,11 @@ impl Meeting {
         if !self.add(node) {
             return false;
         }
+        let now = self.world.now();
         if let Some(member) = self.nodes.get_mut(&node) {
-            member.control.create_meeting();
+            member.node.create_meeting(now);
         }
-        self.world.schedule(Duration::ZERO, node, Event::Wake);
+        self.carry_out(node);
         true
     }
 
@@ -216,9 +254,11 @@ impl Meeting {
         if !self.add(node) {
             return false;
         }
-        // Its control logic first runs when the entry link comes up, so that its first
-        // report already names that link and the conductor can wire it by it.
-        self.dial(node, entry);
+        let now = self.world.now();
+        if let Some(member) = self.nodes.get_mut(&node) {
+            member.node.join(vec![Self::id_of(entry)], now);
+        }
+        self.carry_out(node);
         true
     }
 
@@ -231,6 +271,23 @@ impl Meeting {
     /// silent.
     pub fn crash(&mut self, node: NodeId) {
         self.nodes.remove(&node);
+    }
+
+    /// Node `node`'s microphone produces frame `frame` at loudness `level`. `false` if the
+    /// plan has not given its microphone an alias yet.
+    pub fn speak(&mut self, node: NodeId, frame: u64, level: u8) -> bool {
+        let now = self.world.now();
+        let Some(member) = self.nodes.get_mut(&node) else {
+            return false;
+        };
+        let mut datagram = Vec::new();
+        let out = member
+            .node
+            .local_audio(frame, level, &[0x5a; 80], &mut datagram, now);
+        let spoke = out.is_some();
+        self.carry_audio(node, out, &datagram);
+        self.carry_out(node);
+        spoke
     }
 
     /// Run until the clock reads `until`.
@@ -256,15 +313,29 @@ impl Meeting {
     }
 
     pub fn plan_of(&self, node: NodeId) -> Option<&Plan> {
-        self.nodes.get(&node)?.control.plan()
+        self.nodes.get(&node)?.node.plan()
     }
 
     /// The nodes `node` holds a connection to, in order.
     pub fn links_of(&self, node: NodeId) -> Vec<NodeId> {
         self.nodes
             .get(&node)
-            .map(|member| member.links.iter().copied().collect())
+            .map(|member| member.links.keys().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// The audio frames `node`'s client was given to play, in order: (alias, frame).
+    pub fn heard_by(&self, node: NodeId) -> &[(u64, u64)] {
+        self.nodes
+            .get(&node)
+            .map(|member| member.heard.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// The alias the plan `node` follows gives `speaker`'s microphone.
+    pub fn microphone_alias(&self, node: NodeId, speaker: NodeId) -> Option<u64> {
+        self.plan_of(node)?
+            .alias_of(&Self::microphone().of(Self::id_of(speaker)), &FakeVerifier)
     }
 
     /// The node with this participant id, if it ever joined.
@@ -276,12 +347,10 @@ impl Meeting {
     /// roster is exactly the running nodes; the connections held are exactly the plan's
     /// peerings; and the audio overlay is one tree over everyone. `Err` says what is not so.
     pub fn settled(&self) -> Result<&Plan, String> {
-        let mut plans = self.nodes.iter().map(|(node, member)| {
-            member
-                .control
-                .plan()
-                .ok_or(format!("node {node} has no plan"))
-        });
+        let mut plans = self
+            .nodes
+            .iter()
+            .map(|(node, member)| member.node.plan().ok_or(format!("node {node} has no plan")));
         let plan = plans.next().ok_or("nobody is running")??;
         for other in plans {
             let other = other?;
@@ -314,10 +383,21 @@ impl Meeting {
         }
         for (node, member) in &self.nodes {
             let want = planned.remove(node).unwrap_or_default();
-            if member.links != want {
+            let have: BTreeSet<NodeId> = member.links.keys().copied().collect();
+            if have != want {
                 return Err(format!(
-                    "node {node} holds links {:?}, the plan says {want:?}",
-                    member.links
+                    "node {node} holds links {have:?}, the plan says {want:?}"
+                ));
+            }
+            // What the simulator connected and what the node believes must agree.
+            let believed: BTreeSet<NodeId> = member
+                .node
+                .links()
+                .filter_map(|id| self.node_of(id))
+                .collect();
+            if believed != have {
+                return Err(format!(
+                    "node {node} believes it holds {believed:?}, but holds {have:?}"
                 ));
             }
         }
@@ -348,399 +428,325 @@ impl Meeting {
         Ok(plan)
     }
 
-    // --- The stand-in for the parts not built yet ---
+    // --- The network ---
 
-    fn handle(&mut self, node: NodeId, event: Event) {
-        if !self.nodes.contains_key(&node) {
+    fn handle(&mut self, at_node: NodeId, event: Event) {
+        let now = self.world.now();
+        let rtt = self.link_delay.saturating_mul(2);
+        let Some(member) = self.nodes.get_mut(&at_node) else {
             return; // it crashed while this was on its way
-        }
+        };
+        // Is this from the connection the node holds to that peer now?
+        let current = |member: &Member, peer: NodeId, connection: u64| {
+            member.links.get(&peer) == Some(&connection)
+        };
         match event {
             Event::Wake => {
-                if let Some(member) = self.nodes.get_mut(&node) {
-                    member.wake_at = None;
+                member.wake_at = None;
+                member.node.poll(now);
+            }
+            Event::LinkUp {
+                peer,
+                connection,
+                dialled,
+            } => {
+                // If both ends dialled at once, the first connection stands.
+                if let std::collections::btree_map::Entry::Vacant(link) = member.links.entry(peer) {
+                    link.insert(connection);
+                    if dialled {
+                        self.stats.links_made = self.stats.links_made.saturating_add(1);
+                    }
+                    let role = if dialled { Role::Client } else { Role::Server };
+                    member
+                        .node
+                        .link_up(Self::id_of(peer), role, PathKind::Direct, rtt, now);
                 }
             }
-            Event::Object {
-                from,
-                track,
-                group,
-                payload,
-            } => self.on_object(node, from, track, group, &payload),
-            Event::LinkUp { peer } => self.on_link_up(node, peer),
-            Event::LinkDown { peer } => self.on_link_down(node, peer),
+            Event::LinkDown { peer, connection } => {
+                if current(member, peer, connection) {
+                    member.links.remove(&peer);
+                    member.node.link_down(&Self::id_of(peer), now);
+                }
+            }
             Event::DialFailed { peer } => {
                 self.stats.dials_failed = self.stats.dials_failed.saturating_add(1);
-                if let Some(member) = self.nodes.get_mut(&node) {
-                    member.dialing.remove(&peer);
-                    member.unreachable.insert(peer);
-                }
-                self.refresh_view(node);
-                self.rejoin_if_alone(node);
+                member.node.dial_failed(&Self::id_of(peer), now);
             }
-            Event::Filler { from } => self.heard(node, from),
+            Event::Data {
+                from,
+                connection,
+                stream,
+                unidirectional,
+                bytes,
+                fin,
+            } => {
+                if current(member, from, connection) {
+                    let kind = if unidirectional {
+                        StreamKind::Uni
+                    } else {
+                        StreamKind::Bidi
+                    };
+                    member
+                        .node
+                        .on_data(&Self::id_of(from), stream, kind, &bytes, fin, now);
+                }
+            }
+            Event::Reset {
+                from,
+                connection,
+                stream,
+            } => {
+                if current(member, from, connection) {
+                    member.node.on_reset(&Self::id_of(from), stream, now);
+                }
+            }
+            Event::Datagram {
+                from,
+                connection,
+                bytes,
+            } => {
+                if current(member, from, connection) {
+                    let out = member.node.on_datagram(&Self::id_of(from), &bytes, now);
+                    self.carry_audio(at_node, out, &bytes);
+                }
+            }
         }
-        self.service(node);
+        self.carry_out(at_node);
     }
 
-    /// Send one object from `node` to `to`.
-    fn send(&mut self, node: NodeId, to: NodeId, track: &Track, group: u64, payload: &[u8]) {
+    /// A delay for something sent now.
+    fn delay(&mut self) -> Duration {
         let jitter = u64::try_from(self.link_jitter.as_micros()).unwrap_or(u64::MAX);
-        let delay = self
-            .link_delay
-            .saturating_add(Duration::from_micros(self.jitter.below(jitter)));
-        self.stats.objects_sent = self.stats.objects_sent.saturating_add(1);
-        self.stats.bytes_sent = self.stats.bytes_sent.saturating_add(payload.len() as u64);
-        let now = self.world.now();
-        if let Some(watch) = self
-            .nodes
-            .get_mut(&node)
-            .and_then(|member| member.watches.get_mut(&to))
+        self.link_delay
+            .saturating_add(Duration::from_micros(self.jitter.below(jitter)))
+    }
+
+    /// Do what a node said to do with an audio datagram.
+    fn carry_audio(&mut self, at_node: NodeId, out: Option<AudioOut<ParticipantId>>, bytes: &[u8]) {
+        let Some(out) = out else {
+            return;
+        };
+        if out.for_client
+            && let Some(member) = self.nodes.get_mut(&at_node)
         {
-            watch.sent(now);
+            member.heard.push((out.alias, out.group));
         }
+        for peer in out.forward_to {
+            self.send_datagram(at_node, &peer, bytes.to_vec());
+        }
+    }
+
+    fn send_datagram(&mut self, from: NodeId, to: &ParticipantId, bytes: Vec<u8>) {
+        let Some(to) = self.node_of(to) else {
+            return;
+        };
+        let Some(connection) = self
+            .nodes
+            .get(&from)
+            .and_then(|m| m.links.get(&to))
+            .copied()
+        else {
+            return;
+        };
+        if bytes.len() == FILLER_BYTES {
+            self.stats.fillers_sent = self.stats.fillers_sent.saturating_add(1);
+        } else {
+            self.stats.audio_sent = self.stats.audio_sent.saturating_add(1);
+        }
+        let delay = self.delay();
         self.world.schedule(
             delay,
             to,
-            Event::Object {
-                from: node,
-                track: track.clone(),
-                group,
-                payload: payload.to_vec(),
+            Event::Datagram {
+                from,
+                connection,
+                bytes,
             },
         );
-    }
-
-    /// Hand an accepted object to `node`'s flood and send it where the flood says.
-    fn flood(
-        &mut self,
-        node: NodeId,
-        from: Option<NodeId>,
-        track: &Track,
-        group: u64,
-        payload: &[u8],
-    ) {
-        let now = self.world.now();
-        let Some(member) = self.nodes.get_mut(&node) else {
-            return;
-        };
-        let offer = member
-            .flood
-            .offer(from.as_ref(), track, group, payload, now);
-        if let Offer::Fresh { forward_to } = offer {
-            for to in forward_to {
-                self.send(node, to, track, group, payload);
-            }
-        }
-    }
-
-    fn on_object(&mut self, node: NodeId, from: NodeId, track: Track, group: u64, payload: &[u8]) {
-        let now = self.world.now();
-        let Some(member) = self.nodes.get_mut(&node) else {
-            return;
-        };
-        if !member.links.contains(&from) {
-            return; // the link went down while this was on its way
-        }
-        if let Some(watch) = member.watches.get_mut(&from) {
-            watch.heard(now);
-        }
-        let accepted = match &track {
-            Track::Plan => member.control.on_plan(group, payload) == PlanVerdict::Adopted,
-            Track::Report { participant } => {
-                member.control.on_report(participant, group, payload, now)
-                    == ReportVerdict::Accepted
-            }
-            _ => false,
-        };
-        self.world.note(group ^ u64::from(accepted));
-        if !accepted {
-            self.stats.objects_dropped = self.stats.objects_dropped.saturating_add(1);
-            return;
-        }
-        self.flood(node, Some(from), &track, group, payload);
-        // A new plan changes what the node should be connected to; a report may show that a
-        // neighbour is now wired and an unplanned link to it can go.
-        let surplus = self.nodes.get(&node).is_some_and(|m| m.surplus_links);
-        if track == Track::Plan || surplus {
-            self.apply_plan(node);
-        }
-    }
-
-    fn on_link_up(&mut self, node: NodeId, peer: NodeId) {
-        let now = self.world.now();
-        let Some(member) = self.nodes.get_mut(&node) else {
-            return;
-        };
-        member.dialing.remove(&peer);
-        if !member.links.insert(peer) {
-            return;
-        }
-        member
-            .watches
-            .insert(peer, LinkWatch::new(self.link_watch, now));
-        // Counted once per link, by the end with the lower number.
-        if node < peer {
-            self.stats.links_made = self.stats.links_made.saturating_add(1);
-        }
-        for cached in member.flood.connect(peer, now) {
-            self.send(node, peer, &cached.track, cached.group, &cached.payload);
-        }
-        self.refresh_view(node);
-        self.apply_plan(node);
-    }
-
-    fn on_link_down(&mut self, node: NodeId, peer: NodeId) {
-        let Some(member) = self.nodes.get_mut(&node) else {
-            return;
-        };
-        if !member.links.remove(&peer) {
-            return;
-        }
-        member.watches.remove(&peer);
-        member.flood.disconnect(&peer);
-        self.refresh_view(node);
-        // If the plan still names the peer, try to get it back.
-        self.apply_plan(node);
-        self.rejoin_if_alone(node);
-    }
-
-    /// A node left with no connection at all dials the members of the last plan it saw, one
-    /// after another, until one answers. Nobody else can do it: the others cannot tell a
-    /// node that was cut off from one that left.
-    fn rejoin_if_alone(&mut self, node: NodeId) {
-        let Some(member) = self.nodes.get(&node) else {
-            return;
-        };
-        if !member.links.is_empty() || !member.dialing.is_empty() {
-            return;
-        }
-        let Some(plan) = member.control.plan() else {
-            return;
-        };
-        let next = plan
-            .roster
-            .iter()
-            .filter_map(|m| self.node_of(&FakeVerifier.participant_id(&m.key)))
-            .find(|peer| *peer != node && !member.unreachable.contains(peer));
-        if let Some(peer) = next {
-            self.dial(node, peer);
-        }
     }
 
     /// Start connecting `node` to `peer`.
     fn dial(&mut self, node: NodeId, peer: NodeId) {
         let reachable =
             self.nodes.contains_key(&peer) && !self.blocked.contains(&ordered(node, peer));
-        let Some(member) = self.nodes.get_mut(&node) else {
-            return;
-        };
-        if !member.dialing.insert(peer) {
-            return;
-        }
-        if reachable {
-            self.world
-                .schedule(self.dial_time, node, Event::LinkUp { peer });
-            self.world
-                .schedule(self.dial_time, peer, Event::LinkUp { peer: node });
-        } else {
+        if !reachable {
             self.world
                 .schedule(self.dial_timeout, node, Event::DialFailed { peer });
-        }
-    }
-
-    /// Tell `node`'s control logic what its links are now.
-    fn refresh_view(&mut self, node: NodeId) {
-        let rtt = self.link_delay.saturating_mul(2);
-        let Some(member) = self.nodes.get_mut(&node) else {
             return;
-        };
-        let view = LocalView {
-            links: member
-                .links
-                .iter()
-                .map(|peer| Link {
-                    peer: Self::id_of(*peer),
-                    path: PathKind::Direct,
-                    rtt,
-                })
-                .collect(),
-            unreachable: member.unreachable.iter().map(|p| Self::id_of(*p)).collect(),
-            ..LocalView::default()
-        };
-        member.control.set_view(view);
-    }
-
-    /// Bring `node`'s connections into line with the plan it holds.
-    fn apply_plan(&mut self, node: NodeId) {
-        let Some(member) = self.nodes.get(&node) else {
-            return;
-        };
-        let Some(plan) = member.control.plan() else {
-            return;
-        };
-        let me = &member.id;
-        let planned: BTreeSet<(NodeId, bool)> = plan
-            .peerings
-            .iter()
-            .filter_map(|edge| {
-                let other = if edge.0 == *me {
-                    &edge.1
-                } else if edge.1 == *me {
-                    &edge.0
-                } else {
-                    return None;
-                };
-                // The lower participant id dials.
-                Some((self.node_of(other)?, me < other))
-            })
-            .collect();
-
-        let to_dial: Vec<NodeId> = planned
-            .iter()
-            .filter(|(peer, i_dial)| {
-                *i_dial && !member.links.contains(peer) && !member.unreachable.contains(peer)
-            })
-            .map(|(peer, _)| *peer)
-            .collect();
-        let all_up = planned.iter().all(|(peer, _)| member.links.contains(peer));
-        // A link the plan does not name goes only once both ends are wired as the plan says:
-        // until then it may be the other end's only way to receive the plan, or to be heard
-        // of at all if the plan does not know it yet. A node knows how the other end stands
-        // from that node's report.
-        let roster: BTreeSet<NodeId> = plan
-            .roster
-            .iter()
-            .filter_map(|m| self.node_of(&FakeVerifier.participant_id(&m.key)))
-            .collect();
-        let to_close: Vec<NodeId> = if roster.contains(&node) && all_up {
-            member
-                .links
-                .iter()
-                .filter(|peer| !planned.iter().any(|(p, _)| p == *peer))
-                .filter(|peer| {
-                    let id = Self::id_of(**peer);
-                    roster.contains(*peer)
-                        && member.control.report_of(&id).is_some_and(|report| {
-                            // Not "has applied this plan": a node the plan asks nothing new
-                            // of says so only in its next regular report. A node holding
-                            // all its planned links receives plans over them.
-                            plan.peerings.iter().all(|edge| {
-                                let other = if edge.0 == id {
-                                    &edge.1
-                                } else if edge.1 == id {
-                                    &edge.0
-                                } else {
-                                    return true;
-                                };
-                                report.links.iter().any(|link| link.peer == *other)
-                            })
-                        })
-                })
-                .copied()
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let surplus = member
-            .links
-            .iter()
-            .any(|peer| !planned.iter().any(|(p, _)| p == peer));
-        if let Some(member) = self.nodes.get_mut(&node) {
-            member.surplus_links = surplus;
         }
-        for peer in to_dial {
-            self.dial(node, peer);
-        }
-        for peer in to_close {
-            self.world
-                .schedule(Duration::ZERO, node, Event::LinkDown { peer });
-            self.world
-                .schedule(self.link_delay, peer, Event::LinkDown { peer: node });
+        self.connections = self.connections.saturating_add(1);
+        let connection = self.connections;
+        for (end, other, dialled) in [(node, peer, true), (peer, node, false)] {
+            self.world.schedule(
+                self.dial_time,
+                end,
+                Event::LinkUp {
+                    peer: other,
+                    connection,
+                    dialled,
+                },
+            );
         }
     }
 
-    /// Something `from` sent reached `node`.
-    fn heard(&mut self, node: NodeId, from: NodeId) {
-        let now = self.world.now();
-        if let Some(watch) = self
-            .nodes
-            .get_mut(&node)
-            .and_then(|member| member.watches.get_mut(&from))
-        {
-            watch.heard(now);
-        }
-    }
-
-    /// Look at `node`'s links: drop the ones that have fallen silent, and send a filler on
-    /// the ones that have carried nothing lately.
-    fn watch_links(&mut self, node: NodeId) {
-        let now = self.world.now();
-        let Some(member) = self.nodes.get_mut(&node) else {
-            return;
-        };
-        let dead: Vec<NodeId> = member
-            .watches
-            .iter()
-            .filter(|(_, watch)| watch.is_dead(now))
-            .map(|(peer, _)| *peer)
-            .collect();
-        let mut idle = Vec::new();
-        for (peer, watch) in &mut member.watches {
-            if !dead.contains(peer) && watch.filler_due(now) {
-                watch.sent(now);
-                idle.push(*peer);
-            }
-        }
-        for peer in idle {
-            self.stats.fillers_sent = self.stats.fillers_sent.saturating_add(1);
-            self.world
-                .schedule(self.link_delay, peer, Event::Filler { from: node });
-        }
-        for peer in dead {
-            self.on_link_down(node, peer);
-        }
-    }
-
-    /// Let `node` watch its links and its control logic send what it wants to, and book its
-    /// next wake.
-    fn service(&mut self, node: NodeId) {
-        self.watch_links(node);
+    /// Carry out everything `node` has asked for, and book its next wake.
+    fn carry_out(&mut self, node: NodeId) {
         let now = self.world.now();
         loop {
             let Some(member) = self.nodes.get_mut(&node) else {
                 return;
             };
-            let me = member.id.clone();
-            match member.control.poll(now) {
-                Some(Output::PublishReport { group_id, object }) => {
-                    self.stats.reports_published = self.stats.reports_published.saturating_add(1);
-                    let track = Track::Report { participant: me };
-                    self.flood(node, None, &track, group_id, &object);
+            let Some(output) = member.node.poll_output() else {
+                break;
+            };
+            match output {
+                Output::Dial { peer } => match self.by_id.get(&peer).copied() {
+                    Some(peer) => self.dial(node, peer),
+                    // A node the simulator has never heard of cannot be reached.
+                    None => member.node.dial_failed(&peer, now),
+                },
+                Output::Hangup { peer } => {
+                    let Some(peer) = self.by_id.get(&peer).copied() else {
+                        continue;
+                    };
+                    if let Some(connection) = member.links.remove(&peer) {
+                        let delay = self.link_delay;
+                        let event = Event::LinkDown {
+                            peer: node,
+                            connection,
+                        };
+                        self.world.schedule(delay, peer, event);
+                    }
                 }
-                Some(Output::PublishPlan { group_id, object }) => {
-                    self.stats.plans_issued = self.stats.plans_issued.saturating_add(1);
-                    self.world.note(group_id);
-                    self.flood(node, None, &Track::Plan, group_id, &object);
-                    self.apply_plan(node);
+                Output::Datagram { peer, bytes } => self.send_datagram(node, &peer, bytes),
+                Output::Stream { peer, action } => {
+                    let Some(peer) = self.by_id.get(&peer).copied() else {
+                        continue;
+                    };
+                    let Some(connection) = member.links.get(&peer).copied() else {
+                        continue;
+                    };
+                    self.carry_stream(node, peer, connection, action);
                 }
-                None => break,
             }
         }
+
         let Some(member) = self.nodes.get_mut(&node) else {
             return;
         };
+        let counted = member.node.counters();
+        let before = core::mem::replace(&mut member.counted, counted);
+        let add = |total: &mut u64, now: u64, before: u64| {
+            *total = total.saturating_add(now.saturating_sub(before));
+        };
+        add(
+            &mut self.stats.reports_published,
+            counted.reports_published,
+            before.reports_published,
+        );
+        add(
+            &mut self.stats.plans_issued,
+            counted.plans_issued,
+            before.plans_issued,
+        );
+        add(
+            &mut self.stats.objects_dropped,
+            counted.control_refused,
+            before.control_refused,
+        );
+        if counted.plans_issued != before.plans_issued {
+            self.world.note(counted.plans_issued);
+        }
+
         // Never book a wake for the present moment: that would spin without the clock moving.
-        let wake = member
-            .watches
-            .values()
-            .map(LinkWatch::next_wake)
-            .fold(member.control.next_wake(now), Timestamp::min)
-            .max(now.saturating_add(Duration::from_millis(1)));
+        let Some(wake) = member.node.next_wake(now) else {
+            return;
+        };
+        let wake = wake.max(now.saturating_add(Duration::from_millis(1)));
         if member.wake_at.is_none_or(|booked| wake < booked) {
             member.wake_at = Some(wake);
             self.world
                 .schedule(wake.saturating_since(now), node, Event::Wake);
+        }
+    }
+
+    /// Carry out one thing a node's khef wants done to a connection.
+    fn carry_stream(&mut self, node: NodeId, peer: NodeId, connection: u64, action: Action) {
+        let now = self.world.now();
+        match action {
+            Action::Open { stream, kind } => {
+                if let (StreamId::Ours(n), Some(member)) = (stream, self.nodes.get_mut(&node)) {
+                    // The first unidirectional stream of a connection is the control stream;
+                    // each one after it carries one control object.
+                    if kind == StreamKind::Uni && !member.control_streams.insert(connection) {
+                        self.stats.objects_sent = self.stats.objects_sent.saturating_add(1);
+                    }
+                    member.kinds.insert((connection, n), kind);
+                }
+            }
+            Action::Send { stream, bytes, fin } => {
+                let unidirectional = match (stream, self.nodes.get_mut(&node)) {
+                    (StreamId::Ours(n), Some(member)) => {
+                        let kind = member.kinds.get(&(connection, n)).copied();
+                        // A finished stream needs no more remembering.
+                        if fin {
+                            member.kinds.remove(&(connection, n));
+                        }
+                        kind == Some(StreamKind::Uni)
+                    }
+                    // A stream the peer opened that we can write on is bidirectional.
+                    _ => false,
+                };
+                self.stats.bytes_sent = self.stats.bytes_sent.saturating_add(bytes.len() as u64);
+                // Bytes on one stream arrive in the order they were sent.
+                let key = (node, connection, stream);
+                let earliest = self.stream_clock.get(&key).copied().unwrap_or(now);
+                let arrival = now.saturating_add(self.delay()).max(earliest);
+                if fin {
+                    self.stream_clock.remove(&key);
+                } else {
+                    self.stream_clock.insert(key, arrival);
+                }
+                self.world.schedule(
+                    arrival.saturating_since(now),
+                    peer,
+                    Event::Data {
+                        from: node,
+                        connection,
+                        stream: flipped(stream),
+                        unidirectional,
+                        bytes,
+                        fin,
+                    },
+                );
+            }
+            Action::Reset { stream } => {
+                let delay = self.delay();
+                self.world.schedule(
+                    delay,
+                    peer,
+                    Event::Reset {
+                        from: node,
+                        connection,
+                        stream: flipped(stream),
+                    },
+                );
+            }
+            // A session that closes itself has met a protocol error. The connection goes
+            // down at both ends; the tests check that this never happens.
+            Action::Close { .. } => {
+                self.stats.sessions_closed = self.stats.sessions_closed.saturating_add(1);
+                for (end, other) in [(node, peer), (peer, node)] {
+                    self.world.schedule(
+                        Duration::ZERO,
+                        end,
+                        Event::LinkDown {
+                            peer: other,
+                            connection,
+                        },
+                    );
+                }
+            }
         }
     }
 }

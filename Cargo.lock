@@ -98,6 +98,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "palaver-node"
+version = "0.0.0"
+dependencies = [
+ "palaver-control",
+ "palaver-khef-core",
+ "palaver-moq-wire",
+ "palaver-proto",
+]
+
+[[package]]
 name = "palaver-proto"
 version = "0.0.0"
 dependencies = [
@@ -122,6 +132,8 @@ version = "0.0.0"
 dependencies = [
  "palaver-control",
  "palaver-khef-core",
+ "palaver-moq-wire",
+ "palaver-node",
  "palaver-proto",
  "palaver-topology",
 ]

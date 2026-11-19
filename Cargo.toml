@@ -16,6 +16,7 @@ palaver-proto = { path = "crates/proto" }
 palaver-khef-core = { path = "crates/khef-core" }
 palaver-topology = { path = "crates/topology" }
 palaver-control = { path = "crates/control" }
+palaver-node = { path = "crates/node" }
 palaver-net = { path = "crates/net" }
 palaver-media = { path = "crates/media" }
 palaver-sdk = { path = "crates/sdk" }
@@ -35,3 +36,21 @@ todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
 undocumented_unsafe_blocks = "deny"
+
+# The simulator runs whole meetings through the sans-IO cores, so their speed is the tests'
+# speed. In development and test builds the cores are optimised; overflow checks and debug
+# assertions stay on, so a test still catches what an unoptimised build would.
+[profile.dev.package.palaver-moq-wire]
+opt-level = 2
+[profile.dev.package.palaver-proto]
+opt-level = 2
+[profile.dev.package.palaver-khef-core]
+opt-level = 2
+[profile.dev.package.palaver-topology]
+opt-level = 2
+[profile.dev.package.palaver-control]
+opt-level = 2
+[profile.dev.package.palaver-node]
+opt-level = 2
+[profile.dev.package.palaver-sim]
+opt-level = 2
