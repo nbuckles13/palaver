@@ -536,6 +536,18 @@ A **profile** of MoQT, deliberately small:
   Introduction is done by members over the control tracks, with iroh-relay as the helper and
   fallback (spike 1); quinn as fallback; behind a trait that offers request streams, unidirectional
   streams and datagrams.
+- **The khef** (`khef_core::Khef`) holds a session and a link watch per neighbour and ties
+  them to the flood and to top-N:
+  - *Control*: an object that arrives is handed up to the node's control logic, which
+    checks it; only what is handed back is kept and flooded. A neighbour that asks for the
+    control prefix is given the latest of every control track.
+  - *Audio*: on each link of the plan's tree both ends ask for the audio prefix and
+    announce every audio track in the plan, under the plan's aliases. A packet from a tree
+    link or from the node's own microphone is offered to the selector of every other tree
+    link and of the node's client; the khef answers with the list of links to send the
+    caller's buffer to, unchanged. Audio is not taken from a link that is not in the tree,
+    nor for an alias the plan does not list.
+  - *Links*: silent for 700 ms is reported dead and dropped; idle for 200 ms gets a filler.
 - **Objects in the session** (`khef_core::Session`):
   - *Datagrams* (audio) are decoded and encoded on the caller's buffers; the session keeps
     nothing, and the payload handed back is a slice of the datagram that came in, so it
