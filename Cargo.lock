@@ -42,6 +42,7 @@ name = "palaver-control"
 version = "0.0.0"
 dependencies = [
  "palaver-proto",
+ "palaver-topology",
 ]
 
 [[package]]
