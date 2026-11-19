@@ -19,15 +19,31 @@ pub enum UniStream {
     Control,
     /// A subgroup stream: the integer is the subgroup header's type flags.
     Subgroup,
+    /// Padding (section 11.5): zero bytes a sender may use to probe for bandwidth. The receiver
+    /// discards everything on the stream.
+    Padding,
 }
 
-/// Classify a unidirectional stream by its first integer. Fetch and padding streams are not
-/// in this profile; they and unknown types close the session.
+/// Stream type of a padding stream.
+pub const PADDING_STREAM: u64 = 0x132b_3e28;
+/// Datagram type of a padding datagram.
+pub const PADDING_DATAGRAM: u64 = 0x132b_3e29;
+
+/// Whether a datagram is padding, to be discarded. Check this before decoding a datagram as an
+/// object.
+pub fn is_padding_datagram(datagram: &[u8]) -> bool {
+    Reader::new(datagram).vi64() == Ok(PADDING_DATAGRAM)
+}
+
+/// Classify a unidirectional stream by its first integer. Fetch streams are not in this
+/// profile; they and unknown types close the session.
 pub fn uni_stream(first: u64) -> Result<UniStream> {
     if first == SETUP {
         Ok(UniStream::Control)
     } else if first < 0x80 && first & ALWAYS_SET != 0 {
         Ok(UniStream::Subgroup)
+    } else if first == PADDING_STREAM {
+        Ok(UniStream::Padding)
     } else {
         Err(Error::Violation("unknown or unsupported stream type"))
     }
@@ -223,10 +239,8 @@ impl SubgroupReader {
         }
     }
 
-    /// Read the next object. [`Error::NeedMore`], consuming nothing and changing nothing,
-    /// until the whole object has arrived.
-    pub fn read<'a>(&mut self, r: &mut Reader<'a>) -> Result<SubgroupObject<'a>> {
-        let mut probe = r.clone();
+    /// Parse an object's fields up to, but not including, its payload bytes. Changes nothing.
+    fn parse_prefix<'a>(&self, probe: &mut Reader<'a>) -> Result<ObjectPrefix<'a>> {
         let delta = probe.vi64()?;
         let object = match self.previous {
             None => Some(delta),
@@ -244,24 +258,76 @@ impl SubgroupReader {
         } else {
             &[]
         };
-        let len = probe.vi64()?;
-        let body = if len == 0 {
+        let payload_len = probe.vi64()?;
+        let body = if payload_len == 0 {
             let status = ObjectStatus::from_code(probe.vi64()?)?;
             if status != ObjectStatus::Normal && !properties.is_empty() {
                 return Err(Error::Violation("only normal objects can have properties"));
             }
-            ObjectBody::Status(status)
+            PrefixBody::Status(status)
         } else {
-            ObjectBody::Payload(probe.take(usize::try_from(len).unwrap_or(usize::MAX))?)
+            PrefixBody::Payload { len: payload_len }
         };
-        *r = probe;
-        self.previous = Some(object);
-        Ok(SubgroupObject {
+        Ok(ObjectPrefix {
             object,
             properties,
             body,
         })
     }
+
+    /// Read the next object whole. [`Error::NeedMore`], consuming nothing and changing
+    /// nothing, until all of it has arrived. Simple, and right for small objects such as
+    /// control messages.
+    pub fn read<'a>(&mut self, r: &mut Reader<'a>) -> Result<SubgroupObject<'a>> {
+        let mut probe = r.clone();
+        let prefix = self.parse_prefix(&mut probe)?;
+        let body = match prefix.body {
+            PrefixBody::Status(status) => ObjectBody::Status(status),
+            PrefixBody::Payload { len } => {
+                ObjectBody::Payload(probe.take(usize::try_from(len).unwrap_or(usize::MAX))?)
+            }
+        };
+        *r = probe;
+        self.previous = Some(prefix.object);
+        Ok(SubgroupObject {
+            object: prefix.object,
+            properties: prefix.properties,
+            body,
+        })
+    }
+
+    /// Read only what precedes the next object's payload, so the payload can be passed on as
+    /// its bytes arrive instead of after the whole object has. This is how a khef forwards a
+    /// video frame without waiting for all of it.
+    ///
+    /// [`Error::NeedMore`], consuming nothing and changing nothing, until the prefix has
+    /// arrived. After a prefix with a payload, the caller must take exactly that many bytes
+    /// from the stream before reading the next object.
+    pub fn read_prefix<'a>(&mut self, r: &mut Reader<'a>) -> Result<ObjectPrefix<'a>> {
+        let mut probe = r.clone();
+        let prefix = self.parse_prefix(&mut probe)?;
+        *r = probe;
+        self.previous = Some(prefix.object);
+        Ok(prefix)
+    }
+}
+
+/// An object without its payload bytes; see [`SubgroupReader::read_prefix`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectPrefix<'a> {
+    pub object: u64,
+    /// Object properties as encoded key-value pairs; empty means none.
+    pub properties: &'a [u8],
+    pub body: PrefixBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixBody {
+    /// This many payload bytes follow on the stream.
+    Payload {
+        len: u64,
+    },
+    Status(ObjectStatus),
 }
 
 #[cfg(test)]
@@ -560,12 +626,96 @@ mod tests {
         for flags in [0x10u64, 0x1f, 0x30, 0x79, 0x7f] {
             assert_eq!(uni_stream(flags), Ok(UniStream::Subgroup), "{flags:#x}");
         }
-        // fetch header, padding, a type flag without bit 4, a two-byte value with bit 4
-        for other in [0x05u64, 0x132b_3e28, 0x01, 0x90, 0] {
+        assert_eq!(uni_stream(PADDING_STREAM), Ok(UniStream::Padding));
+        // fetch header, a type flag without bit 4, a two-byte value with bit 4
+        for other in [0x05u64, 0x01, 0x90, 0] {
             assert!(
                 matches!(uni_stream(other), Err(Error::Violation(_))),
                 "{other:#x}"
             );
         }
+    }
+
+    #[test]
+    fn padding_datagrams_are_recognised() {
+        let mut padding = vec![];
+        put_vi64(&mut padding, PADDING_DATAGRAM);
+        padding.extend_from_slice(&[0; 40]);
+        assert!(is_padding_datagram(&padding));
+        assert!(!is_padding_datagram(&[0x0f, 41, 1, 0xaa]));
+        assert!(!is_padding_datagram(&[]));
+    }
+
+    #[test]
+    fn a_large_payload_can_be_forwarded_before_all_of_it_has_arrived() {
+        // A 50,000-byte frame, then a small one, arriving 1,200 bytes at a time. The relay
+        // forwards the frame's prefix and then each chunk of payload as it comes.
+        let frame: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let p = props();
+        let objects = [
+            SubgroupObject {
+                object: 0,
+                properties: &p,
+                body: ObjectBody::Payload(&frame),
+            },
+            SubgroupObject {
+                object: 1,
+                properties: &[],
+                body: ObjectBody::Payload(b"small"),
+            },
+        ];
+        let mut wire = vec![];
+        let mut w = SubgroupWriter::new(&header());
+        for o in &objects {
+            w.write(o, &mut wire).unwrap();
+        }
+
+        let mut reader = SubgroupReader::new(&header());
+        let mut writer = SubgroupWriter::new(&header());
+        let mut forwarded = vec![];
+        let mut buffer: Vec<u8> = vec![];
+        let mut payload_left = 0usize;
+        let mut first_forward_after = None;
+        for (i, chunk) in wire.chunks(1200).enumerate() {
+            buffer.extend_from_slice(chunk);
+            loop {
+                if payload_left > 0 {
+                    let n = payload_left.min(buffer.len());
+                    forwarded.extend_from_slice(&buffer[..n]);
+                    buffer.drain(..n);
+                    payload_left -= n;
+                    if payload_left > 0 {
+                        break;
+                    }
+                }
+                let mut r = Reader::new(&buffer);
+                let prefix = match reader.read_prefix(&mut r) {
+                    Ok(prefix) => prefix,
+                    Err(Error::NeedMore) => break,
+                    Err(e) => panic!("{e:?}"),
+                };
+                let consumed = buffer.len() - r.remaining();
+                // Re-encode the prefix for the next hop; a placeholder slice stands in for the
+                // payload, since only its length is written.
+                let body = match prefix.body {
+                    PrefixBody::Payload { len } => {
+                        payload_left = len as usize;
+                        ObjectBody::Payload(&frame[..len as usize])
+                    }
+                    PrefixBody::Status(status) => ObjectBody::Status(status),
+                };
+                let out = SubgroupObject {
+                    object: prefix.object,
+                    properties: prefix.properties,
+                    body,
+                };
+                writer.write_prefix(&out, &mut forwarded).unwrap();
+                first_forward_after.get_or_insert(i);
+                buffer.drain(..consumed);
+            }
+        }
+        assert_eq!(forwarded, wire);
+        // Forwarding began with the first chunk, not after all 42 chunks of the frame.
+        assert_eq!(first_forward_after, Some(0));
     }
 }
