@@ -526,6 +526,21 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
   sample format, so the pipeline resamples to 48 kHz float.
 - **Jitter buffer**: our own. Adaptive playout delay and time-stretching, with concealment handed
   to Opus (FEC, DRED, neural concealment). The `neteq` crate is reference material.
+  - It decides, once per frame interval, what the decoder plays: the frame; the frame
+    rebuilt from the next packet's FEC or a later packet's DRED; concealment; silence; or a
+    frame of filler.
+  - *Target delay*: enough to cover the 95th percentile of how late packets arrived over
+    the last 3 s, plus a frame; between 40 and 500 ms; up at once, down a frame every 2 s.
+  - *Steering*: the delay in force is measured directly (how long after its earliest
+    possible arrival the frame at the playhead is played). A frame or more above target for
+    a second: skip a frame, a quiet one by `audio_level` if possible. A frame or more below
+    for 100 ms: play a frame of filler.
+  - *Running dry*: the decoder conceals, then outputs silence after 100 ms. A packet for a
+    frame concealed in that spell is still played (playout steps back), so a stall on the
+    network costs a gap but no audio.
+  - Timing comes from the frame counter alone, which is why it advances through silence.
+  - First version: skipping and filler are whole frames; time-stretching inside a frame
+    comes with the decoder. Numbers are to be tuned by ear.
 - **Video codec**: our own encoder/decoder interface. openh264 (software) is the first backend;
   **hardware backends follow early (phase 2)**, because a node must keep CPU for its khef.
   Media Foundation on Windows first, then VideoToolbox, VAAPI/NVENC, MediaCodec. `moq-video`'s
