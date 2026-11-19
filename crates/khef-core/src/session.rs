@@ -8,20 +8,32 @@
 //! - every request has its own bidirectional stream, the response coming back on it;
 //! - objects travel on further unidirectional streams and in datagrams.
 //!
-//! This first part covers the two requests khefs use with each other:
+//! The two requests khefs use with each other:
 //!
 //! - SUBSCRIBE_TRACKS: "announce to me every track under this prefix";
 //! - PUBLISH: "here is a track, and the alias its objects will carry".
 //!
-//! Object streams and datagrams, and SUBSCRIBE for a single track, are not handled yet.
+//! And objects, two ways:
+//!
+//! - **Datagrams** (audio): [`Session::on_datagram`] and [`Session::encode_datagram`] work
+//!   on the caller's buffers and keep nothing. What comes back borrows from the datagram
+//!   handed in, so the caller can pass the payload on as a slice of the buffer it already
+//!   holds, with no copy.
+//! - **Whole objects on their own stream** (control tracks: one object per group, a few
+//!   kilobytes at most): [`Session::send_object`] and [`Event::Object`]. These are copied
+//!   once each way, which is fine for objects that are rare. Objects too large to wait for
+//!   whole (video frames) need the streaming form, which comes with video.
+//!
+//! SUBSCRIBE for a single track is not handled yet.
 //!
 //! Anything the peer does that the draft forbids closes the session; the reason is kept for
 //! the log. Nothing here panics on input.
 
 use palaver_moq_wire::{
-    Error, Frame, FullTrackName, Message, Namespace, Params, Publish, PublishDone, Reader,
-    RequestError, RequestOk, Setup, SubscribeTracks, UniStream, negotiated_palaver_version,
-    uni_stream,
+    Datagram, Error, Frame, FullTrackName, Message, Namespace, ObjectBody, PADDING_DATAGRAM,
+    Params, Publish, PublishDone, Reader, RequestError, RequestOk, Setup, SubgroupHeader,
+    SubgroupId, SubgroupObject, SubgroupReader, SubgroupWriter, SubscribeTracks, UniStream,
+    is_padding_datagram, negotiated_palaver_version, put_vi64, uni_stream,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -45,6 +57,13 @@ pub const TRACK_ENDED: u64 = 0x2;
 /// Most bytes buffered for one stream while waiting for the rest of a message: the longest
 /// message, its type and its length.
 const MAX_BUFFERED: usize = palaver_moq_wire::MAX_BODY_BYTES + 10;
+/// The largest object accepted whole on a stream. Larger ones need the streaming form.
+pub const MAX_WHOLE_OBJECT_BYTES: usize = 256 * 1024;
+/// How many object streams are held while the track they belong to is not yet announced.
+/// Objects may overtake the PUBLISH that names their alias.
+pub const MAX_HELD_STREAMS: usize = 16;
+/// How many given-up streams are remembered, to ignore what was already on its way.
+const MAX_GIVEN_UP: usize = 256;
 /// How many of the peer's request ids are remembered to catch a repeat.
 const REQUEST_ID_WINDOW: usize = 4096;
 
@@ -117,6 +136,32 @@ pub enum Event {
     TrackAccepted { alias: u64 },
     /// The peer refused a track we announced, or abandoned it. Stop sending its objects.
     TrackRefused { alias: u64, code: u64 },
+    /// A whole object arrived on a stream, for a track the peer announced.
+    Object {
+        alias: u64,
+        group: u64,
+        object: u64,
+        payload: Vec<u8>,
+    },
+}
+
+/// What a datagram turned out to be. Borrows from the datagram handed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatagramIn<'a> {
+    /// An object of a track the peer announced.
+    Object {
+        alias: u64,
+        group: u64,
+        object: u64,
+        /// Object properties as encoded key-value pairs; empty means none.
+        properties: &'a [u8],
+        payload: &'a [u8],
+    },
+    /// A filler: the peer had nothing else to send. It shows the peer is alive.
+    Filler,
+    /// Nothing to act on: an object of a track not announced (yet, or any more), a status
+    /// with no payload, or anything at all on a session that is not open.
+    Dropped,
 }
 
 /// A request the peer made, by the stream it arrived on.
@@ -145,6 +190,8 @@ struct Inbound {
     buffer: Vec<u8>,
     /// Known once the first bytes of a unidirectional stream have been read.
     uni: Option<UniStream>,
+    /// For an object stream, once its header has been read.
+    subgroup: Option<(SubgroupHeader, SubgroupReader)>,
     finished: bool,
 }
 
@@ -168,6 +215,8 @@ pub struct Session {
     seen_request_ids: BTreeSet<u64>,
     /// Aliases of the tracks the peer publishes to us.
     their_aliases: BTreeSet<u64>,
+    /// Streams of the peer's that we gave up. Bytes already on their way are ignored.
+    given_up: BTreeSet<StreamId>,
     actions: VecDeque<Action>,
     events: VecDeque<Event>,
 }
@@ -197,6 +246,7 @@ impl Session {
             outgoing: BTreeMap::new(),
             seen_request_ids: BTreeSet::new(),
             their_aliases: BTreeSet::new(),
+            given_up: BTreeSet::new(),
             actions: VecDeque::new(),
             events: VecDeque::new(),
         }
@@ -314,6 +364,115 @@ impl Session {
         self.send_message(stream, &done, true);
     }
 
+    /// Whether `alias` is a track we announced that the peer has not refused or seen ended.
+    fn publishing(&self, alias: u64) -> bool {
+        self.outgoing
+            .values()
+            .any(|request| matches!(request, Outgoing::Track { alias: a, .. } if *a == alias))
+    }
+
+    /// Send a whole object as the only object of `group`, on a stream of its own. For
+    /// control tracks. `false`, sending nothing, if `alias` is not a track we are publishing
+    /// or the object is too large to send this way.
+    pub fn send_object(&mut self, alias: u64, group: u64, payload: &[u8]) -> bool {
+        if self.closed || !self.publishing(alias) || payload.len() > MAX_WHOLE_OBJECT_BYTES {
+            return false;
+        }
+        let header = SubgroupHeader {
+            track_alias: alias,
+            group,
+            subgroup: SubgroupId::Zero,
+            priority: None,
+            has_properties: false,
+            end_of_group: true,
+            first_object: true,
+        };
+        let mut bytes = Vec::with_capacity(payload.len().saturating_add(24));
+        header.encode(&mut bytes);
+        let object = SubgroupObject {
+            object: 0,
+            properties: &[],
+            body: ObjectBody::Payload(payload),
+        };
+        if SubgroupWriter::new(&header)
+            .write(&object, &mut bytes)
+            .is_err()
+        {
+            return false;
+        }
+        let stream = self.open(StreamKind::Uni);
+        self.send(stream, bytes, true);
+        true
+    }
+
+    /// Append to `out` the datagram carrying one object: the only object of `group`, as
+    /// audio frames are. `properties` are encoded key-value pairs (the audio level), or
+    /// empty. `false`, appending nothing, if `alias` is not a track we are publishing.
+    pub fn encode_datagram(
+        &self,
+        alias: u64,
+        group: u64,
+        properties: &[u8],
+        payload: &[u8],
+        out: &mut Vec<u8>,
+    ) -> bool {
+        if self.closed || !self.publishing(alias) {
+            return false;
+        }
+        let datagram = Datagram {
+            track_alias: alias,
+            group,
+            object: 0,
+            priority: None,
+            end_of_group: true,
+            properties,
+            body: ObjectBody::Payload(payload),
+        };
+        let start = out.len();
+        if datagram.encode(out).is_err() {
+            out.truncate(start);
+            return false;
+        }
+        true
+    }
+
+    /// Append to `out` a filler datagram, for a link with nothing else to carry.
+    pub fn encode_filler(out: &mut Vec<u8>) {
+        put_vi64(out, PADDING_DATAGRAM);
+    }
+
+    /// A datagram arrived. What comes back borrows from it; nothing is kept.
+    pub fn on_datagram<'a>(&mut self, datagram: &'a [u8]) -> DatagramIn<'a> {
+        if !self.is_ready() {
+            return DatagramIn::Dropped;
+        }
+        if is_padding_datagram(datagram) {
+            return DatagramIn::Filler;
+        }
+        let decoded = match Datagram::decode(datagram) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                self.fail(error);
+                return DatagramIn::Dropped;
+            }
+        };
+        // A datagram can overtake the PUBLISH that names its alias, or trail the end of
+        // its track. Either way there is nowhere to put it.
+        if !self.their_aliases.contains(&decoded.track_alias) {
+            return DatagramIn::Dropped;
+        }
+        match decoded.body {
+            ObjectBody::Payload(payload) => DatagramIn::Object {
+                alias: decoded.track_alias,
+                group: decoded.group,
+                object: decoded.object,
+                properties: decoded.properties,
+                payload,
+            },
+            ObjectBody::Status(_) => DatagramIn::Dropped,
+        }
+    }
+
     /// Accept the peer's request for tracks: it now expects a PUBLISH for each one.
     pub fn accept_tracks(&mut self, request: StreamId) {
         let Some(Incoming::TracksPending { prefix }) = self.incoming.get(&request) else {
@@ -355,6 +514,12 @@ impl Session {
         if self.closed {
             return;
         }
+        if self.given_up.contains(&stream) {
+            if fin {
+                self.given_up.remove(&stream);
+            }
+            return;
+        }
         let kind = match stream {
             StreamId::Ours(_) => StreamKind::Bidi,
             StreamId::Theirs(_) => kind,
@@ -363,6 +528,7 @@ impl Session {
             kind,
             buffer: Vec::new(),
             uni: None,
+            subgroup: None,
             finished: false,
         });
         if inbound.finished {
@@ -372,12 +538,20 @@ impl Session {
             );
         }
         inbound.finished = fin;
-        // Object streams are not read yet: nothing of theirs is kept.
-        if matches!(inbound.uni, Some(UniStream::Subgroup | UniStream::Padding)) {
-            return;
-        }
-        if inbound.buffer.len().saturating_add(bytes.len()) > MAX_BUFFERED {
-            return self.close(CloseCode::ProtocolViolation, "message too long");
+        match inbound.uni {
+            // Padding is read and thrown away.
+            Some(UniStream::Padding) => return,
+            Some(UniStream::Subgroup) => {
+                // An object too large to take whole: give up the stream, not the session.
+                if inbound.buffer.len().saturating_add(bytes.len()) > MAX_WHOLE_OBJECT_BYTES {
+                    return self.give_up(stream);
+                }
+            }
+            _ => {
+                if inbound.buffer.len().saturating_add(bytes.len()) > MAX_BUFFERED {
+                    return self.close(CloseCode::ProtocolViolation, "message too long");
+                }
+            }
         }
         inbound.buffer.extend_from_slice(bytes);
         let kind = inbound.kind;
@@ -390,6 +564,7 @@ impl Session {
             return;
         }
         self.inbound.remove(&stream);
+        self.given_up.remove(&stream);
         if Some(stream) == self.their_control {
             return self.close(CloseCode::ProtocolViolation, "control stream closed");
         }
@@ -463,8 +638,12 @@ impl Session {
     /// Read every whole message buffered for `stream`.
     fn drain(&mut self, stream: StreamId, kind: StreamKind) {
         // The first bytes of a unidirectional stream say what it is.
-        if kind == StreamKind::Uni && !self.classify(stream) {
-            return;
+        if kind == StreamKind::Uni {
+            match self.classify(stream) {
+                Some(UniStream::Control) => {}
+                Some(UniStream::Subgroup) => return self.drain_objects(stream),
+                Some(UniStream::Padding) | None => return,
+            }
         }
         // Requests wait until the peer has introduced itself (section 6.3).
         if self.theirs.is_none() && Some(stream) != self.their_control {
@@ -500,25 +679,17 @@ impl Session {
         }
     }
 
-    /// Work out what a unidirectional stream is. `false` if that is not known yet, or the
-    /// stream is not one this part of the session reads.
-    fn classify(&mut self, stream: StreamId) -> bool {
-        let Some(inbound) = self.inbound.get_mut(&stream) else {
-            return false;
-        };
+    /// Work out what a unidirectional stream is. `None` if that is not known yet, or the
+    /// session closed finding out.
+    fn classify(&mut self, stream: StreamId) -> Option<UniStream> {
+        let inbound = self.inbound.get_mut(&stream)?;
         if inbound.uni.is_none() {
-            let first = match Reader::new(&inbound.buffer).vi64() {
-                Ok(first) => first,
-                Err(error) => {
-                    self.fail(error);
-                    return false;
-                }
-            };
-            match uni_stream(first) {
+            let sort = Reader::new(&inbound.buffer).vi64().and_then(uni_stream);
+            match sort {
                 Ok(sort) => inbound.uni = Some(sort),
                 Err(error) => {
                     self.fail(error);
-                    return false;
+                    return None;
                 }
             }
         }
@@ -526,15 +697,133 @@ impl Session {
             Some(UniStream::Control) => {
                 if self.their_control.is_some_and(|control| control != stream) {
                     self.close(CloseCode::ProtocolViolation, "a second control stream");
-                    return false;
+                    return None;
                 }
                 self.their_control = Some(stream);
-                true
             }
-            _ => {
-                inbound.buffer = Vec::new();
-                false
+            Some(UniStream::Padding) => inbound.buffer = Vec::new(),
+            Some(UniStream::Subgroup) | None => {}
+        }
+        inbound.uni
+    }
+
+    /// Read every whole object buffered for an object stream.
+    fn drain_objects(&mut self, stream: StreamId) {
+        // Objects wait for the peer's SETUP, like requests.
+        if self.theirs.is_none() || self.closed {
+            return;
+        }
+        let Some(inbound) = self.inbound.get_mut(&stream) else {
+            return;
+        };
+        let buffer = core::mem::take(&mut inbound.buffer);
+        let mut reader = Reader::new(&buffer);
+
+        if inbound.subgroup.is_none() {
+            match SubgroupHeader::decode(&mut reader) {
+                Ok(header) => inbound.subgroup = Some((header, SubgroupReader::new(&header))),
+                Err(Error::NeedMore) => {
+                    // A stream given up before its header arrived is simply dropped.
+                    if inbound.finished {
+                        self.inbound.remove(&stream);
+                    } else {
+                        inbound.buffer = buffer;
+                    }
+                    return;
+                }
+                Err(error) => return self.fail(error),
             }
+        }
+        let Some((header, objects)) = inbound.subgroup.as_mut() else {
+            return;
+        };
+        let (alias, group) = (header.track_alias, header.group);
+
+        // The PUBLISH that names this alias may still be on its way: hold the stream.
+        if !self.their_aliases.contains(&alias) {
+            let used = buffer.len().saturating_sub(reader.remaining());
+            inbound.buffer = buffer.get(used..).unwrap_or_default().to_vec();
+            return self.hold(stream);
+        }
+
+        let mut read = Vec::new();
+        let outcome = loop {
+            match objects.read(&mut reader) {
+                Ok(object) => {
+                    if let ObjectBody::Payload(payload) = object.body {
+                        read.push((object.object, payload.to_vec()));
+                    }
+                }
+                Err(error) => break error,
+            }
+        };
+        let used = buffer.len().saturating_sub(reader.remaining());
+        let finished = inbound.finished;
+        inbound.buffer = buffer.get(used..).unwrap_or_default().to_vec();
+        // A stream that ends, cleanly or part way through an object, is finished with: a
+        // publisher resets a stream whose object is no longer worth sending.
+        if finished {
+            self.inbound.remove(&stream);
+        }
+        for (object, payload) in read {
+            self.events.push_back(Event::Object {
+                alias,
+                group,
+                object,
+                payload,
+            });
+        }
+        if outcome != Error::NeedMore {
+            self.fail(outcome);
+        }
+    }
+
+    /// `stream` is waiting for its track to be announced. Keep only so many such streams:
+    /// the longest held gives way.
+    fn hold(&mut self, stream: StreamId) {
+        let held: Vec<StreamId> =
+            self.inbound
+                .iter()
+                .filter(|(_, inbound)| {
+                    inbound.subgroup.as_ref().is_some_and(|(header, _)| {
+                        !self.their_aliases.contains(&header.track_alias)
+                    })
+                })
+                .map(|(id, _)| *id)
+                .collect();
+        if held.len() > MAX_HELD_STREAMS
+            && let Some(oldest) = held.into_iter().find(|id| *id != stream)
+        {
+            self.give_up(oldest);
+        }
+    }
+
+    /// Stop reading one of the peer's object streams and ask the peer to stop sending it.
+    fn give_up(&mut self, stream: StreamId) {
+        self.inbound.remove(&stream);
+        self.actions.push_back(Action::Reset { stream });
+        self.given_up.insert(stream);
+        // Bounded: a stream forgotten here is one the peer has long since stopped.
+        while self.given_up.len() > MAX_GIVEN_UP {
+            self.given_up.pop_first();
+        }
+    }
+
+    /// A track was announced: read the object streams that were waiting for it.
+    fn release_held(&mut self, alias: u64) {
+        let waiting: Vec<StreamId> = self
+            .inbound
+            .iter()
+            .filter(|(_, inbound)| {
+                inbound
+                    .subgroup
+                    .as_ref()
+                    .is_some_and(|(header, _)| header.track_alias == alias)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for stream in waiting {
+            self.drain_objects(stream);
         }
     }
 
@@ -624,14 +913,14 @@ impl Session {
                 self.theirs = Some(setup);
                 self.events.push_back(Event::Ready { palaver_version });
                 // Requests that arrived before the SETUP can be read now.
-                let waiting: Vec<StreamId> = self
+                let waiting: Vec<(StreamId, StreamKind)> = self
                     .inbound
                     .iter()
-                    .filter(|(_, inbound)| inbound.kind == StreamKind::Bidi)
-                    .map(|(stream, _)| *stream)
+                    .map(|(stream, inbound)| (*stream, inbound.kind))
+                    .filter(|(stream, _)| Some(*stream) != self.their_control)
                     .collect();
-                for stream in waiting {
-                    self.drain(stream, StreamKind::Bidi);
+                for (stream, kind) in waiting {
+                    self.drain(stream, kind);
                 }
             }
             Message::Setup(_) => self.close(CloseCode::ProtocolViolation, "a second SETUP"),
@@ -759,6 +1048,7 @@ impl Session {
                     track: publish.track,
                     alias: publish.track_alias,
                 });
+                self.release_held(publish.track_alias);
             }
             Message::Subscribe(request) => {
                 if self.their_request_id_is_valid(request.request_id) {

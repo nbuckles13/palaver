@@ -505,6 +505,23 @@ A **profile** of MoQT, deliberately small:
   Introduction is done by members over the control tracks, with iroh-relay as the helper and
   fallback (spike 1); quinn as fallback; behind a trait that offers request streams, unidirectional
   streams and datagrams.
+- **Objects in the session** (`khef_core::Session`):
+  - *Datagrams* (audio) are decoded and encoded on the caller's buffers; the session keeps
+    nothing, and the payload handed back is a slice of the datagram that came in, so it
+    can go on to the jitter buffer or to another link without a copy. A datagram for an
+    alias not announced is dropped.
+  - *Whole objects on their own stream* (control tracks, up to 256 KB) are copied once each
+    way. An object stream that overtakes the PUBLISH naming its alias is held for it (at
+    most 16 such streams). An object too large, or a stream cut short, costs the stream,
+    not the session.
+  - Video needs the streaming form (payload passed on as it arrives); it comes with video.
+- **Open: one alias per track, meeting-wide.** Today each khef picks its own alias for a
+  track on each link, as the draft intends, so a forwarded audio datagram has its header
+  rewritten and is copied once per outgoing link (about 87 bytes). If every khef used the
+  same alias for a track, derived from the track's name, a datagram could be forwarded
+  byte for byte: no parse beyond the level, no rewrite, one shared buffer for all links.
+  The draft allows a publisher to choose any alias; the cost is that two tracks whose
+  names hash alike collide (negligible at 62 bits, and detectable).
 - **Rules from the khef spike**: group ids count for the life of a track; hold data streams whose
   alias is not known yet; linger before unsubscribing upstream; release an old upstream only once
   the new one delivers a group start; bounded dedupe window.

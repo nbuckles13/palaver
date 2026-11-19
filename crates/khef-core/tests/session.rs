@@ -625,18 +625,359 @@ fn a_single_track_subscribe_is_answered_not_supported() {
 }
 
 #[test]
-fn object_and_padding_streams_are_passed_over_for_now() {
+fn a_padding_stream_is_read_and_thrown_away() {
     let (_, mut b) = pair();
-    // A subgroup header type, then whatever follows; and a padding stream.
-    b.feed(9, StreamKind::Uni, &[0x10, 1, 2, 3, 4, 5]);
-    b.session
-        .on_data(StreamId::Theirs(9), StreamKind::Uni, &[9; 500], true);
     let mut padding = vec![];
     palaver_moq_wire::put_vi64(&mut padding, palaver_moq_wire::PADDING_STREAM);
     padding.extend([0; 100]);
     b.feed(10, StreamKind::Uni, &padding);
+    b.feed(10, StreamKind::Uni, &[7; 100_000]);
     assert_eq!(b.flush(), []);
     assert_eq!(b.closed, None);
+}
+
+// --- Objects ---
+
+/// `a` receives the control tracks of "m" from `b`, which has announced the plan track.
+/// Returns the alias.
+fn publishing() -> (End, End, u64) {
+    let (mut a, mut b, _) = subscribed();
+    let alias = b
+        .session
+        .publish(track(&["m", "ctl", "plan"], "0"))
+        .unwrap();
+    run(&mut a, &mut b);
+    a.take_events();
+    b.take_events();
+    (a, b, alias)
+}
+
+fn object(alias: u64, group: u64, payload: &[u8]) -> Event {
+    Event::Object {
+        alias,
+        group,
+        object: 0,
+        payload: payload.to_vec(),
+    }
+}
+
+/// The audio level as an object's properties.
+fn level(level: u64) -> Vec<u8> {
+    let mut out = vec![];
+    palaver_moq_wire::encode_kvps(
+        &[palaver_moq_wire::Kvp {
+            ty: palaver_moq_wire::PROPERTY_AUDIO_LEVEL,
+            value: palaver_moq_wire::Value::Int(level),
+        }],
+        &mut out,
+    )
+    .unwrap();
+    out
+}
+
+#[test]
+fn a_whole_object_is_sent_on_its_own_stream_and_arrives() {
+    let (mut a, mut b, alias) = publishing();
+    let plan = vec![0xab; 9000];
+    assert!(b.session.send_object(alias, 7, &plan));
+    assert!(b.session.send_object(alias, 8, b"next"));
+    let wires = b.flush();
+    // Two streams, each opened, written once and finished.
+    assert_eq!(wires.len(), 2);
+    assert!(wires.iter().all(|w| matches!(
+        w,
+        Wire::Data {
+            kind: StreamKind::Uni,
+            fin: true,
+            ..
+        }
+    )));
+    for wire in wires {
+        a.receive(wire);
+    }
+    assert_eq!(
+        a.take_events(),
+        [object(alias, 7, &plan), object(alias, 8, b"next")]
+    );
+    assert_eq!((a.closed, b.closed), (None, None));
+}
+
+#[test]
+fn an_object_may_arrive_a_byte_at_a_time() {
+    let (mut a, mut b, alias) = publishing();
+    b.session.send_object(alias, 3, b"a report, in pieces");
+    let wires = b.flush();
+    let [
+        Wire::Data {
+            stream,
+            kind,
+            bytes,
+            ..
+        },
+    ] = &wires[..]
+    else {
+        panic!("{wires:?}")
+    };
+    for (i, byte) in bytes.iter().enumerate() {
+        assert_eq!(a.take_events(), [], "after {i} bytes");
+        a.session
+            .on_data(*stream, *kind, &[*byte], i + 1 == bytes.len());
+    }
+    assert_eq!(a.take_events(), [object(alias, 3, b"a report, in pieces")]);
+}
+
+#[test]
+fn an_object_that_overtakes_its_tracks_announcement_is_held_for_it() {
+    let (mut a, mut b, _) = subscribed();
+    let alias = b
+        .session
+        .publish(track(&["m", "ctl", "plan"], "0"))
+        .unwrap();
+    b.session.send_object(alias, 5, b"plan five");
+    let wires = b.flush();
+    assert_eq!(wires.len(), 2, "the PUBLISH, then the object");
+    // The object's stream arrives first.
+    a.receive(wires[1].clone());
+    assert_eq!(a.take_events(), []);
+    a.receive(wires[0].clone());
+    assert_eq!(
+        a.take_events(),
+        [
+            Event::TrackOffered {
+                track: track(&["m", "ctl", "plan"], "0"),
+                alias
+            },
+            object(alias, 5, b"plan five")
+        ]
+    );
+}
+
+#[test]
+fn objects_that_arrive_before_the_peers_setup_wait_for_it() {
+    let mut a = End::new(Role::Client, setup(Some(1)));
+    let mut b = End::new(Role::Server, setup(Some(1)));
+    a.session.start();
+    b.session.start();
+    a.session.subscribe_tracks(ns(&["m", "ctl"])).unwrap();
+    // Let b see the request and answer, but hold b's control stream back from a.
+    for wire in a.flush() {
+        b.receive(wire);
+    }
+    let mut wires = b.flush();
+    let wanted = core::mem::take(&mut b.events);
+    let Some(Event::TracksWanted { request, .. }) = wanted.last() else {
+        panic!("{wanted:?}")
+    };
+    b.session.accept_tracks(*request);
+    let alias = b
+        .session
+        .publish(track(&["m", "ctl", "plan"], "0"))
+        .unwrap();
+    b.session.send_object(alias, 1, b"early");
+    wires.extend(b.flush());
+    let setup_wire = wires.remove(0);
+    for wire in wires {
+        a.receive(wire);
+    }
+    assert_eq!(a.take_events(), []);
+    a.receive(setup_wire);
+    let events = a.take_events();
+    assert!(matches!(events[0], Event::Ready { .. }), "{events:?}");
+    assert_eq!(events.last(), Some(&object(alias, 1, b"early")));
+}
+
+#[test]
+fn only_so_many_streams_are_held_for_tracks_never_announced() {
+    let (mut a, mut b, alias) = publishing();
+    b.session.send_object(alias, 1, b"x");
+    let wires = b.flush();
+    let [Wire::Data { bytes, .. }] = &wires[..] else {
+        panic!()
+    };
+    // The same object under aliases nobody announced: the alias is the second byte.
+    let mut resets = vec![];
+    for n in 0..40u64 {
+        let mut stray = bytes.clone();
+        stray[1] = 50;
+        a.session
+            .on_data(StreamId::Theirs(1000 + n), StreamKind::Uni, &stray, true);
+        resets.extend(a.flush());
+    }
+    assert_eq!(a.take_events(), []);
+    assert_eq!(a.closed, None);
+    // All but the newest sixteen were given up, oldest first.
+    assert_eq!(resets.len(), 40 - 16);
+    assert_eq!(
+        resets[0],
+        Wire::Reset {
+            stream: StreamId::Ours(1000)
+        }
+    );
+}
+
+#[test]
+fn an_object_too_large_to_take_whole_costs_the_stream_not_the_session() {
+    let (mut a, mut b, alias) = publishing();
+    // Our own side will not send one.
+    assert!(!b.session.send_object(alias, 1, &vec![0; 300_000]));
+    assert_eq!(b.flush(), []);
+    // One that arrives anyway: a header promising 300,000 bytes, then the bytes.
+    b.session.send_object(alias, 1, b"x");
+    let wires = b.flush();
+    let [Wire::Data { bytes, .. }] = &wires[..] else {
+        panic!()
+    };
+    let header = &bytes[..bytes.len() - 2];
+    let mut large = header.to_vec();
+    palaver_moq_wire::put_vi64(&mut large, 300_000);
+    a.feed(77, StreamKind::Uni, &large);
+    let mut reset = vec![];
+    for _ in 0..300 {
+        a.feed(77, StreamKind::Uni, &[0; 1000]);
+        reset.extend(a.flush());
+    }
+    assert!(reset.contains(&Wire::Reset {
+        stream: StreamId::Ours(77)
+    }));
+    assert_eq!(a.take_events(), []);
+    assert_eq!(a.closed, None);
+}
+
+#[test]
+fn a_stream_given_up_part_way_through_an_object_is_dropped_quietly() {
+    let (mut a, mut b, alias) = publishing();
+    b.session.send_object(alias, 1, b"cut short in transit");
+    let wires = b.flush();
+    let [Wire::Data { bytes, .. }] = &wires[..] else {
+        panic!()
+    };
+    a.session.on_data(
+        StreamId::Theirs(9),
+        StreamKind::Uni,
+        &bytes[..bytes.len() - 5],
+        true,
+    );
+    assert_eq!(a.take_events(), []);
+    assert_eq!(a.closed, None);
+    // And one reset before anything of it was read.
+    a.feed(10, StreamKind::Uni, &bytes[..1]);
+    a.session.on_reset(StreamId::Theirs(10));
+    assert_eq!(a.close_code(), None);
+}
+
+#[test]
+fn objects_are_sent_only_on_tracks_being_published() {
+    let (mut a, mut b, alias) = publishing();
+    assert!(!b.session.send_object(alias + 1, 1, b"x"), "no such track");
+    assert!(
+        !a.session.send_object(alias, 1, b"x"),
+        "the peer's alias, not ours"
+    );
+    let mut out = vec![];
+    assert!(!b.session.encode_datagram(alias + 1, 1, &[], b"x", &mut out));
+    assert!(out.is_empty());
+    // Once the track has ended, nothing more goes out on it.
+    b.session.end_track(alias);
+    b.flush();
+    assert!(!b.session.send_object(alias, 2, b"x"));
+    assert!(!b.session.encode_datagram(alias, 2, &[], b"x", &mut out));
+    assert_eq!(b.flush(), []);
+    // Nor on one the peer refused.
+    let refused = b
+        .session
+        .publish(track(&["m", "video", "main", "p7"], "360p"))
+        .unwrap();
+    run(&mut a, &mut b);
+    assert!(!b.session.send_object(refused, 1, b"x"));
+}
+
+#[test]
+fn an_audio_frame_crosses_in_a_datagram_with_its_level_and_nothing_is_copied() {
+    let (mut a, mut b) = pair();
+    a.session.subscribe_tracks(ns(&["m", "audio"])).unwrap();
+    run(&mut a, &mut b);
+    b.session.accept_tracks(StreamId::Theirs(1));
+    let alias2 = b
+        .session
+        .publish(track(&["m", "audio", "main", "p8"], "opus"))
+        .unwrap();
+    run(&mut a, &mut b);
+
+    let frame = [0x5a; 80];
+    let mut datagram = vec![];
+    assert!(
+        b.session
+            .encode_datagram(alias2, 4321, &level(57), &frame, &mut datagram)
+    );
+    // Seven bytes of header for an 80-byte frame, the level included.
+    assert_eq!(datagram.len(), 80 + 7);
+    let palaver_khef_core::session::DatagramIn::Object {
+        alias: got,
+        group,
+        object,
+        properties,
+        payload,
+    } = a.session.on_datagram(&datagram)
+    else {
+        panic!("{:?}", a.close_code())
+    };
+    assert_eq!((got, group, object), (alias2, 4321, 0));
+    assert_eq!(payload, frame);
+    assert_eq!(
+        palaver_moq_wire::int_property(properties, palaver_moq_wire::PROPERTY_AUDIO_LEVEL),
+        Ok(Some(57))
+    );
+    // The payload handed back is the caller's own bytes, not a copy.
+    assert!(core::ptr::eq(
+        payload.as_ptr(),
+        datagram[datagram.len() - 80..].as_ptr()
+    ));
+}
+
+#[test]
+fn a_filler_is_told_apart_and_stray_datagrams_are_dropped() {
+    use palaver_khef_core::session::DatagramIn;
+    let (mut a, mut b, alias) = publishing();
+    let mut filler = vec![];
+    Session::encode_filler(&mut filler);
+    assert_eq!(filler.len(), 5);
+    assert_eq!(a.session.on_datagram(&filler), DatagramIn::Filler);
+
+    // A datagram for the plan track is fine by the session (which tracks go in datagrams is
+    // the khef's business); one for an alias nobody announced is dropped.
+    let mut known = vec![];
+    assert!(b.session.encode_datagram(alias, 1, &[], b"x", &mut known));
+    assert!(matches!(
+        a.session.on_datagram(&known),
+        DatagramIn::Object { .. }
+    ));
+    let mut stray = known.clone();
+    stray[1] = 60; // the alias
+    assert_eq!(a.session.on_datagram(&stray), DatagramIn::Dropped);
+    assert_eq!(a.close_code(), None);
+
+    // After the track ends its datagrams are dropped too.
+    b.session.end_track(alias);
+    run(&mut a, &mut b);
+    assert_eq!(a.session.on_datagram(&known), DatagramIn::Dropped);
+    assert_eq!(a.close_code(), None);
+}
+
+#[test]
+fn a_malformed_datagram_closes_the_session_and_one_before_setup_is_dropped() {
+    use palaver_khef_core::session::DatagramIn;
+    let (mut a, _, _) = publishing();
+    // Flags with bits no datagram type has.
+    assert_eq!(a.session.on_datagram(&[0x3f, 1, 2, 3]), DatagramIn::Dropped);
+    assert_eq!(a.close_code(), Some(CloseCode::ProtocolViolation));
+
+    let mut early = End::new(Role::Client, setup(Some(1)));
+    early.session.start();
+    assert_eq!(
+        early.session.on_datagram(&[0x3f, 1, 2, 3]),
+        DatagramIn::Dropped
+    );
+    assert_eq!(early.close_code(), None);
 }
 
 #[test]
