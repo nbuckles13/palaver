@@ -1,12 +1,19 @@
 //! What every node does on the control plane, conductor or not:
 //!
-//! - publishes its own signed report once a second, and sooner when something in it changes
-//!   (but never two within [`REPORT_MIN_GAP`]);
+//! - publishes its own signed report when something in it changes (but never two within
+//!   [`REPORT_MIN_GAP`]), and every [`REPORT_REFRESH`] regardless;
 //! - keeps the latest verified report from every other node;
 //! - holds the current plan, adopting a new one only under the replacement rule.
 //!
-//! And what the conductor does on top: it keeps the roster (every node whose reports arrive)
-//! and issues a new plan whenever the roster or the wiring it calls for changes.
+//! And what the conductor does on top: it keeps the roster and issues a new plan whenever
+//! the roster or the wiring it calls for changes.
+//!
+//! Who is in the roster is read from the links nodes report, not from a heartbeat. Every
+//! node watches its own links (any traffic shows the neighbour is alive) and reports a
+//! change at once. A link counts as up while both its ends list it. A node is in the roster
+//! while a chain of such links joins it to the conductor. So a node that dies is dropped as
+//! soon as its neighbours notice and say so, and no node has to send anything periodically
+//! for the others to know it is there.
 //!
 //! Sans-IO: the caller hands in received objects and the current time, and asks what to send.
 
@@ -15,19 +22,26 @@ use palaver_proto::{
     Signer, Timestamp, Verifier,
 };
 use palaver_topology::{Input, ReportedLink, wire};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
-/// How often a node reports when nothing has changed. Also the conductor's heartbeat.
-pub const REPORT_INTERVAL: Duration = Duration::from_secs(1);
+/// How often a node repeats its report when nothing has changed. A safety net only: changes
+/// are reported at once, and whether a node is still there is judged from its links, which
+/// its neighbours watch, not from this.
+pub const REPORT_REFRESH: Duration = Duration::from_secs(30);
 /// The least time between two reports from a node. A change is reported at once unless a
 /// report went out less than this long ago; then it waits, and several changes share one
 /// report. Without it every plan makes every node report at once, and each of those reports
 /// floods to every node.
 pub const REPORT_MIN_GAP: Duration = Duration::from_millis(200);
-/// A node whose last report is older than this is no longer considered present.
-pub const REPORT_TIMEOUT: Duration = Duration::from_secs(3);
+/// A report older than this is not believed any more: its node missed three refreshes. This
+/// catches a node whose connections are alive but which has stopped working.
+pub const REPORT_TIMEOUT: Duration = Duration::from_secs(100);
+/// How long the conductor keeps a node in the roster after it stops being reachable, so
+/// that a link which drops and comes straight back, or a node moving from one link to
+/// another, does not cost two plans.
+pub const DROP_HOLD: Duration = Duration::from_millis(500);
 /// The term of a meeting's first conductor, its creator.
 pub const FIRST_TERM: u32 = 1;
 /// The N of top-N audio selection that a conductor puts in its plans.
@@ -125,6 +139,10 @@ pub struct Node<S, V> {
     changed: bool,
     next_sequence: u64,
     last_sent: Option<Timestamp>,
+    /// Nodes that were reachable when the conductor last looked.
+    connected: BTreeSet<ParticipantId>,
+    /// Of those, the ones that no longer are, and since when.
+    lost: BTreeMap<ParticipantId, Timestamp>,
     /// Set while this node is conductor.
     conducting: Option<Conducting>,
 }
@@ -152,6 +170,8 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             changed: true,
             next_sequence,
             last_sent: None,
+            connected: BTreeSet::new(),
+            lost: BTreeMap::new(),
             conducting: None,
         }
     }
@@ -297,12 +317,72 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         }
     }
 
-    /// The reports of the other nodes present at `now`.
-    fn heard(&self, now: Timestamp) -> impl Iterator<Item = (&ParticipantId, &Report)> {
+    /// The reports that are still believed at `now`.
+    fn fresh(&self, now: Timestamp) -> impl Iterator<Item = (&ParticipantId, &Report)> {
         self.reports
             .iter()
             .filter(move |(_, heard)| now.saturating_since(heard.at) < REPORT_TIMEOUT)
             .map(|(id, heard)| (id, &heard.report))
+    }
+
+    /// The nodes joined to this one by a chain of links that both ends report as up.
+    fn reachable(&self, now: Timestamp) -> BTreeSet<ParticipantId> {
+        let reports: BTreeMap<&ParticipantId, &Report> = self.fresh(now).collect();
+        let lists = |links: &[Link], peer: &ParticipantId| links.iter().any(|l| l.peer == *peer);
+        // The peers `node` lists, which list it back.
+        let neighbours = |node: &ParticipantId| -> Vec<ParticipantId> {
+            let mine: &[Link] = if *node == self.me {
+                &self.view.links
+            } else {
+                reports.get(node).map(|r| r.links.as_slice()).unwrap_or(&[])
+            };
+            mine.iter()
+                .map(|link| &link.peer)
+                .filter(|peer| {
+                    if **peer == self.me {
+                        lists(&self.view.links, node)
+                    } else {
+                        reports.get(peer).is_some_and(|r| lists(&r.links, node))
+                    }
+                })
+                .cloned()
+                .collect()
+        };
+        let mut seen = BTreeSet::from([self.me.clone()]);
+        let mut todo = vec![self.me.clone()];
+        while let Some(node) = todo.pop() {
+            for peer in neighbours(&node) {
+                if seen.insert(peer.clone()) {
+                    todo.push(peer);
+                }
+            }
+        }
+        seen.remove(&self.me);
+        seen
+    }
+
+    /// Bring the record of who is connected, and who was lost when, up to `now`.
+    fn note_reachability(&mut self, now: Timestamp) {
+        let reachable = self.reachable(now);
+        for id in &self.connected {
+            if !reachable.contains(id) {
+                self.lost.entry(id.clone()).or_insert(now);
+            }
+        }
+        for id in reachable {
+            self.lost.remove(&id);
+            self.connected.insert(id);
+        }
+        let gone: Vec<ParticipantId> = self
+            .lost
+            .iter()
+            .filter(|(_, since)| now.saturating_since(**since) >= DROP_HOLD)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in gone {
+            self.lost.remove(&id);
+            self.connected.remove(&id);
+        }
     }
 
     /// The plan the conductor would issue at `now`, with the stamp left for the caller: the
@@ -327,7 +407,11 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             unreachable.extend(cannot.iter().map(|peer| Edge(from.clone(), peer.clone())));
         };
         see(&self.me, &self.view.links, &self.view.unreachable);
-        for (id, report) in self.heard(now) {
+        let present = self.present(now);
+        for (id, report) in self.fresh(now) {
+            if !present.contains(id) {
+                continue;
+            }
             see(id, &report.links, &report.unreachable);
             roster.push((
                 id.clone(),
@@ -337,6 +421,18 @@ impl<S: Signer, V: Verifier> Node<S, V> {
                 },
             ));
         }
+        // A link is up only while both ends list it; one end's word is a link that is coming
+        // up or has just gone.
+        let listed: BTreeSet<(ParticipantId, ParticipantId)> = links
+            .iter()
+            .map(|link| (link.from.clone(), link.to.clone()))
+            .collect();
+        links.retain(|link| listed.contains(&(link.to.clone(), link.from.clone())));
+        // A node that has just dropped out of reach is kept as it was until its hold runs
+        // out: its neighbours failing to reach it is the same news again, not a reason to
+        // wire around it.
+        unreachable
+            .retain(|pair| !self.lost.contains_key(&pair.0) && !self.lost.contains_key(&pair.1));
         roster.sort_by(|a, b| a.0.cmp(&b.0));
         let (previous_peerings, previous_audio_overlay) = match &self.plan {
             Some(held) => (held.peerings.clone(), held.audio_overlay.clone()),
@@ -383,6 +479,8 @@ impl<S: Signer, V: Verifier> Node<S, V> {
 
     /// As conductor: issue a new plan if the one held no longer matches the meeting.
     fn poll_plan(&mut self, now: Timestamp) -> Option<Output> {
+        self.conducting.as_ref()?;
+        self.note_reachability(now);
         let conducting = self.conducting.as_mut()?;
         let stale = core::mem::replace(&mut conducting.stale, false);
         let term = conducting.term;
@@ -414,7 +512,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         let wait = if self.changed {
             REPORT_MIN_GAP
         } else {
-            REPORT_INTERVAL
+            REPORT_REFRESH
         };
         if self
             .last_sent
@@ -446,7 +544,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
     pub fn next_wake(&self, now: Timestamp) -> Timestamp {
         let report = match self.last_sent {
             Some(sent) if self.changed => sent.saturating_add(REPORT_MIN_GAP).max(now),
-            Some(sent) => sent.saturating_add(REPORT_INTERVAL),
+            Some(sent) => sent.saturating_add(REPORT_REFRESH),
             None => now,
         };
         let Some(conducting) = &self.conducting else {
@@ -455,21 +553,46 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         if conducting.stale {
             return now;
         }
-        // The conductor must also notice the next member whose reports stop.
-        self.reports
+        // The conductor must also notice when a lost node's hold runs out, and when a report
+        // stops being believed.
+        let holds = self
+            .lost
             .values()
-            .map(|heard| heard.at.saturating_add(REPORT_TIMEOUT))
+            .map(|since| since.saturating_add(DROP_HOLD));
+        let reports = self
+            .reports
+            .values()
+            .map(|heard| heard.at.saturating_add(REPORT_TIMEOUT));
+        holds
+            .chain(reports)
             .filter(|expiry| *expiry > now)
             .fold(report, Timestamp::min)
     }
 
-    /// The nodes considered present at `now`: this one, and every node whose latest report
-    /// arrived less than [`REPORT_TIMEOUT`] ago.
+    /// The nodes in the meeting at `now`, as this node sees it: itself, every node joined to
+    /// it by links that both ends report as up, and (on the conductor) nodes that stopped
+    /// being reachable less than [`DROP_HOLD`] ago. Sorted.
     pub fn present(&self, now: Timestamp) -> Vec<ParticipantId> {
-        let mut out = vec![self.me.clone()];
-        out.extend(self.heard(now).map(|(id, _)| id.clone()));
-        out.sort();
-        out
+        let mut out = self.reachable(now);
+        let held = self
+            .lost
+            .iter()
+            .filter(|(id, since)| {
+                now.saturating_since(**since) < DROP_HOLD
+                    && self
+                        .reports
+                        .get(*id)
+                        .is_some_and(|heard| now.saturating_since(heard.at) < REPORT_TIMEOUT)
+            })
+            .map(|(id, _)| id.clone());
+        out.extend(held);
+        out.insert(self.me.clone());
+        out.into_iter().collect()
+    }
+
+    /// This node's links and addresses, as last set.
+    pub fn view(&self) -> &LocalView {
+        &self.view
     }
 }
 
@@ -550,17 +673,17 @@ mod tests {
     }
 
     #[test]
-    fn a_node_reports_at_once_then_once_a_second() {
+    fn a_node_reports_at_once_then_only_every_thirty_seconds_while_nothing_changes() {
         let mut n = node(1);
         assert_eq!(n.next_wake(at(0)), at(0));
         let first = opened(n.poll(at(0)), 1);
         assert_eq!((first.sequence, first.applied_plan), (1000, None));
         assert_eq!(n.poll(at(0)), None);
-        assert_eq!(n.poll(at(999)), None);
-        assert_eq!(n.next_wake(at(500)), at(1000));
-        assert_eq!(opened(n.poll(at(1000)), 1).sequence, 1001);
-        assert_eq!(n.poll(at(1500)), None);
-        assert_eq!(opened(n.poll(at(2100)), 1).sequence, 1002);
+        assert_eq!(n.poll(at(29_999)), None);
+        assert_eq!(n.next_wake(at(500)), at(30_000));
+        assert_eq!(opened(n.poll(at(30_000)), 1).sequence, 1001);
+        assert_eq!(n.poll(at(45_000)), None);
+        assert_eq!(opened(n.poll(at(61_000)), 1).sequence, 1002);
     }
 
     #[test]
@@ -586,13 +709,13 @@ mod tests {
         assert_eq!(report.addresses, view.addresses);
         n.set_view(view);
         assert_eq!(n.poll(at(400)), None, "an unchanged view is not a change");
-        // The one-second cadence now runs from the report just sent.
-        assert_eq!(n.poll(at(1199)), None);
-        assert!(n.poll(at(1200)).is_some());
+        // The refresh now runs from the report just sent.
+        assert_eq!(n.poll(at(30_199)), None);
+        assert!(n.poll(at(30_200)).is_some());
         // Once the gap has passed, a change is reported at once.
         n.set_view(LocalView::default());
-        assert_eq!(n.next_wake(at(1500)), at(1500));
-        assert!(n.poll(at(1500)).is_some());
+        assert_eq!(n.next_wake(at(31_000)), at(31_000));
+        assert!(n.poll(at(31_000)).is_some());
     }
 
     #[test]
@@ -713,11 +836,11 @@ mod tests {
             ReportVerdict::Invalid(_)
         ));
         // The next one replaces it.
-        let Some(Output::PublishReport { group_id, object }) = b.poll(at(1000)) else {
+        let Some(Output::PublishReport { group_id, object }) = b.poll(at(30_000)) else {
             panic!()
         };
         assert_eq!(
-            a.on_report(&id_of(2), group_id, &object, at(1005)),
+            a.on_report(&id_of(2), group_id, &object, at(30_005)),
             ReportVerdict::Accepted
         );
         assert_eq!(a.report_of(&id_of(2)).map(|r| r.sequence), Some(1001));
@@ -731,29 +854,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_node_is_present_until_three_seconds_pass_without_a_report() {
-        let mut a = node(1);
-        let mut b = node(2);
-        assert_eq!(a.present(at(0)), [id_of(1)]);
-        let Some(Output::PublishReport { group_id, object }) = b.poll(at(0)) else {
-            panic!()
-        };
-        a.on_report(&id_of(2), group_id, &object, at(100));
-        let mut both = vec![id_of(1), id_of(2)];
-        both.sort();
-        assert_eq!(a.present(at(100)), both);
-        assert_eq!(a.present(at(3099)), both);
-        assert_eq!(a.present(at(3100)), [id_of(1)]);
-        // A fresh report brings it back.
-        let Some(Output::PublishReport { group_id, object }) = b.poll(at(4000)) else {
-            panic!()
-        };
-        a.on_report(&id_of(2), group_id, &object, at(4010));
-        assert_eq!(a.present(at(4010)), both);
-    }
-
-    // --- The conductor ---
+    // --- Who is present, and the conductor ---
 
     fn stamp(term: u32, generation: u32) -> PlanStamp {
         PlanStamp { term, generation }
@@ -770,6 +871,15 @@ mod tests {
     /// Run `node` until it has nothing to send, returning what it sent.
     fn drain(node: &mut Node<FakeIdentity, FakeVerifier>, now: Timestamp) -> Vec<Output> {
         core::iter::from_fn(|| node.poll(now)).collect()
+    }
+
+    /// The plans among what `node` sends at `now`.
+    fn plans(node: &mut Node<FakeIdentity, FakeVerifier>, now: Timestamp) -> Vec<Plan> {
+        drain(node, now)
+            .into_iter()
+            .filter(|output| matches!(output, Output::PublishPlan { .. }))
+            .map(|output| issued(Some(output)))
+            .collect()
     }
 
     /// Deliver `from`'s report, if it has one to send, to `to`.
@@ -789,11 +899,35 @@ mod tests {
         }
     }
 
+    fn direct(peer: u8) -> Link {
+        Link {
+            peer: id_of(peer),
+            path: PathKind::Direct,
+            rtt: Duration::from_millis(2),
+        }
+    }
+
+    /// Tell `node` that its links are now exactly those to `peers`.
+    fn links(node: &mut Node<FakeIdentity, FakeVerifier>, peers: &[u8]) {
+        let view = LocalView {
+            links: peers.iter().map(|peer| direct(*peer)).collect(),
+            unreachable: node.view().unreachable.clone(),
+            ..LocalView::default()
+        };
+        node.set_view(view);
+    }
+
     fn roster_of(plan: &Plan) -> Vec<ParticipantId> {
-        plan.roster
-            .iter()
-            .map(|m| FakeVerifier.participant_id(&m.key))
-            .collect()
+        sorted(
+            plan.roster
+                .iter()
+                .map(|m| FakeVerifier.participant_id(&m.key))
+                .collect(),
+        )
+    }
+
+    fn ids(seeds: &[u8]) -> Vec<ParticipantId> {
+        sorted(seeds.iter().map(|seed| id_of(*seed)).collect())
     }
 
     fn sorted(mut ids: Vec<ParticipantId>) -> Vec<ParticipantId> {
@@ -806,6 +940,75 @@ mod tests {
         if a < b { Edge(a, b) } else { Edge(b, a) }
     }
 
+    /// A conductor (node 1) with nodes 2 and 3 linked to it, the plan issued and everything
+    /// sent, at time 0.
+    fn three() -> [Node<FakeIdentity, FakeVerifier>; 3] {
+        let (mut c, mut j, mut k) = (node(1), node(2), node(3));
+        c.create_meeting();
+        links(&mut c, &[2, 3]);
+        links(&mut j, &[1]);
+        links(&mut k, &[1]);
+        report(&mut j, &mut c, at(0));
+        report(&mut k, &mut c, at(0));
+        drain(&mut c, at(0));
+        assert_eq!(roster_of(c.plan().unwrap()), ids(&[1, 2, 3]));
+        [c, j, k]
+    }
+
+    #[test]
+    fn a_node_is_present_only_while_both_ends_of_a_link_to_it_say_so() {
+        let (mut a, mut b) = (node(1), node(2));
+        assert_eq!(a.present(at(0)), ids(&[1]));
+        // B's report alone, even naming A, is not enough: A does not hold the link.
+        links(&mut b, &[1]);
+        report(&mut b, &mut a, at(0));
+        assert_eq!(a.present(at(0)), ids(&[1]));
+        links(&mut a, &[2]);
+        assert_eq!(a.present(at(0)), ids(&[1, 2]));
+        // Nor is A's side alone: B says the link is gone.
+        links(&mut b, &[]);
+        report(&mut b, &mut a, at(300));
+        assert_eq!(a.present(at(300)), ids(&[1]));
+    }
+
+    #[test]
+    fn a_node_is_present_through_a_chain_of_links() {
+        // 1 - 2 - 3 - 4: node 1 holds only the link to 2.
+        let mut a = node(1);
+        links(&mut a, &[2]);
+        let (mut b, mut c, mut d) = (node(2), node(3), node(4));
+        links(&mut b, &[1, 3]);
+        links(&mut c, &[2, 4]);
+        links(&mut d, &[3]);
+        for other in [&mut d, &mut c] {
+            report(other, &mut a, at(0));
+        }
+        // Without 2's report the chain has no first link.
+        assert_eq!(a.present(at(0)), ids(&[1]));
+        report(&mut b, &mut a, at(0));
+        assert_eq!(a.present(at(0)), ids(&[1, 2, 3, 4]));
+        // 3 loses its link to 4: 4 is cut off though its own report still names 3.
+        links(&mut c, &[2]);
+        report(&mut c, &mut a, at(300));
+        assert_eq!(a.present(at(300)), ids(&[1, 2, 3]));
+        // 2 goes: everything behind it goes with it.
+        links(&mut a, &[]);
+        assert_eq!(a.present(at(300)), ids(&[1]));
+    }
+
+    #[test]
+    fn a_report_is_not_believed_after_a_hundred_seconds_without_a_refresh() {
+        let (mut a, mut b) = (node(1), node(2));
+        links(&mut a, &[2]);
+        links(&mut b, &[1]);
+        report(&mut b, &mut a, at(0));
+        assert_eq!(a.present(at(99_999)), ids(&[1, 2]));
+        assert_eq!(a.present(at(100_000)), ids(&[1]));
+        // A refresh keeps it.
+        report(&mut b, &mut a, at(30_000));
+        assert_eq!(a.present(at(100_000)), ids(&[1, 2]));
+    }
+
     #[test]
     fn the_creator_issues_a_first_plan_with_a_roster_of_one() {
         let mut c = node(1);
@@ -815,7 +1018,7 @@ mod tests {
         let plan = issued(c.poll(at(0)));
         assert_eq!(plan.stamp, stamp(FIRST_TERM, 0));
         assert_eq!(plan.conductor, id_of(1));
-        assert_eq!(roster_of(&plan), [id_of(1)]);
+        assert_eq!(roster_of(&plan), ids(&[1]));
         assert_eq!(plan.roster[0].name.reveal(), "node 1");
         assert_eq!(plan.audio_top_n, AUDIO_TOP_N);
         assert!(plan.peerings.is_empty() && plan.audio_overlay.is_empty());
@@ -828,23 +1031,31 @@ mod tests {
     #[test]
     fn a_node_that_is_not_conductor_never_issues_a_plan() {
         let (mut a, mut b) = (node(1), node(2));
+        links(&mut a, &[2]);
+        links(&mut b, &[1]);
         report(&mut b, &mut a, at(0));
-        for output in drain(&mut a, at(0)) {
-            assert!(matches!(output, Output::PublishReport { .. }));
-        }
+        assert!(plans(&mut a, at(0)).is_empty());
         assert_eq!(a.plan(), None);
     }
 
     #[test]
-    fn a_node_whose_report_arrives_joins_the_roster_and_is_wired() {
+    fn a_node_joins_the_roster_once_its_link_is_reported_from_both_ends() {
         let (mut c, mut j) = (node(1), node(2));
         c.create_meeting();
         drain(&mut c, at(0));
+        // The joiner's report arrives first, naming its link to the conductor.
+        links(&mut j, &[1]);
         report(&mut j, &mut c, at(100));
-        assert_eq!(c.next_wake(at(100)), at(100));
-        let plan = issued(c.poll(at(100)));
+        assert!(
+            plans(&mut c, at(100)).is_empty(),
+            "the link is not up here yet"
+        );
+        // Then the conductor's own end comes up.
+        links(&mut c, &[2]);
+        assert_eq!(c.next_wake(at(110)), at(110));
+        let plan = issued(c.poll(at(110)));
         assert_eq!(plan.stamp, stamp(FIRST_TERM, 1));
-        assert_eq!(sorted(roster_of(&plan)), sorted(vec![id_of(1), id_of(2)]));
+        assert_eq!(roster_of(&plan), ids(&[1, 2]));
         assert_eq!(plan.peerings, [edge(1, 2)]);
         assert_eq!(plan.audio_overlay, [edge(1, 2)]);
 
@@ -859,95 +1070,189 @@ mod tests {
     }
 
     #[test]
+    fn a_node_two_links_away_joins_the_roster() {
+        // 3 joined through 2; the conductor, 1, has no link to it.
+        let [mut c, mut j, mut k] = three();
+        let mut far = node(4);
+        links(&mut far, &[3]);
+        links(&mut k, &[1, 4]);
+        report(&mut far, &mut c, at(300));
+        assert!(plans(&mut c, at(300)).is_empty());
+        report(&mut k, &mut c, at(310));
+        let plan = issued(c.poll(at(310)));
+        assert_eq!(roster_of(&plan), ids(&[1, 2, 3, 4]));
+        assert!(plan.audio_overlay.contains(&edge(3, 4)));
+        let _ = &mut j;
+    }
+
+    #[test]
     fn no_plan_is_issued_while_nothing_it_says_changes() {
-        let (mut c, mut j) = (node(1), node(2));
-        c.create_meeting();
-        report(&mut j, &mut c, at(0));
-        let first = issued(c.poll(at(0)));
-        drain(&mut c, at(0));
-        // Reports keep coming, with a round-trip time that moves about.
-        for second in 1..10u64 {
-            let now = at(second * 1000);
+        let [mut c, mut j, _] = three();
+        let first = c.plan().unwrap().clone();
+        // Refreshes keep coming, with a round-trip time that moves about.
+        for round in 1..10u64 {
+            let now = at(round * 30_000);
             j.set_view(LocalView {
                 links: vec![Link {
-                    peer: id_of(1),
-                    path: PathKind::Direct,
-                    rtt: Duration::from_millis(second),
+                    rtt: Duration::from_millis(round),
+                    ..direct(1)
                 }],
                 ..LocalView::default()
             });
             report(&mut j, &mut c, now);
-            for output in drain(&mut c, now) {
-                assert!(matches!(output, Output::PublishReport { .. }));
+            // (Node 3 sends nothing in this test, so its report is let go in the end.)
+            if round < 3 {
+                assert!(plans(&mut c, now).is_empty());
+                assert_eq!(c.plan(), Some(&first));
             }
         }
-        assert_eq!(c.plan(), Some(&first));
     }
 
     #[test]
-    fn a_member_whose_reports_stop_is_dropped_after_three_seconds() {
-        let (mut c, mut j, mut k) = (node(1), node(2), node(3));
-        c.create_meeting();
-        report(&mut j, &mut c, at(0));
-        report(&mut k, &mut c, at(0));
-        let plan = issued(c.poll(at(0)));
-        assert_eq!(roster_of(&plan).len(), 3);
-        drain(&mut c, at(0));
+    fn a_node_whose_link_goes_is_dropped_after_the_hold() {
+        let [mut c, _, _] = three();
+        // The conductor's link to 3 dies at 1000 ms.
+        links(&mut c, &[2]);
+        assert_eq!(c.next_wake(at(1000)), at(1000));
+        assert!(plans(&mut c, at(1000)).is_empty(), "held for now");
+        assert_eq!(c.present(at(1000)), ids(&[1, 2, 3]));
+        // It asks to be woken when the hold runs out.
+        assert_eq!(c.next_wake(at(1200)), at(1500));
+        assert!(plans(&mut c, at(1499)).is_empty());
+        let plan = issued(c.poll(at(1500)));
+        assert_eq!(roster_of(&plan), ids(&[1, 2]));
+        assert_eq!(plan.audio_overlay, [edge(1, 2)]);
+        assert_eq!(c.present(at(1500)), ids(&[1, 2]));
+    }
 
-        // 3 keeps reporting; 2 goes quiet. The conductor asks to be woken when 2 is due out.
-        for ms in [1000, 2000] {
-            report(&mut k, &mut c, at(ms));
-            drain(&mut c, at(ms));
+    #[test]
+    fn a_neighbour_failing_to_reach_a_node_in_its_hold_is_not_a_reason_to_rewire() {
+        // A triangle. 3 dies: both its links go, and 2 then reports it cannot reach 3.
+        let [mut c, mut j, mut k] = three();
+        links(&mut j, &[1, 3]);
+        links(&mut k, &[1, 2]);
+        report(&mut j, &mut c, at(300));
+        report(&mut k, &mut c, at(300));
+        drain(&mut c, at(300));
+        links(&mut c, &[2]);
+        links(&mut j, &[1]);
+        report(&mut j, &mut c, at(1000));
+        assert!(plans(&mut c, at(1000)).is_empty());
+        j.set_view(LocalView {
+            links: vec![direct(1)],
+            unreachable: vec![id_of(3)],
+            ..LocalView::default()
+        });
+        report(&mut j, &mut c, at(1300));
+        assert!(
+            plans(&mut c, at(1300)).is_empty(),
+            "still held, wiring untouched"
+        );
+        // One plan, when the hold runs out.
+        let after = plans(&mut c, at(1500));
+        assert_eq!(after.len(), 1);
+        assert_eq!(roster_of(&after[0]), ids(&[1, 2]));
+    }
+
+    #[test]
+    fn a_link_that_comes_straight_back_costs_no_plan() {
+        let [mut c, _, _] = three();
+        let before = c.plan().unwrap().clone();
+        links(&mut c, &[2]);
+        assert!(plans(&mut c, at(1000)).is_empty());
+        links(&mut c, &[2, 3]);
+        assert!(plans(&mut c, at(1300)).is_empty());
+        assert!(plans(&mut c, at(5000)).is_empty());
+        assert_eq!(c.plan(), Some(&before));
+    }
+
+    #[test]
+    fn a_node_that_moves_to_another_link_stays_in_the_roster() {
+        let [mut c, mut j, mut k] = three();
+        // 3 loses its link to the conductor and, 300 ms later, has one to 2 instead.
+        links(&mut c, &[2]);
+        drain(&mut c, at(1000));
+        links(&mut k, &[2]);
+        links(&mut j, &[1, 3]);
+        report(&mut k, &mut c, at(1300));
+        report(&mut j, &mut c, at(1300));
+        // 3 never left, and the plan still asks for the link between 1 and 3: nobody has
+        // said it cannot be made again.
+        assert!(plans(&mut c, at(1300)).is_empty());
+        assert!(plans(&mut c, at(5000)).is_empty());
+        assert_eq!(c.present(at(5000)), ids(&[1, 2, 3]));
+        // Once the conductor finds it cannot, the wiring moves to the link that works.
+        c.set_view(LocalView {
+            links: vec![direct(2)],
+            unreachable: vec![id_of(3)],
+            ..LocalView::default()
+        });
+        let plan = issued(c.poll(at(6000)));
+        assert_eq!(roster_of(&plan), ids(&[1, 2, 3]));
+        assert_eq!(plan.audio_overlay.len(), 2);
+        assert!(plan.audio_overlay.contains(&edge(2, 3)));
+    }
+
+    #[test]
+    fn a_node_reported_gone_by_its_neighbour_is_dropped_with_all_behind_it() {
+        // 1 - 2 - 3 - 4, conductor 1.
+        let [mut c, mut j, mut k] = three();
+        let mut far = node(4);
+        links(&mut c, &[2]);
+        links(&mut j, &[1, 3]);
+        links(&mut k, &[2, 4]);
+        links(&mut far, &[3]);
+        for other in [&mut j, &mut k, &mut far] {
+            report(other, &mut c, at(1000));
         }
-        assert_eq!(c.next_wake(at(2000)), at(3000), "its own next report");
-        report(&mut k, &mut c, at(2999));
-        assert!(drain(&mut c, at(2999)).is_empty());
-        assert_eq!(c.next_wake(at(2999)), at(3000));
-
-        let plan = issued(c.poll(at(3000)));
-        assert_eq!(sorted(roster_of(&plan)), sorted(vec![id_of(1), id_of(3)]));
-        assert_eq!(plan.audio_overlay, [edge(1, 3)]);
-        assert!(plan.peerings.iter().all(|e| *e == edge(1, 3)));
-    }
-
-    #[test]
-    fn the_conductor_is_woken_for_a_timeout_that_falls_before_its_next_report() {
-        let (mut c, mut j) = (node(1), node(2));
-        c.create_meeting();
-        drain(&mut c, at(0));
-        report(&mut j, &mut c, at(200));
-        drain(&mut c, at(200)); // plan, and a report naming it
-        drain(&mut c, at(3000)); // a report; the next is due at 4000
-        assert_eq!(c.next_wake(at(3000)), at(3200));
-        assert_eq!(roster_of(&issued(c.poll(at(3200)))), [id_of(1)]);
+        drain(&mut c, at(1000));
+        drain(&mut c, at(2000));
+        assert_eq!(roster_of(c.plan().unwrap()), ids(&[1, 2, 3, 4]));
+        // 3 dies. Only 2 can say so; 4's last report still names its link to 3.
+        links(&mut j, &[1]);
+        report(&mut j, &mut c, at(5000));
+        drain(&mut c, at(5000));
+        let plan = issued(c.poll(at(5500)));
+        assert_eq!(roster_of(&plan), ids(&[1, 2]));
     }
 
     #[test]
     fn a_node_that_comes_back_is_added_again() {
-        let (mut c, mut j) = (node(1), node(2));
-        c.create_meeting();
-        report(&mut j, &mut c, at(0));
-        drain(&mut c, at(0));
-        assert_eq!(roster_of(&issued(c.poll(at(3000)))), [id_of(1)]);
-        drain(&mut c, at(3000));
-        report(&mut j, &mut c, at(5000));
-        let plan = issued(c.poll(at(5000)));
-        assert_eq!(roster_of(&plan).len(), 2);
+        let [mut c, _, mut k] = three();
+        links(&mut c, &[2]);
+        drain(&mut c, at(1000));
+        assert_eq!(roster_of(&issued(c.poll(at(1500)))), ids(&[1, 2]));
+        drain(&mut c, at(1500));
+        links(&mut c, &[2, 3]);
+        let plan = issued(c.poll(at(9000)));
+        assert_eq!(roster_of(&plan), ids(&[1, 2, 3]));
         assert_eq!(plan.stamp, stamp(FIRST_TERM, 2));
+        let _ = &mut k;
+    }
+
+    #[test]
+    fn a_node_whose_connections_live_but_which_stops_reporting_is_dropped_in_the_end() {
+        let [mut c, mut j, _] = three();
+        // 2 refreshes every 30 s; 3 says nothing more, though its link stays up.
+        for round in 1..=3u64 {
+            report(&mut j, &mut c, at(round * 30_000));
+            assert!(plans(&mut c, at(round * 30_000)).is_empty());
+        }
+        assert_eq!(c.next_wake(at(95_000)), at(100_000));
+        let plan = issued(c.poll(at(100_000)));
+        assert_eq!(roster_of(&plan), ids(&[1, 2]));
     }
 
     #[test]
     fn a_changed_name_is_a_new_plan() {
-        let (mut c, mut j) = (node(1), node(2));
-        c.create_meeting();
-        report(&mut j, &mut c, at(0));
-        drain(&mut c, at(0));
+        let [mut c, _, _] = three();
         let config = Config {
             meeting: meeting(),
             name: Redacted::new("Bob".to_owned()),
             first_sequence: 2000,
         };
         let mut renamed = Node::new(config, FakeIdentity(2), FakeVerifier);
+        links(&mut renamed, &[1]);
         report(&mut renamed, &mut c, at(500));
         let plan = issued(c.poll(at(500)));
         assert!(plan.roster.iter().any(|m| m.name.reveal() == "Bob"));
@@ -958,19 +1263,8 @@ mod tests {
         // 1 conducts. 2 and 3 are connected to each other; 3 cannot reach 1.
         let (mut c, mut j, mut k) = (node(1), node(2), node(3));
         c.create_meeting();
-        let direct = |peer: u8| Link {
-            peer: id_of(peer),
-            path: PathKind::Direct,
-            rtt: Duration::from_millis(2),
-        };
-        c.set_view(LocalView {
-            links: vec![direct(2)],
-            ..LocalView::default()
-        });
-        j.set_view(LocalView {
-            links: vec![direct(1), direct(3)],
-            ..LocalView::default()
-        });
+        links(&mut c, &[2]);
+        links(&mut j, &[1, 3]);
         k.set_view(LocalView {
             links: vec![direct(2)],
             unreachable: vec![id_of(1)],
@@ -986,21 +1280,29 @@ mod tests {
     }
 
     #[test]
-    fn a_change_in_the_conductors_own_links_is_planned_for() {
-        let (mut c, mut j, mut k) = (node(1), node(2), node(3));
-        c.create_meeting();
-        report(&mut j, &mut c, at(0));
-        report(&mut k, &mut c, at(0));
-        let before = issued(c.poll(at(0)));
+    fn a_change_in_the_conductors_own_view_is_planned_for() {
+        // 1 - 2 - 3 and 1 - 3: a triangle.
+        let [mut c, mut j, mut k] = three();
+        links(&mut j, &[1, 3]);
+        links(&mut k, &[1, 2]);
+        report(&mut j, &mut c, at(300));
+        report(&mut k, &mut c, at(300));
+        drain(&mut c, at(300));
+        let before = c.plan().unwrap().clone();
         assert!(before.audio_overlay.contains(&edge(1, 3)));
-        drain(&mut c, at(0));
+        // The conductor finds it can no longer reach 3.
         c.set_view(LocalView {
+            links: vec![direct(2)],
             unreachable: vec![id_of(3)],
             ..LocalView::default()
         });
-        assert_eq!(c.next_wake(at(10)), at(10));
-        let after = issued(c.poll(at(10)));
-        assert_eq!(after.stamp, stamp(FIRST_TERM, 1));
+        assert_eq!(c.next_wake(at(1000)), at(1000));
+        let after = issued(c.poll(at(1000)));
+        assert_eq!(
+            roster_of(&after),
+            ids(&[1, 2, 3]),
+            "3 is still there, through 2"
+        );
         assert!(!after.audio_overlay.contains(&edge(1, 3)));
         assert!(after.audio_overlay.contains(&edge(2, 3)));
     }
@@ -1009,11 +1311,15 @@ mod tests {
     fn existing_wiring_is_kept_as_nodes_join() {
         let mut c = node(1);
         c.create_meeting();
-        let mut others: Vec<_> = (2..=12).map(node).collect();
         let mut held = issued(c.poll(at(0)));
-        for (i, joiner) in others.iter_mut().enumerate() {
-            let now = at(100 * (i as u64 + 1));
-            report(joiner, &mut c, now);
+        let mut joined = vec![];
+        for (i, seed) in (2..=12u8).enumerate() {
+            let now = at(300 * (i as u64 + 1));
+            let mut joiner = node(seed);
+            links(&mut joiner, &[1]);
+            report(&mut joiner, &mut c, now);
+            joined.push(seed);
+            links(&mut c, &joined);
             let next = issued(c.poll(now));
             assert!(held.may_replace(&next));
             for e in &held.audio_overlay {
@@ -1078,23 +1384,26 @@ mod tests {
 
     #[test]
     fn the_conductor_replans_on_a_report_that_matters_and_not_on_a_repeat() {
-        let (mut c, mut j, mut k) = (node(1), node(2), node(3));
-        c.create_meeting();
-        report(&mut j, &mut c, at(0));
-        report(&mut k, &mut c, at(0));
-        let before = issued(c.poll(at(0)));
-        drain(&mut c, at(0));
-        // A repeat: no reason to look at the plan, so no wake before the next report.
-        report(&mut k, &mut c, at(500));
-        assert_eq!(c.next_wake(at(500)), at(1000));
+        let [mut c, mut j, mut k] = three();
+        links(&mut j, &[1, 3]);
+        links(&mut k, &[1, 2]);
+        report(&mut j, &mut c, at(300));
+        report(&mut k, &mut c, at(300));
+        drain(&mut c, at(300));
+        let before = c.plan().unwrap().clone();
+        // A refresh: no reason to look at the plan.
+        report(&mut k, &mut c, at(30_300));
+        assert!(plans(&mut c, at(30_300)).is_empty());
+        assert_eq!(c.plan(), Some(&before));
         // 3 now says it cannot reach 1.
         k.set_view(LocalView {
+            links: vec![direct(2)],
             unreachable: vec![id_of(1)],
             ..LocalView::default()
         });
-        report(&mut k, &mut c, at(600));
-        assert_eq!(c.next_wake(at(600)), at(600));
-        let after = issued(c.poll(at(600)));
+        report(&mut k, &mut c, at(40_000));
+        assert_eq!(c.next_wake(at(40_000)), at(40_000));
+        let after = issued(c.poll(at(40_000)));
         assert!(before.audio_overlay.contains(&edge(1, 3)));
         assert!(!after.audio_overlay.contains(&edge(1, 3)));
     }
@@ -1145,9 +1454,12 @@ mod tests {
         let (group, envelope) = plan_with(1, &[(1, 2), (2, 3), (1, 4)]);
         assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
         assert_eq!(n.plan().map(|p| p.stamp), Some(stamp(1, 1)));
-        assert_eq!(n.next_wake(at(300)), at(1000));
+        assert_eq!(n.next_wake(at(300)), at(30_000));
         assert_eq!(n.poll(at(300)), None);
-        assert_eq!(opened(n.poll(at(1000)), 3).applied_plan, Some(stamp(1, 1)));
+        assert_eq!(
+            opened(n.poll(at(30_000)), 3).applied_plan,
+            Some(stamp(1, 1))
+        );
     }
 
     #[test]
