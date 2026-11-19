@@ -7,6 +7,7 @@ use crate::sign::{Kind, PublicKey, Sealed, Signer, Verifier, seal};
 use crate::{MeetingTag, ParticipantId, Redacted};
 use palaver_moq_wire::Value;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 
 /// Longest display name, in bytes.
 pub const MAX_NAME_BYTES: usize = 128;
@@ -43,8 +44,8 @@ pub enum PathKind {
 pub struct Link {
     pub peer: ParticipantId,
     pub path: PathKind,
-    /// Round-trip time in milliseconds.
-    pub rtt_ms: u32,
+    /// Round-trip time. Sent in whole milliseconds.
+    pub rtt: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,12 +116,15 @@ impl Link {
         let mut w = Writer::default();
         w.bytes(LINK_PEER, self.peer.as_bytes());
         w.int(LINK_PATH, u64::from(self.path == PathKind::IrohRelay));
-        w.int(LINK_RTT_MS, u64::from(self.rtt_ms));
+        w.int(
+            LINK_RTT_MS,
+            u64::try_from(self.rtt.as_millis()).unwrap_or(u64::MAX),
+        );
         w.finish()
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let (mut peer, mut path, mut rtt_ms) = (None, PathKind::Direct, 0);
+        let (mut peer, mut path, mut rtt) = (None, PathKind::Direct, Duration::ZERO);
         for pair in fields(bytes) {
             let pair = pair?;
             match (pair.ty, pair.value) {
@@ -128,14 +132,14 @@ impl Link {
                 (LINK_PATH, Value::Int(0)) => path = PathKind::Direct,
                 (LINK_PATH, Value::Int(1)) => path = PathKind::IrohRelay,
                 (LINK_PATH, _) => return Err(DecodeError::Invalid("link path kind")),
-                (LINK_RTT_MS, Value::Int(v)) => rtt_ms = u32::try_from(v).unwrap_or(u32::MAX),
+                (LINK_RTT_MS, Value::Int(v)) => rtt = Duration::from_millis(v),
                 _ => {}
             }
         }
         Ok(Self {
             peer: peer.ok_or(DecodeError::Missing("link peer"))?,
             path,
-            rtt_ms,
+            rtt,
         })
     }
 }
@@ -286,12 +290,12 @@ mod tests {
                 Link {
                     peer: id_of(2),
                     path: PathKind::Direct,
-                    rtt_ms: 12,
+                    rtt: Duration::from_millis(12),
                 },
                 Link {
                     peer: id_of(3),
                     path: PathKind::IrohRelay,
-                    rtt_ms: 180,
+                    rtt: Duration::from_millis(180),
                 },
             ],
             unreachable: vec![id_of(4)],
@@ -342,7 +346,7 @@ mod tests {
             [Link {
                 peer: id_of(2),
                 path: PathKind::Direct,
-                rtt_ms: 12
+                rtt: Duration::from_millis(12)
             }]
         );
         assert_eq!(decoded.sequence, 42);

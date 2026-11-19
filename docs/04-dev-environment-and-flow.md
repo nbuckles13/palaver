@@ -72,6 +72,12 @@ How it is enforced:
 
 What makes the budgets achievable:
 
+- **Time in code.** A span is a `std::time::Duration`; a point in time is a
+  `proto::Timestamp` (microseconds since the node started). No raw integers of milliseconds or
+  microseconds, so units cannot be mixed up, and a time minus a time is a span by type. Units
+  appear only where the wire needs them. Sans-IO crates are handed the time and never read a
+  clock. The async shell (`net`, `sdk`) will read tokio's clock, not the standard one, so tests
+  that pause time are not bypassed; a clippy rule for that is added when those crates have code.
 - **Virtual time.** The simulator and all async tests run on a paused/virtual clock; a test that
   simulates a five-minute meeting takes milliseconds. Real `sleep` is banned in test code outside
   the `e2e` crate by a clippy `disallowed-methods` rule.

@@ -8,6 +8,12 @@
 //! tokens, rendezvous and fill, range filters, namespace prefix updates) are refused.
 
 use crate::{Error, Location, Reader, Result, put_vi64};
+use core::time::Duration;
+
+/// Whole milliseconds in `span`, as the wire carries them. A part of a millisecond is dropped.
+pub(crate) fn millis(span: Duration) -> u64 {
+    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
+}
 
 const OBJECT_DELIVERY_TIMEOUT: u64 = 0x02;
 const SUBGROUP_DELIVERY_TIMEOUT: u64 = 0x06;
@@ -94,12 +100,13 @@ pub enum LocationFilter {
 /// depends on the message, applies.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Params {
-    /// Milliseconds an object may wait before it is dropped.
-    pub object_delivery_timeout: Option<u64>,
-    /// Milliseconds a subgroup may wait before it is dropped.
-    pub subgroup_delivery_timeout: Option<u64>,
-    /// Milliseconds until the sender ends the subscription; 0 means unknown or never.
-    pub expires: Option<u64>,
+    /// How long an object may wait before it is dropped. Sent in whole milliseconds.
+    pub object_delivery_timeout: Option<Duration>,
+    /// How long a subgroup may wait before it is dropped. Sent in whole milliseconds.
+    pub subgroup_delivery_timeout: Option<Duration>,
+    /// How long until the sender ends the subscription; zero means unknown or never. Sent in
+    /// whole milliseconds.
+    pub expires: Option<Duration>,
     pub largest_object: Option<Location>,
     /// Whether objects are forwarded (false pauses the subscription).
     pub forward: Option<bool>,
@@ -200,13 +207,13 @@ impl Params {
         };
         let mut list = vec![];
         if let Some(v) = self.object_delivery_timeout {
-            list.push((OBJECT_DELIVERY_TIMEOUT, vi(v)));
+            list.push((OBJECT_DELIVERY_TIMEOUT, vi(millis(v))));
         }
         if let Some(v) = self.subgroup_delivery_timeout {
-            list.push((SUBGROUP_DELIVERY_TIMEOUT, vi(v)));
+            list.push((SUBGROUP_DELIVERY_TIMEOUT, vi(millis(v))));
         }
         if let Some(v) = self.expires {
-            list.push((EXPIRES, vi(v)));
+            list.push((EXPIRES, vi(millis(v))));
         }
         if let Some(v) = self.largest_object {
             let mut out = vec![];
@@ -280,9 +287,13 @@ impl Params {
                 return Err(Error::Violation("parameter not allowed in this message"));
             }
             match ty {
-                OBJECT_DELIVERY_TIMEOUT => p.object_delivery_timeout = Some(r.vi64()?),
-                SUBGROUP_DELIVERY_TIMEOUT => p.subgroup_delivery_timeout = Some(r.vi64()?),
-                EXPIRES => p.expires = Some(r.vi64()?),
+                OBJECT_DELIVERY_TIMEOUT => {
+                    p.object_delivery_timeout = Some(Duration::from_millis(r.vi64()?))
+                }
+                SUBGROUP_DELIVERY_TIMEOUT => {
+                    p.subgroup_delivery_timeout = Some(Duration::from_millis(r.vi64()?))
+                }
+                EXPIRES => p.expires = Some(Duration::from_millis(r.vi64()?)),
                 LARGEST_OBJECT => p.largest_object = Some(Location::decode(r)?),
                 FORWARD => p.forward = Some(flag(r.u8()?)?),
                 SUBSCRIBER_PRIORITY => p.subscriber_priority = Some(r.u8()?),
@@ -311,9 +322,9 @@ mod tests {
 
     fn everything() -> Params {
         Params {
-            object_delivery_timeout: Some(500),
-            subgroup_delivery_timeout: Some(2000),
-            expires: Some(60_000),
+            object_delivery_timeout: Some(Duration::from_millis(500)),
+            subgroup_delivery_timeout: Some(Duration::from_millis(2000)),
+            expires: Some(Duration::from_millis(60_000)),
             largest_object: Some(Location {
                 group: 9,
                 object: 3,
@@ -401,7 +412,7 @@ mod tests {
     #[test]
     fn a_parameter_outside_the_message_list_is_refused_both_ways() {
         let p = Params {
-            expires: Some(1),
+            expires: Some(Duration::from_millis(1)),
             ..Params::default()
         };
         assert!(matches!(

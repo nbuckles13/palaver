@@ -8,4 +8,4 @@ mod rng;
 mod world;
 
 pub use rng::Rng;
-pub use world::{Micros, NodeId, World};
+pub use world::{NodeId, World};

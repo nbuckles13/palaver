@@ -3,12 +3,14 @@
 //!
 //! Every node is also a publisher of one audio track, named by its node id.
 
-use crate::{Micros, NodeId, Rng, World};
+use crate::{NodeId, Rng, World};
 use palaver_khef_core::{TopN, TopNConfig};
+use palaver_proto::Timestamp;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// One audio packet interval.
-pub const PACKET_INTERVAL: Micros = 20_000;
+pub const PACKET_INTERVAL: Duration = Duration::from_millis(20);
 
 /// An audio packet arriving at a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -16,7 +18,7 @@ struct Arrival {
     /// The neighbour it came from, or `None` for the node's own client.
     from: Option<NodeId>,
     track: NodeId,
-    sent_at: Micros,
+    sent_at: Timestamp,
     level: u8,
     speech: bool,
 }
@@ -34,7 +36,7 @@ pub struct Delivery {
     /// How many clients it reached.
     pub listeners: u32,
     /// The longest time it took to reach one of them.
-    pub worst_latency: Micros,
+    pub worst_latency: Duration,
 }
 
 pub struct AudioOverlay {
@@ -42,10 +44,10 @@ pub struct AudioOverlay {
     nodes: Vec<Node>,
     loss: Rng,
     /// Delay of every link.
-    pub hop_delay: Micros,
+    pub hop_delay: Duration,
     /// Chance, in parts per million, that a packet is lost on a hop.
     pub loss_per_million: u32,
-    deliveries: BTreeMap<(NodeId, Micros), Delivery>,
+    deliveries: BTreeMap<(NodeId, Timestamp), Delivery>,
     link_packets: BTreeMap<(NodeId, NodeId), u64>,
 }
 
@@ -80,7 +82,7 @@ impl AudioOverlay {
         }
     }
 
-    pub fn now(&self) -> Micros {
+    pub fn now(&self) -> Timestamp {
         self.world.now()
     }
 
@@ -93,7 +95,7 @@ impl AudioOverlay {
     pub fn publish(&mut self, node: NodeId, level: u8, speech: bool) {
         let sent_at = self.world.now();
         self.world.schedule(
-            0,
+            Duration::ZERO,
             node,
             Arrival {
                 from: None,
@@ -106,7 +108,7 @@ impl AudioOverlay {
     }
 
     /// Deliver every event due at or before `until`, then set the clock to `until`.
-    pub fn run_until(&mut self, until: Micros) {
+    pub fn run_until(&mut self, until: Timestamp) {
         while self.world.next_at().is_some_and(|at| at <= until) {
             if let Some((node, arrival)) = self.world.step() {
                 self.handle(node, arrival);
@@ -149,7 +151,7 @@ impl AudioOverlay {
     }
 
     /// What became of the speech packet `track` sent at `sent_at`.
-    pub fn delivery(&self, track: NodeId, sent_at: Micros) -> Delivery {
+    pub fn delivery(&self, track: NodeId, sent_at: Timestamp) -> Delivery {
         self.deliveries
             .get(&(track, sent_at))
             .copied()
@@ -171,8 +173,8 @@ impl AudioOverlay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Spurt {
     pub who: NodeId,
-    pub start: Micros,
-    pub len: Micros,
+    pub start: Timestamp,
+    pub len: Duration,
 }
 
 /// Turns a script of speech into packets, the way an Opus sender behaves: a packet every
@@ -182,9 +184,9 @@ pub struct Voices {
     rng: Rng,
     base: Vec<u8>,
     floor: Vec<u8>,
-    last_speech: Vec<Option<Micros>>,
+    last_speech: Vec<Option<Timestamp>>,
     /// Participants that have stopped sending altogether, and since when.
-    pub crashed: Vec<(NodeId, Micros)>,
+    pub crashed: Vec<(NodeId, Timestamp)>,
 }
 
 impl Voices {
@@ -232,8 +234,9 @@ impl Voices {
                 overlay.publish(who, level, true);
             } else {
                 let just_stopped =
-                    self.last_speech[i].is_some_and(|at| now - at <= 3 * PACKET_INTERVAL);
-                let dtx_slot = (now / PACKET_INTERVAL + u64::from(who) * 7).is_multiple_of(20);
+                    self.last_speech[i].is_some_and(|at| now - at <= PACKET_INTERVAL * 3);
+                let tick = now.as_micros() / PACKET_INTERVAL.as_micros() as u64;
+                let dtx_slot = (tick + u64::from(who) * 7).is_multiple_of(20);
                 if just_stopped || dtx_slot {
                     overlay.publish(who, floor, false);
                 }

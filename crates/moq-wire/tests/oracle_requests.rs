@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
+use core::time::Duration;
 use moqtap_codec::draft22::message::{
     ControlMessage, GoAway as TapGoAway, Publish as TapPublish, PublishDone as TapPublishDone,
     Redirect as TapRedirect, RequestError as TapRequestError, RequestOk as TapRequestOk,
@@ -73,8 +74,8 @@ fn subscribe_matches_the_oracle_with_every_parameter_it_allows() {
         request_id: 4,
         track: our_track(),
         params: Params {
-            object_delivery_timeout: Some(500),
-            subgroup_delivery_timeout: Some(2000),
+            object_delivery_timeout: Some(Duration::from_millis(500)),
+            subgroup_delivery_timeout: Some(Duration::from_millis(2000)),
             forward: Some(false),
             subscriber_priority: Some(200),
             location_filter: Some(LocationFilter::AbsoluteRange {
@@ -177,7 +178,7 @@ fn subscribe_ok_and_request_ok_match_the_oracle() {
         },
     ];
     let params = Params {
-        expires: Some(60_000),
+        expires: Some(Duration::from_millis(60_000)),
         largest_object: Some(Location {
             group: 9,
             object: 2,
@@ -225,7 +226,7 @@ fn request_error_matches_the_oracle_with_and_without_a_redirect() {
     assert_same(
         Message::RequestError(RequestError {
             code: 0x10,
-            retry_interval: 5001,
+            retry_after: Some(Duration::from_millis(5000)),
             reason: String::from("no such track"),
             redirect: None,
         }),
@@ -239,7 +240,7 @@ fn request_error_matches_the_oracle_with_and_without_a_redirect() {
     assert_same(
         Message::RequestError(RequestError {
             code: ERROR_REDIRECT,
-            retry_interval: 1,
+            retry_after: Some(Duration::ZERO),
             reason: String::new(),
             redirect: Some(Redirect {
                 connect_uri: vec![],
@@ -276,9 +277,9 @@ fn publish_matches_the_oracle_with_every_parameter_it_allows() {
             track: our_track(),
             track_alias: 17,
             params: Params {
-                object_delivery_timeout: Some(500),
-                subgroup_delivery_timeout: Some(2000),
-                expires: Some(60_000),
+                object_delivery_timeout: Some(Duration::from_millis(500)),
+                subgroup_delivery_timeout: Some(Duration::from_millis(2000)),
+                expires: Some(Duration::from_millis(60_000)),
                 largest_object: Some(Location {
                     group: 300,
                     object: 0,
@@ -358,8 +359,8 @@ fn request_update_matches_the_oracle_with_every_parameter_it_allows() {
         Message::RequestUpdate(RequestUpdate {
             request_id: 6,
             params: Params {
-                object_delivery_timeout: Some(250),
-                subgroup_delivery_timeout: Some(1000),
+                object_delivery_timeout: Some(Duration::from_millis(250)),
+                subgroup_delivery_timeout: Some(Duration::from_millis(1000)),
                 forward: Some(false),
                 subscriber_priority: Some(9),
                 location_filter: Some(LocationFilter::AbsoluteStart(Location {
@@ -390,7 +391,7 @@ fn goaway_matches_the_oracle_with_and_without_a_uri() {
         assert_same(
             Message::GoAway(GoAway {
                 new_session_uri: uri.to_vec(),
-                timeout,
+                timeout: Duration::from_millis(timeout),
             }),
             ControlMessage::GoAway(TapGoAway {
                 new_session_uri: uri.to_vec(),
