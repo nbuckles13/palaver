@@ -5,10 +5,16 @@ default-filter = "not package(palaver-e2e)"
 slow-timeout = { period = "500ms", terminate-after = 2 }
 fail-fast = false
 
-# simulation and integration tests, and the guards that shell out to cargo: hard limit 5 s
+# simulation and integration tests: hard limit 5 s
 [[profile.default.overrides]]
-filter = "package(palaver-sim) | package(palaver-guards) | kind(test)"
+filter = "package(palaver-sim) | kind(test)"
 slow-timeout = { period = "1s", terminate-after = 5 }
+
+# The guards that shell out to `cargo metadata`: hard limit 30 s. Their time is cargo's, not
+# ours, and on a cold Windows runner it has passed 5 s.
+[[profile.default.overrides]]
+filter = "package(palaver-guards)"
+slow-timeout = { period = "5s", terminate-after = 6 }
 
 [profile.e2e]
 default-filter = "package(palaver-e2e)"

@@ -56,6 +56,7 @@ Test time is a first-class constraint, enforced by configuration rather than goo
 |---|---|---|
 | Unit test (T1), guard | < 10 ms typical, < 100 ms required | 1 s |
 | Simulation test (T2), integration test | < 1 s | 5 s, and only for tests on an explicit exceptions list |
+| Guard that runs `cargo metadata` | < 1 s warm | 30 s: its time is cargo's, and a cold CI runner has taken more than 5 s |
 | End-to-end scenario (T3–T4) | as short as the scenario allows | 30 s |
 
 How it is enforced:
