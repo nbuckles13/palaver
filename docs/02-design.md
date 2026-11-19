@@ -89,6 +89,11 @@ K_auth  = HKDF(root, "auth")                 → never published; input to a PAK
   copies an invite (the copying node plus one or two others), not something that updates after
   it is shared. It keeps working while any entry point is reachable at a listed address or
   through the iroh-relay by key.
+  As text it is `palaver:` followed by base32 (case does not matter): a version byte, the
+  fields in the same numbered encoding as reports, and a checksum, so a ticket cut short by
+  a chat program is refused rather than half used. At most four entry points with eight
+  addresses each; a typical ticket is under 300 characters. The text contains the meeting
+  secret, so the code hands it out wrapped as a secret and never logs it.
 - **Addresses**: a node is identified by its key; its addresses are hints. It advertises a
   capped list (about eight): private and public IPv4 and routable IPv6, one per usable
   interface; not loopback (a test option may add it, for machines with no network) and not

@@ -70,7 +70,7 @@ pub struct Report {
 }
 
 /// An address on the wire: the IP's 4 or 16 bytes, then the port, big-endian.
-fn encode_address(address: &SocketAddr) -> Vec<u8> {
+pub(crate) fn encode_address(address: &SocketAddr) -> Vec<u8> {
     let mut out = match address.ip() {
         IpAddr::V4(ip) => ip.octets().to_vec(),
         IpAddr::V6(ip) => ip.octets().to_vec(),
@@ -79,7 +79,7 @@ fn encode_address(address: &SocketAddr) -> Vec<u8> {
     out
 }
 
-fn decode_address(bytes: &[u8]) -> Option<SocketAddr> {
+pub(crate) fn decode_address(bytes: &[u8]) -> Option<SocketAddr> {
     let (ip, port) = bytes.split_at_checked(bytes.len().checked_sub(2)?)?;
     let port = u16::from_be_bytes(port.try_into().ok()?);
     let ip = match ip.len() {
