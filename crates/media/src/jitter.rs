@@ -83,11 +83,16 @@ impl Default for Config {
 }
 
 /// One audio packet: one encoded frame.
+///
+/// `P` is whatever holds the encoded bytes. The buffer never looks inside it; it only keeps
+/// it, hands it back, and clones it when a packet is needed twice (once to rebuild the frame
+/// before it, once for its own frame). With a reference-counted slice of the datagram as it
+/// was received, nothing is copied or allocated per packet from the socket to the decoder.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Packet {
+pub struct Packet<P> {
     /// The frame counter: the group id of the object.
     pub seq: u64,
-    pub payload: Vec<u8>,
+    pub payload: P,
     /// The `audio_level` property, if the packet carried one.
     pub level: Option<u8>,
 }
@@ -105,18 +110,18 @@ pub enum Inserted {
 
 /// What the decoder should produce for the next frame interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Playout {
+pub enum Playout<P> {
     /// Nothing has been played yet and the buffer is still filling: output silence.
     Waiting,
     /// Decode this frame.
-    Frame { seq: u64, payload: Vec<u8> },
+    Frame { seq: u64, payload: P },
     /// Frame `seq` is lost; rebuild it from the FEC data in the packet after it.
-    Fec { seq: u64, next: Vec<u8> },
+    Fec { seq: u64, next: P },
     /// Frame `seq` is lost; rebuild it from the DRED data in a packet `frames_back` frames
     /// later.
     Dred {
         seq: u64,
-        later: Vec<u8>,
+        later: P,
         frames_back: u32,
     },
     /// Frame `seq` is missing with nothing to rebuild it from: the decoder conceals.
@@ -149,15 +154,15 @@ pub struct Stats {
 }
 
 #[derive(Debug, Clone)]
-struct Stored {
-    payload: Vec<u8>,
+struct Stored<P> {
+    payload: P,
     level: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
-pub struct JitterBuffer {
+pub struct JitterBuffer<P> {
     config: Config,
-    buffer: BTreeMap<u64, Stored>,
+    buffer: BTreeMap<u64, Stored<P>>,
     /// The frame due next; `None` until playout starts.
     next: Option<u64>,
     first_arrival: Option<Timestamp>,
@@ -183,7 +188,7 @@ fn micros(span: Duration) -> i64 {
     i64::try_from(span.as_micros()).unwrap_or(i64::MAX)
 }
 
-impl JitterBuffer {
+impl<P: Clone> JitterBuffer<P> {
     pub fn new(config: Config) -> Self {
         let target_frames = config.min_delay_frames.min(config.max_delay_frames);
         Self {
@@ -317,7 +322,7 @@ impl JitterBuffer {
     }
 
     /// A packet arrived at `now`.
-    pub fn insert(&mut self, packet: Packet, now: Timestamp) -> Inserted {
+    pub fn insert(&mut self, packet: Packet<P>, now: Timestamp) -> Inserted {
         self.stats.received = self.stats.received.saturating_add(1);
         let seq = packet.seq;
         let stored = Stored {
@@ -372,7 +377,7 @@ impl JitterBuffer {
         Inserted::Buffered
     }
 
-    fn resync(&mut self, seq: u64, stored: Stored, now: Timestamp) -> Inserted {
+    fn resync(&mut self, seq: u64, stored: Stored<P>, now: Timestamp) -> Inserted {
         self.restart();
         self.stats.resyncs = self.stats.resyncs.saturating_add(1);
         self.observe(seq, now);
@@ -382,7 +387,7 @@ impl JitterBuffer {
     }
 
     /// A frame is due at `now`. Call once per frame interval.
-    pub fn pull(&mut self, now: Timestamp) -> Playout {
+    pub fn pull(&mut self, now: Timestamp) -> Playout<P> {
         let Some(mut next) = self.next else {
             return self.maybe_start(now);
         };
@@ -475,7 +480,7 @@ impl JitterBuffer {
         self.conceal(next)
     }
 
-    fn conceal(&mut self, seq: u64) -> Playout {
+    fn conceal(&mut self, seq: u64) -> Playout<P> {
         self.concealed_in_a_row = self.concealed_in_a_row.saturating_add(1);
         if self.concealed_in_a_row > self.config.max_conceal_frames {
             self.stats.silent = self.stats.silent.saturating_add(1);
@@ -487,7 +492,7 @@ impl JitterBuffer {
     }
 
     /// Playout has not begun: begin once the buffer has filled to the target delay.
-    fn maybe_start(&mut self, now: Timestamp) -> Playout {
+    fn maybe_start(&mut self, now: Timestamp) -> Playout<P> {
         let (Some(first), Some((&lowest, _))) = (self.first_arrival, self.buffer.first_key_value())
         else {
             return Playout::Waiting;
@@ -515,7 +520,7 @@ mod tests {
         Duration::from_millis(n)
     }
 
-    fn packet(seq: u64) -> Packet {
+    fn packet(seq: u64) -> Packet<Vec<u8>> {
         Packet {
             seq,
             payload: seq.to_be_bytes().to_vec(),
@@ -526,10 +531,10 @@ mod tests {
     /// A sender emitting frame `seq` at `seq * 20 ms`, a network, and a receiver pulling
     /// every 20 ms.
     struct Call {
-        buffer: JitterBuffer,
+        buffer: JitterBuffer<Vec<u8>>,
         /// (arrival time, packet), unsorted.
-        in_flight: Vec<(u64, Packet)>,
-        played: Vec<Playout>,
+        in_flight: Vec<(u64, Packet<Vec<u8>>)>,
+        played: Vec<Playout<Vec<u8>>>,
         now_ms: u64,
         level: fn(u64) -> u8,
     }
@@ -631,7 +636,7 @@ mod tests {
 
     #[test]
     fn nothing_is_played_until_something_arrives() {
-        let mut b = JitterBuffer::new(Config::default());
+        let mut b: JitterBuffer<Vec<u8>> = JitterBuffer::new(Config::default());
         assert_eq!(b.pull(at(0)), Playout::Waiting);
         assert_eq!(b.pull(at(20)), Playout::Waiting);
         assert_eq!(b.depth(), 0);
@@ -930,7 +935,7 @@ mod tests {
 
     #[test]
     fn the_buffer_is_bounded_when_nothing_is_pulled() {
-        let mut b = JitterBuffer::new(Config::default());
+        let mut b: JitterBuffer<Vec<u8>> = JitterBuffer::new(Config::default());
         for seq in 0..10_000 {
             b.insert(packet(seq), at(seq * FRAME_MS));
         }
@@ -986,5 +991,37 @@ mod tests {
         assert!(stats.concealed + stats.silent <= 15, "{stats:?}");
         // 90 ms of jitter needs 5 frames plus one; the delay in force is close to that.
         assert!((100..=160).contains(&latency), "{latency} ms");
+    }
+
+    #[test]
+    fn a_shared_payload_is_handed_back_without_being_copied() {
+        use std::rc::Rc;
+        // Stands for a reference-counted slice of a received datagram.
+        let mut b: JitterBuffer<Rc<[u8]>> = JitterBuffer::new(Config::default());
+        let payloads: Vec<Rc<[u8]>> = (0..6u8).map(|n| Rc::from(vec![n; 80])).collect();
+        for (seq, payload) in payloads.iter().enumerate() {
+            if seq == 2 {
+                continue; // lost
+            }
+            let packet = Packet {
+                seq: seq as u64,
+                payload: Rc::clone(payload),
+                level: None,
+            };
+            b.insert(packet, at(seq as u64 * FRAME_MS));
+        }
+        let mut out = vec![];
+        for tick in 0..6 {
+            out.push(b.pull(at(100 + tick * FRAME_MS)));
+        }
+        // Frame 3's packet came out twice, for frame 2's FEC and for itself, and both are
+        // the very allocation that went in.
+        let Playout::Fec { seq: 2, next } = &out[2] else {
+            panic!("{:?}", out[2])
+        };
+        let Playout::Frame { seq: 3, payload } = &out[3] else {
+            panic!("{:?}", out[3])
+        };
+        assert!(Rc::ptr_eq(next, &payloads[3]) && Rc::ptr_eq(payload, &payloads[3]));
     }
 }

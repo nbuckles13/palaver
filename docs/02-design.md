@@ -539,6 +539,9 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
     frame concealed in that spell is still played (playout steps back), so a stall on the
     network costs a gap but no audio.
   - Timing comes from the frame counter alone, which is why it advances through silence.
+  - It never looks inside a packet and is generic over what holds the bytes, so a
+    reference-counted slice of the received datagram passes from the socket to the decoder
+    with no copy and no allocation per packet.
   - First version: skipping and filler are whole frames; time-stretching inside a frame
     comes with the decoder. Numbers are to be tuned by ear.
 - **Video codec**: our own encoder/decoder interface. openh264 (software) is the first backend;
