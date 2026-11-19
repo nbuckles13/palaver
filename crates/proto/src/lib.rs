@@ -10,6 +10,8 @@ pub mod sign;
 pub use fields::{DecodeError, MAX_ENTRIES};
 pub use names::{MeetingTag, ParticipantId, Source, Track, TrackName};
 pub use plan::{Edge, Member, Plan, PlanStamp};
-pub use report::{Link, MAX_NAME_BYTES, PathKind, Report};
+pub use report::{
+    Link, MAX_ADDRESSES, MAX_NAME_BYTES, MAX_RELAY_URL_BYTES, PathKind, Report, advertisable,
+};
 pub use sensitive::{Redacted, Secret};
 pub use sign::{PublicKey, SIGNATURE_BYTES, Signature, Signer, Verifier};
