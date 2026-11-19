@@ -11,5 +11,9 @@ repository.workspace = true
 [dependencies]
 palaver-proto = { workspace = true }
 
+# Tests sign with the stand-in signer. A dev-dependency, so it never reaches a shipped build.
+[dev-dependencies]
+palaver-proto = { workspace = true, features = ["fake-crypto"] }
+
 [lints]
 workspace = true
