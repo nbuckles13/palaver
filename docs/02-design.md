@@ -633,6 +633,28 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
 - **Audio processing**: `sonora`, a pure-Rust port of WebRTC's echo canceller, noise suppression
   and gain control. Platform voice-processing units on Apple/Android where better.
 - **Audio codec**: libopus 1.6 (C, built from source) with DTX, in-band FEC and DRED.
+  - Wrapped by `palaver-opus`, the one crate allowed `unsafe`: mono speech at 48 kHz in
+    20 ms frames; decode, decode from the next packet's FEC, decode from a later packet's
+    DRED, conceal.
+  - **FEC and DRED are paid for out of the bitrate, and at 32 kbit/s there is not room for
+    both.** How far back a packet's DRED history reached, measured with libopus 1.6.1 on a
+    voice-like test signal:
+
+    | Bitrate | Loss planned for | FEC and DRED | DRED only |
+    |---|---|---|---|
+    | 24 kbit/s | 15% | none | 95 ms |
+    | 32 kbit/s | 15% | none | 135 ms |
+    | 32 kbit/s | 30% | 95 ms | 215 ms |
+    | 48 kbit/s | 15% | 95 ms | 375 ms |
+    | 48 kbit/s | 30% | 415 ms | 495 ms |
+    | 64 kbit/s | 15% | 175 ms | 495 ms |
+
+    So "DTX, FEC and DRED" at 32 kbit/s means, in practice, FEC and no DRED. Open: FEC only
+    (best for single losses), DRED only (covers bursts of about 135 ms, weaker on single
+    losses), or 48 kbit/s for both. To settle by listening on real speech; the encoder
+    settings can also follow the loss a link reports.
+  - The jitter buffer cannot know how far a packet's DRED reaches; it asks, and the decoder
+    answers "not that far" (then conceal).
 - **Audio I/O**: `cpal` (WASAPI, ALSA or PulseAudio, CoreAudio). Devices differ in rate and
   sample format, so the pipeline resamples to 48 kHz float.
 - **Jitter buffer**: our own. Adaptive playout delay and time-stretching, with concealment handed

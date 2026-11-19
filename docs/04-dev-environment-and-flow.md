@@ -8,6 +8,8 @@ Draft for discussion, 2026-11-14.
 
 Everything is a standard cargo command, so a developer, an agent and CI run
 the same thing on Linux, Windows and macOS with no bash and no custom runner:
+(One thing beyond the Rust toolchain is needed: a C compiler and `cmake`, to build libopus
+from source.)
 
 | Command | Covers |
 |---|---|
@@ -184,6 +186,9 @@ ownership, which Palaver does not have. The families and the lessons transfer:
    anyone can forge, for the simulator and tests. No test can notice it switched on in a real
    build, because tests use it too, so a guard over `cargo metadata` checks that only the
    simulator may enable it and that nothing which ships depends on the simulator.
+   Unsafe code: the workspace lint is `deny`, not `forbid`, so that the crate wrapping a C
+   library can allow it for itself; a guard keeps that to a list of crates (`crates/opus/`),
+   fails on the keyword or the allow anywhere else, and fails if a listed crate holds none.
 5. **Reviewer checklist.** Only for what needs judgement.
 
 **Rules for guards themselves** (dark_tower learned each the hard way):
