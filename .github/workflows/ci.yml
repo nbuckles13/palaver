@@ -43,4 +43,10 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo nextest run --locked
+      # The guards on the dependency graph (crates/guards/tests/workspace.rs) run on Linux
+      # only: `cargo metadata` gives the same answer on every platform, and it is the one
+      # test whose time is cargo's rather than ours.
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo nextest run --locked
+      - if: matrix.os != 'ubuntu-latest'
+        run: cargo nextest run --locked -E 'not (package(palaver-guards) & binary(workspace))'

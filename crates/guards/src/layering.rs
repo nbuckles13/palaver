@@ -224,16 +224,7 @@ mod tests {
     }
 
     // ---- the real repository ----
-    #[test]
-    fn workspace_respects_layering() {
-        let graph = graph_from_metadata(&repo::cargo_metadata().unwrap()).unwrap();
-        let ours = graph.keys().filter(|k| k.starts_with("palaver-")).count();
-        assert!(
-            ours >= 10,
-            "only {ours} workspace crates seen: nothing to check"
-        );
-        assert_eq!(violations(&graph), Vec::<String>::new());
-    }
+    // (The dependency graph is checked in tests/workspace.rs, from one `cargo metadata`.)
 
     #[test]
     fn sans_io_crates_carry_the_required_lint_bans() {

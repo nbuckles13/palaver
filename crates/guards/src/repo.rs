@@ -55,17 +55,34 @@ fn walk(
 }
 
 /// `cargo metadata` for the workspace, as JSON text.
+///
+/// Its time is cargo's, not ours, and it once took over five seconds on a CI runner with
+/// nothing to show why. So this leaves a trail on the test's standard error, which the test
+/// runner shows if the test fails or is killed for taking too long:
+///
+/// - a line before cargo starts and one after, with how long it took;
+/// - cargo's own messages as they happen, not collected at the end: that is where
+///   "Blocking waiting for file lock on package cache" appears if another cargo holds it;
+/// - cargo's verbose output, which says when it updates an index or downloads anything.
 pub fn cargo_metadata() -> Result<String, String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| String::from("cargo"));
+    let started = std::time::Instant::now();
+    eprintln!("guards: running `{cargo} metadata --locked -v`");
     let out = std::process::Command::new(cargo)
-        .args(["metadata", "--format-version", "1", "--locked"])
+        .args(["metadata", "--format-version", "1", "--locked", "-v"])
         .current_dir(root())
+        .stderr(std::process::Stdio::inherit())
         .output()
         .map_err(|e| format!("running cargo metadata: {e}"))?;
+    eprintln!(
+        "guards: cargo metadata finished in {} ms with {}, {} bytes of output",
+        started.elapsed().as_millis(),
+        out.status,
+        out.stdout.len()
+    );
     if !out.status.success() {
-        return Err(format!(
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&out.stderr)
+        return Err(String::from(
+            "cargo metadata failed; its messages are above",
         ));
     }
     String::from_utf8(out.stdout).map_err(|e| e.to_string())
