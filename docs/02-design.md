@@ -174,7 +174,7 @@ catalog track lists each participant's available tracks.
 - **Cadence**: a node sends a report once a second, and at once on change. Phase 1 sends whole
   plans, not deltas.
 - **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
-  RTT), unreachable peers, last plan applied. Plan: term and generation, conductor, roster,
+  RTT), unreachable peers, last plan applied, up to eight addresses, iroh-relay URL. Plan: term and generation, conductor, roster,
   peerings, audio overlay tree and N, successor list. The rest of the lists above arrives as
   new field numbers.
 - **Everyone holds the whole plan; transit khefs and successors hold all reports.**
