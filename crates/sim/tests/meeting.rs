@@ -132,7 +132,7 @@ fn the_three_node_line_with_no_link_between_the_ends() {
 }
 
 #[test]
-fn a_node_that_crashes_is_dropped_within_about_three_seconds() {
+fn a_node_that_crashes_is_dropped_within_a_second_and_a_half_with_one_plan() {
     let mut m = gathered(6, 11);
     settle(&mut m, 2 * SECOND);
     let before = m.settled().unwrap().clone();
@@ -148,9 +148,13 @@ fn a_node_that_crashes_is_dropped_within_about_three_seconds() {
                 == 1
         })
         .unwrap();
+    let plans = m.stats().plans_issued;
     m.crash(leaf);
     let took = settle(&mut m, 5 * SECOND);
-    assert!(took <= Duration::from_millis(3600), "took {took:?}");
+    // 700 ms for its neighbours to notice the silence, 500 ms of hold, and the flood.
+    assert!(took <= Duration::from_millis(1400), "took {took:?}");
+    m.run_for(3 * SECOND);
+    assert_eq!(m.stats().plans_issued, plans + 1);
     let after = m.settled().unwrap();
     assert_eq!(after.roster.len(), 5);
     assert!(before.may_replace(after) || before.stamp < after.stamp);
@@ -181,8 +185,15 @@ fn when_a_node_in_the_middle_of_the_tree_crashes_the_tree_is_rejoined() {
         })
         .expect("a tree of 20 with degree 4 has inner nodes");
     m.crash(middle);
+    let plans = m.stats().plans_issued;
     let took = settle(&mut m, 6 * SECOND);
-    assert!(took <= Duration::from_millis(4000), "took {took:?}");
+    assert!(took <= Duration::from_millis(1500), "took {took:?}");
+    m.run_for(3 * SECOND);
+    assert_eq!(
+        m.stats().plans_issued,
+        plans + 1,
+        "one plan repairs the tree"
+    );
     assert_eq!(m.settled().unwrap().roster.len(), 19);
 }
 
@@ -222,9 +233,9 @@ fn a_node_cut_off_by_the_crash_of_all_its_neighbours_finds_its_way_back() {
     let took = settle(&mut m, 8 * SECOND);
     assert!(m.live().contains(&alone));
     assert_eq!(m.settled().unwrap().roster.len(), 20 - neighbours.len());
-    // Detection, a failed dial to each dead neighbour in the old plan at worst, then the
-    // three seconds the dead take to leave the roster.
-    assert!(took <= Duration::from_millis(4500), "took {took:?}");
+    // It notices at 700 ms, dials members of the last plan it saw (a failed dial costs
+    // 500 ms), and is back before or soon after the dead have left the roster.
+    assert!(took <= Duration::from_millis(2500), "took {took:?}");
 }
 
 #[test]
@@ -259,23 +270,32 @@ fn fifty_nodes_form_a_meeting() {
     assert_eq!(plan.audio_overlay.len(), 49);
     // One plan per join, plus the first: nothing made the conductor plan twice.
     assert_eq!(m.stats().plans_issued, 50);
+}
 
-    // The cost of the flood while nothing changes: per second, each of 50 reports crosses
-    // each link at most once each way.
-    let links = plan.peerings.len() as u64;
+#[test]
+fn while_nothing_changes_almost_nothing_is_sent() {
+    // Each node repeats its report every 30 s, and idle links carry a filler every 200 ms
+    // each way. Nothing else.
+    let mut m = gathered(20, 43);
+    settle(&mut m, 3 * SECOND);
+    let links = m.settled().unwrap().peerings.len() as u64;
+    m.run_for(35 * SECOND);
     let before = m.stats();
-    m.run_for(3 * SECOND);
+    m.run_for(30 * SECOND);
     m.settled().unwrap();
     let after = m.stats();
     assert_eq!(after.plans_issued, before.plans_issued);
-    let per_second = (after.objects_sent - before.objects_sent) / 3;
+    assert_eq!(after.reports_published - before.reports_published, 20);
+    // Each of the 20 reports crosses each link at most once each way, over 30 s.
+    let objects = after.objects_sent - before.objects_sent;
     assert!(
-        per_second <= 50 * 2 * links,
-        "{per_second} objects a second over {links} links"
+        (20 * links..=20 * 2 * links).contains(&objects),
+        "{objects} objects over {links} links"
     );
+    let fillers_a_second = (after.fillers_sent - before.fillers_sent) / 30;
     assert!(
-        per_second >= 50 * links,
-        "{per_second} is too few to be a flood"
+        (4 * 2 * links..=5 * 2 * links).contains(&fillers_a_second),
+        "{fillers_a_second} fillers a second over {links} links"
     );
 }
 
@@ -289,13 +309,9 @@ fn a_join_makes_only_the_nodes_it_touches_report_at_once() {
     m.run_for(Duration::from_millis(150));
     m.settled().unwrap();
     let reports = m.stats().reports_published - before.reports_published;
-    // About 8 regular reports fall in any 150 ms (51 nodes, one a second each), plus the
-    // joiner and the few nodes it was wired to. If every node reported the new plan at
+    // The joiner and the few nodes it was wired to. If every node reported the new plan at
     // once there would be more than 50.
-    assert!(
-        reports <= 16,
-        "{reports} reports in the 150 ms after a join"
-    );
+    assert!(reports <= 6, "{reports} reports in the 150 ms after a join");
 }
 
 #[test]

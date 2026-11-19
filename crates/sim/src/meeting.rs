@@ -16,7 +16,8 @@
 //! - a node left with no link at all dials the members of the last plan it saw until one
 //!   answers;
 //! - a dial to a node it cannot reach fails after a timeout and is reported as unreachable;
-//! - a crashed node's neighbours notice after a detection delay.
+//! - every node watches its links with the real [`LinkWatch`]: an idle link carries a filler
+//!   every 200 ms, and a neighbour that crashes is noticed when its links fall silent.
 //!
 //! Signatures are the stand-in kind (`fake-crypto`): the simulator tests behaviour, not
 //! cryptography.
@@ -25,7 +26,7 @@ use crate::{NodeId, Rng, World};
 use palaver_control::{
     Config, LocalView, Node, Output, PlanVerdict, REPORT_TIMEOUT, ReportVerdict,
 };
-use palaver_khef_core::{Flood, Offer};
+use palaver_khef_core::{Flood, LinkWatch, LinkWatchConfig, Offer};
 use palaver_proto::sign::fake::{FakeIdentity, FakeVerifier};
 use palaver_proto::{
     Link, MeetingTag, ParticipantId, PathKind, Plan, Redacted, Signer, Timestamp, Track, Verifier,
@@ -63,6 +64,8 @@ enum Event {
     LinkDown { peer: NodeId },
     /// A dial to `peer` gave up.
     DialFailed { peer: NodeId },
+    /// A filler from a neighbour with nothing else to send.
+    Filler { from: NodeId },
 }
 
 struct Member {
@@ -70,6 +73,8 @@ struct Member {
     control: Node<FakeIdentity, FakeVerifier>,
     flood: Flood<Track, NodeId>,
     links: BTreeSet<NodeId>,
+    /// One per link: is the other end still sending?
+    watches: BTreeMap<NodeId, LinkWatch>,
     dialing: BTreeSet<NodeId>,
     unreachable: BTreeSet<NodeId>,
     /// The node holds a link the plan does not name, kept until the other end is wired.
@@ -85,6 +90,10 @@ pub struct Stats {
     pub reports_published: u64,
     /// Control objects sent over links.
     pub objects_sent: u64,
+    /// Their size in all, in bytes, without transport overhead.
+    pub bytes_sent: u64,
+    /// Fillers sent on links with nothing else to carry.
+    pub fillers_sent: u64,
     /// Of those, how many the receiver already had or would not take.
     pub objects_dropped: u64,
     /// Plans issued by conductors.
@@ -114,8 +123,9 @@ pub struct Meeting {
     pub dial_time: Duration,
     /// How long a dial to an unreachable node takes to give up.
     pub dial_timeout: Duration,
-    /// How long a node takes to notice that a neighbour has crashed.
-    pub crash_detection: Duration,
+    /// How each node watches its links: how often an idle link carries a filler, and how
+    /// long a silence means the neighbour is gone.
+    pub link_watch: LinkWatchConfig,
 }
 
 fn ordered(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
@@ -138,7 +148,7 @@ impl Meeting {
             link_jitter: Duration::from_millis(2),
             dial_time: Duration::from_millis(30),
             dial_timeout: Duration::from_millis(500),
-            crash_detection: Duration::from_millis(300),
+            link_watch: LinkWatchConfig::default(),
         })
     }
 
@@ -178,6 +188,7 @@ impl Meeting {
                 control: Node::new(config, FakeIdentity(node as u8), FakeVerifier),
                 flood: Flood::new(lifetime, MAX_CONTROL_TRACKS),
                 links: BTreeSet::new(),
+                watches: BTreeMap::new(),
                 dialing: BTreeSet::new(),
                 unreachable: BTreeSet::new(),
                 surplus_links: false,
@@ -216,16 +227,10 @@ impl Meeting {
         self.blocked.insert(ordered(a, b));
     }
 
-    /// Node `node` vanishes now, without a word. Its neighbours notice after
-    /// [`Meeting::crash_detection`].
+    /// Node `node` vanishes now, without a word. Its neighbours notice when its links fall
+    /// silent.
     pub fn crash(&mut self, node: NodeId) {
-        let Some(member) = self.nodes.remove(&node) else {
-            return;
-        };
-        for peer in member.links {
-            self.world
-                .schedule(self.crash_detection, peer, Event::LinkDown { peer: node });
-        }
+        self.nodes.remove(&node);
     }
 
     /// Run until the clock reads `until`.
@@ -372,6 +377,7 @@ impl Meeting {
                 self.refresh_view(node);
                 self.rejoin_if_alone(node);
             }
+            Event::Filler { from } => self.heard(node, from),
         }
         self.service(node);
     }
@@ -383,6 +389,15 @@ impl Meeting {
             .link_delay
             .saturating_add(Duration::from_micros(self.jitter.below(jitter)));
         self.stats.objects_sent = self.stats.objects_sent.saturating_add(1);
+        self.stats.bytes_sent = self.stats.bytes_sent.saturating_add(payload.len() as u64);
+        let now = self.world.now();
+        if let Some(watch) = self
+            .nodes
+            .get_mut(&node)
+            .and_then(|member| member.watches.get_mut(&to))
+        {
+            watch.sent(now);
+        }
         self.world.schedule(
             delay,
             to,
@@ -426,6 +441,9 @@ impl Meeting {
         if !member.links.contains(&from) {
             return; // the link went down while this was on its way
         }
+        if let Some(watch) = member.watches.get_mut(&from) {
+            watch.heard(now);
+        }
         let accepted = match &track {
             Track::Plan => member.control.on_plan(group, payload) == PlanVerdict::Adopted,
             Track::Report { participant } => {
@@ -457,6 +475,9 @@ impl Meeting {
         if !member.links.insert(peer) {
             return;
         }
+        member
+            .watches
+            .insert(peer, LinkWatch::new(self.link_watch, now));
         // Counted once per link, by the end with the lower number.
         if node < peer {
             self.stats.links_made = self.stats.links_made.saturating_add(1);
@@ -475,6 +496,7 @@ impl Meeting {
         if !member.links.remove(&peer) {
             return;
         }
+        member.watches.remove(&peer);
         member.flood.disconnect(&peer);
         self.refresh_view(node);
         // If the plan still names the peer, try to get it back.
@@ -638,8 +660,52 @@ impl Meeting {
         }
     }
 
-    /// Let `node`'s control logic send what it wants to, and book its next wake.
+    /// Something `from` sent reached `node`.
+    fn heard(&mut self, node: NodeId, from: NodeId) {
+        let now = self.world.now();
+        if let Some(watch) = self
+            .nodes
+            .get_mut(&node)
+            .and_then(|member| member.watches.get_mut(&from))
+        {
+            watch.heard(now);
+        }
+    }
+
+    /// Look at `node`'s links: drop the ones that have fallen silent, and send a filler on
+    /// the ones that have carried nothing lately.
+    fn watch_links(&mut self, node: NodeId) {
+        let now = self.world.now();
+        let Some(member) = self.nodes.get_mut(&node) else {
+            return;
+        };
+        let dead: Vec<NodeId> = member
+            .watches
+            .iter()
+            .filter(|(_, watch)| watch.is_dead(now))
+            .map(|(peer, _)| *peer)
+            .collect();
+        let mut idle = Vec::new();
+        for (peer, watch) in &mut member.watches {
+            if !dead.contains(peer) && watch.filler_due(now) {
+                watch.sent(now);
+                idle.push(*peer);
+            }
+        }
+        for peer in idle {
+            self.stats.fillers_sent = self.stats.fillers_sent.saturating_add(1);
+            self.world
+                .schedule(self.link_delay, peer, Event::Filler { from: node });
+        }
+        for peer in dead {
+            self.on_link_down(node, peer);
+        }
+    }
+
+    /// Let `node` watch its links and its control logic send what it wants to, and book its
+    /// next wake.
     fn service(&mut self, node: NodeId) {
+        self.watch_links(node);
         let now = self.world.now();
         loop {
             let Some(member) = self.nodes.get_mut(&node) else {
@@ -666,8 +732,10 @@ impl Meeting {
         };
         // Never book a wake for the present moment: that would spin without the clock moving.
         let wake = member
-            .control
-            .next_wake(now)
+            .watches
+            .values()
+            .map(LinkWatch::next_wake)
+            .fold(member.control.next_wake(now), Timestamp::min)
             .max(now.saturating_add(Duration::from_millis(1)));
         if member.wake_at.is_none_or(|booked| wake < booked) {
             member.wake_at = Some(wake);

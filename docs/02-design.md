@@ -184,20 +184,53 @@ catalog track lists each participant's available tracks.
 - **Flood rule in detail** (`khef_core::Flood`): an object is passed on only if its group id
   is higher than the last seen for its track, to every neighbour except the one it came from.
   A khef checks the signature before accepting an object, so a member cannot shut out
-  another's reports with a forged high group id. A report is dropped from the cache 3 s
-  after it arrives (its group id is remembered, so it cannot come back from a neighbour that
+  another's reports with a forged high group id. A report is dropped from the cache 100 s
+  after it arrives, three missed refreshes (its group id is remembered, so it cannot come back from a neighbour that
   still holds it); the plan is kept until replaced. The number of tracks remembered is capped.
-- **Cadence**: a node sends a report once a second, and at once when something in it
-  changes, with two limits that keep a plan from setting off a storm of reports (each report
-  floods to every node):
+- **Liveness: no flooded heartbeat.** Whether a node is still there is judged link by link,
+  by its neighbours, and reaches the conductor as a change in their reports.
+  - *Watching a link* (`khef_core::LinkWatch`): anything a khef sends shows its forwarding
+    loop is running. When a khef has sent nothing on a link for 200 ms it sends a filler (a
+    MoQ padding datagram, which the receiver discards). A link silent for 700 ms is dead.
+    The transport's own keep-alive is not used: the transport's task can keep answering
+    while the khef is stuck.
+  - *Reporting it*: a link that comes up or dies changes the node's report, which is sent
+    at once.
+  - *The roster*: a link is up while both its ends list it. A node is in the roster while a
+    chain of such links joins it to the conductor. So a dead node goes as soon as its
+    neighbours say its links are gone, and anything reachable only through it goes too.
+  - *Hold*: the conductor keeps a node for 500 ms after it stops being reachable, and
+    ignores neighbours' "cannot reach it" in that time, so a link that flaps or a node
+    moving between links costs no plan, and a crash costs one.
+  - *Backstop*: every node repeats its report every 30 s. A report not refreshed for 100 s
+    is not believed, which catches a node whose links are alive but whose control logic has
+    stopped. The khef and the control logic are to be driven from one loop, so that this is
+    rare.
+  - Measured in the simulator, steady state, per node (reports as payload bytes; a filler
+    counted as 40 bytes on the wire):
+
+    | Nodes | Before: kbit/s | Now: reports kbit/s | Now: fillers/s | Now: fillers kbit/s |
+    |---|---|---|---|---|
+    | 5 | 15 | 0.5 | 14 | 4 |
+    | 10 | 39 | 1.3 | 17 | 5 |
+    | 25 | 115 | 3.8 | 18 | 6 |
+    | 50 | 243 | 8.1 | 18 | 6 |
+    | 100 | 498 | 17 | 16 | 5 |
+
+    Fillers go only to neighbours and do not grow with the meeting; they stop on a link
+    that is carrying audio. A crashed node is out of the plan in about 1.2 s (was 3.5 s),
+    with one plan.
+- **Cadence**: a node sends a report at once when something in it changes, and every 30 s
+  regardless, with two limits that keep a plan from setting off a storm of reports (each
+  report floods to every node):
   - *Only the nodes a plan asks something new of report it at once*: those whose own entries
     (peerings, audio links; later routes and budgets) differ from the previous plan. The
     conductor computes the same set from the same two plans and waits only for those. For
     everyone else "last plan applied" rides on the next regular report, so it is not a
     meeting-wide "everyone has this plan" signal.
   - *Never two reports within 200 ms*: changes inside that gap share one report.
-  - Measured in the simulator, control objects sent while 50 nodes join (steady state for 50
-    nodes is about 7,250 a second):
+  - Measured in the simulator, control objects sent while 50 nodes join (taken when reports
+    were still repeated every second, which alone was about 7,250 objects a second):
 
     | Joins | Neither limit | Gap only | Affected only | Both |
     |---|---|---|---|---|
@@ -210,11 +243,6 @@ catalog track lists each participant's available tracks.
     where the gap does nothing. The gap delays tidying up (closing links the plan no longer
     names) from about 80 ms to about 220 ms after a join; audio wiring is not delayed.
   - Phase 1 sends whole plans, not deltas.
-- **Open: the steady-state flood is the larger cost.** With 50 nodes each node receives
-  every report about three times a second (once per link it holds): roughly 150 objects a
-  second per node, a few hundred kilobits a second, comparable to its audio. Options for
-  later: a small heartbeat between full reports, sending an unchanged report less often, or
-  flooding along a tree with the mesh as fallback.
 - **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
   RTT), unreachable peers, last plan applied, up to eight addresses, iroh-relay URL. Plan: term and generation, conductor, roster,
   peerings, audio overlay tree and N, successor list. The rest of the lists above arrives as
@@ -254,8 +282,9 @@ otherwise closed once the planned peerings are up.
   other side answers with a `PUBLISH` per control track and sends the latest group it holds of
   each, then new ones as they arrive. Control objects travel on streams, not datagrams (a plan
   is several kilobytes). An object is never sent back to the neighbour it came from.
-- **Roster**: the conductor adds any admitted node whose report verifies, and drops a node
-  after 3 seconds without a report. Host approval and meeting lock come later.
+- **Roster**: the conductor adds any admitted node whose report verifies once a chain of
+  links, each reported by both its ends, joins the node to it; and drops a node 500 ms
+  after that stops being so (see Liveness above). Host approval and meeting lock come later.
 - **Peerings**: on one network the node with the lower participant id dials. With NAT
   traversal both dial at once and one connection is kept by the same tie-break.
 - **First report**: a joiner's control logic starts when its entry link is up, so its first
@@ -279,7 +308,8 @@ otherwise closed once the planned peerings are up.
 - **Leave**: publish a final plan naming the successor with `term + 1` (the successor already
   holds full state), then drain as a transit khef if it is one. UI: "rebalancing meeting, then
   exiting". Hard cap **3 s**, after which the node exits and is treated as a crash.
-- **Crash**: successors watch the conductor's report heartbeat; the first live successor claims
+- **Crash**: successors learn the conductor is gone the way anyone's loss is learnt, from the
+  reports of its neighbours; the first live successor claims
   `term + 1` (lower-ranked successors wait longer). No media impact; only topology changes wait
   (target 1–2 s).
 - **Partition**: each connected component runs with its own conductor; on heal the lower

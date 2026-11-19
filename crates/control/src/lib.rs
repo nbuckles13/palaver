@@ -3,6 +3,6 @@
 mod node;
 
 pub use node::{
-    AUDIO_TOP_N, Config, FIRST_TERM, LocalView, Node, Output, PlanVerdict, REPORT_INTERVAL,
-    REPORT_MIN_GAP, REPORT_TIMEOUT, ReportVerdict,
+    AUDIO_TOP_N, Config, DROP_HOLD, FIRST_TERM, LocalView, Node, Output, PlanVerdict,
+    REPORT_MIN_GAP, REPORT_REFRESH, REPORT_TIMEOUT, ReportVerdict,
 };
