@@ -1,12 +1,14 @@
 //! Request messages: SUBSCRIBE and its replies (sections 9.3, 9.4, 9.6, 9.7).
 
 use crate::frame::{Frame, encode_frame};
+use crate::params::millis;
 use crate::params::{OK_PARAMS, Params, SUBSCRIBE_PARAMS};
 use crate::publish::{
     GOAWAY, GoAway, PUBLISH, PUBLISH_DONE, Publish, PublishDone, REQUEST_UPDATE, RequestUpdate,
     SUBSCRIBE_TRACKS, SubscribeTracks,
 };
 use crate::{Error, FullTrackName, Reader, Result, Setup, decode_kvps, put_vi64};
+use core::time::Duration;
 
 pub const REQUEST_ERROR: u64 = 0x05;
 pub const REQUEST_OK: u64 = 0x07;
@@ -55,8 +57,9 @@ pub struct Redirect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestError {
     pub code: u64,
-    /// Milliseconds before retrying, plus one; 0 means do not retry.
-    pub retry_interval: u64,
+    /// The shortest time to wait before sending the request again; `None` means do not retry.
+    /// On the wire this is whole milliseconds plus one, with 0 for "do not retry".
+    pub retry_after: Option<Duration>,
     pub reason: String,
     /// Present exactly when `code` is [`ERROR_REDIRECT`].
     pub redirect: Option<Redirect>,
@@ -142,7 +145,11 @@ impl RequestError {
             ));
         }
         put_vi64(out, self.code);
-        put_vi64(out, self.retry_interval);
+        put_vi64(
+            out,
+            self.retry_after
+                .map_or(0, |wait| millis(wait).saturating_add(1)),
+        );
         encode_reason(&self.reason, out)?;
         if let Some(redirect) = &self.redirect {
             put_vi64(out, redirect.connect_uri.len() as u64);
@@ -154,7 +161,7 @@ impl RequestError {
 
     fn decode_body(body: &mut Reader<'_>) -> Result<Self> {
         let code = body.vi64()?;
-        let retry_interval = body.vi64()?;
+        let retry_after = body.vi64()?.checked_sub(1).map(Duration::from_millis);
         let reason = decode_reason(body)?;
         let redirect = if code == ERROR_REDIRECT {
             let len = body.vi64()?;
@@ -170,7 +177,7 @@ impl RequestError {
         };
         Ok(Self {
             code,
-            retry_interval,
+            retry_after,
             reason,
             redirect,
         })
@@ -289,20 +296,20 @@ mod tests {
             }),
             Message::RequestOk(RequestOk {
                 params: Params {
-                    expires: Some(30_000),
+                    expires: Some(Duration::from_millis(30_000)),
                     ..Params::default()
                 },
                 track_properties: vec![],
             }),
             Message::RequestError(RequestError {
                 code: 0x10,
-                retry_interval: 0,
+                retry_after: None,
                 reason: String::from("no such track"),
                 redirect: None,
             }),
             Message::RequestError(RequestError {
                 code: ERROR_REDIRECT,
-                retry_interval: 1,
+                retry_after: Some(Duration::ZERO),
                 reason: String::new(),
                 redirect: Some(Redirect {
                     connect_uri: vec![],
@@ -371,7 +378,7 @@ mod tests {
             request_id: 0,
             track: track(),
             params: Params {
-                expires: Some(1),
+                expires: Some(Duration::from_millis(1)),
                 ..Params::default()
             },
         });
@@ -382,7 +389,7 @@ mod tests {
     fn request_error_checks_the_reason_length_and_the_redirect_pairing() {
         let long = RequestError {
             code: 1,
-            retry_interval: 0,
+            retry_after: None,
             reason: "x".repeat(1025),
             redirect: None,
         };
@@ -392,7 +399,7 @@ mod tests {
         ));
         let unpaired = RequestError {
             code: ERROR_REDIRECT,
-            retry_interval: 0,
+            retry_after: None,
             reason: String::new(),
             redirect: None,
         };
@@ -418,6 +425,38 @@ mod tests {
         let mut bytes = vec![];
         encode_frame(SUBSCRIBE_OK, &[1, 0, 1, 5], &mut bytes).unwrap();
         assert!(matches!(parse(&bytes), Err(Error::Violation(_))));
+    }
+
+    #[test]
+    fn the_retry_wait_is_sent_as_milliseconds_plus_one_with_zero_for_never() {
+        let error = |retry_after| RequestError {
+            code: 1,
+            retry_after,
+            reason: String::new(),
+            redirect: None,
+        };
+        // code, retry interval, reason length
+        let cases = [
+            (None, vec![1, 0, 0]),
+            (Some(Duration::ZERO), vec![1, 1, 0]),
+            (Some(Duration::from_millis(99)), vec![1, 100, 0]),
+            (Some(Duration::from_micros(99_900)), vec![1, 100, 0]), // part of a millisecond is dropped
+        ];
+        for (retry_after, body) in cases {
+            let mut out = vec![];
+            Message::RequestError(error(retry_after))
+                .encode(&mut out)
+                .unwrap();
+            assert_eq!(&out[3..], body, "{retry_after:?}");
+        }
+        let mut bytes = vec![];
+        encode_frame(REQUEST_ERROR, &[1, 100, 0], &mut bytes).unwrap();
+        assert_eq!(
+            parse(&bytes),
+            Ok(Message::RequestError(error(Some(Duration::from_millis(
+                99
+            )))))
+        );
     }
 
     #[test]

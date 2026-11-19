@@ -5,22 +5,36 @@
 #![allow(clippy::unwrap_used)]
 
 use palaver_khef_core::TopNConfig;
+use palaver_proto::Timestamp;
+use palaver_sim::NodeId;
 use palaver_sim::audio::{AudioOverlay, PACKET_INTERVAL, Spurt, Voices, transit_topology};
-use palaver_sim::{Micros, NodeId};
+use std::time::Duration;
 
 const NODES: u32 = 50;
 const LISTENERS: u32 = NODES - 1;
-const MS: Micros = 1000;
 /// A leaf on the last transit khef: the far end of both topologies.
 const FAR: NodeId = 15;
 
+/// Milliseconds in one packet interval.
+const FRAME_MS: u64 = 20;
+
+/// How many whole packet intervals fit in `span`.
+fn frames(span: Duration) -> u64 {
+    (span.as_micros() / PACKET_INTERVAL.as_micros()) as u64
+}
+
+/// The time `k` packet intervals after `start`.
+fn nth(start: Timestamp, k: u64) -> Timestamp {
+    start + PACKET_INTERVAL * k as u32
+}
+
 /// A spurt aligned to packet intervals, as speech is once it has been cut into frames.
 fn spurt(who: NodeId, start_ms: u64, len_ms: u64) -> Spurt {
-    let align = |ms: u64| ms * MS / PACKET_INTERVAL * PACKET_INTERVAL;
+    let align = |ms: u64| ms / FRAME_MS * FRAME_MS;
     Spurt {
         who,
-        start: align(start_ms),
-        len: align(len_ms).max(PACKET_INTERVAL),
+        start: Timestamp::from_millis(align(start_ms)),
+        len: Duration::from_millis(align(len_ms).max(FRAME_MS)),
     }
 }
 
@@ -43,12 +57,12 @@ fn run_with(
     );
     let mut voices = Voices::new(NODES, 7);
     setup(&mut overlay, &mut voices);
-    let ticks = seconds * 1000 * MS / PACKET_INTERVAL;
+    let ticks = seconds * 1000 / FRAME_MS;
     for tick in 0..ticks {
-        overlay.run_until(tick * PACKET_INTERVAL);
+        overlay.run_until(nth(Timestamp::ZERO, tick));
         voices.tick(&mut overlay, &script);
     }
-    overlay.run_until((ticks + 20) * PACKET_INTERVAL);
+    overlay.run_until(nth(Timestamp::ZERO, ticks + 20));
     Run { overlay, script }
 }
 
@@ -59,10 +73,8 @@ fn run(chain: bool, script: Vec<Spurt>, seconds: u64) -> Run {
 /// For one spurt: packets that reached every listener, packets sent, and how many at the
 /// start were missed by someone.
 fn heard(run: &Run, s: &Spurt) -> (u64, u64, u64) {
-    let sent: Vec<Micros> = (0..s.len / PACKET_INTERVAL)
-        .map(|k| s.start + k * PACKET_INTERVAL)
-        .collect();
-    let full = |at: &Micros| run.overlay.delivery(s.who, *at).listeners == LISTENERS;
+    let sent: Vec<Timestamp> = (0..frames(s.len)).map(|k| nth(s.start, k)).collect();
+    let full = |at: &Timestamp| run.overlay.delivery(s.who, *at).listeners == LISTENERS;
     let complete = sent.iter().filter(|at| full(at)).count() as u64;
     let clipped = sent.iter().take_while(|at| !full(at)).count() as u64;
     (complete, sent.len() as u64, clipped)
@@ -84,7 +96,7 @@ fn a_one_word_answer_reaches_everyone_from_its_first_packet_with_no_added_delay(
         // The farthest listener gets the first packet after exactly the path's hop count.
         assert_eq!(
             run.overlay.delivery(FAR, yes.start).worst_latency,
-            hops * PACKET_INTERVAL,
+            PACKET_INTERVAL * hops,
             "chain: {chain}"
         );
     }
@@ -149,7 +161,7 @@ fn meeting(seconds: u64) -> Vec<Spurt> {
         }
         at = at + len + next(800) - 200;
     }
-    script.retain(|s| (s.start + s.len) / MS < seconds * 1000);
+    script.retain(|s| s.start + s.len < Timestamp::from_millis(seconds * 1000));
     script
 }
 
@@ -172,7 +184,7 @@ fn in_a_meeting_no_word_is_clipped_and_links_stay_within_the_bound() {
     // Syllable dips below the minimum level cannot cost a selected speaker any packets.
     assert_eq!(complete, sent);
     // No link direction carries more than N tracks' worth of packets.
-    let bound = 3 * (seconds + 1) * 1000 * MS / PACKET_INTERVAL;
+    let bound = 3 * (seconds + 1) * 1000 / FRAME_MS;
     assert!(
         run.overlay.busiest_link_packets() <= bound,
         "{} > {bound}",
@@ -192,7 +204,7 @@ fn a_talker_that_crashes_mid_speech_does_not_block_later_speakers() {
         spurt(22, 6400, 1000),
     ];
     let run = run_with(true, script, 8, |_, voices| {
-        voices.crashed.push((10, 2000 * MS))
+        voices.crashed.push((10, Timestamp::from_millis(2000)))
     });
     for s in &run.script[3..] {
         assert_eq!(heard(&run, s), (50, 50, 0), "{s:?}");
@@ -208,12 +220,8 @@ fn with_loss_on_every_hop_speech_still_gets_through_and_nothing_gets_stuck() {
     let mut reached = 0u64;
     let mut possible = 0u64;
     for s in &run.script {
-        for k in 0..s.len / PACKET_INTERVAL {
-            reached += u64::from(
-                run.overlay
-                    .delivery(s.who, s.start + k * PACKET_INTERVAL)
-                    .listeners,
-            );
+        for k in 0..frames(s.len) {
+            reached += u64::from(run.overlay.delivery(s.who, nth(s.start, k)).listeners);
             possible += u64::from(LISTENERS);
         }
     }

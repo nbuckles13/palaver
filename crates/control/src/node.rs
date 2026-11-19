@@ -7,15 +7,17 @@
 //! Sans-IO: the caller hands in received objects and the current time, and asks what to send.
 
 use palaver_proto::{
-    DecodeError, Link, MeetingTag, Micros, ParticipantId, Plan, Redacted, Report, Signer, Verifier,
+    DecodeError, Link, MeetingTag, ParticipantId, Plan, Redacted, Report, Signer, Timestamp,
+    Verifier,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 /// How often a node reports when nothing has changed. Also the conductor's heartbeat.
-pub const REPORT_INTERVAL: Micros = 1_000_000;
+pub const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 /// A node whose last report is older than this is no longer considered present.
-pub const REPORT_TIMEOUT: Micros = 3_000_000;
+pub const REPORT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// What a node is told once, at start.
 #[derive(Debug, Clone)]
@@ -73,7 +75,7 @@ pub enum ReportVerdict {
 #[derive(Debug, Clone)]
 struct Heard {
     report: Report,
-    at: Micros,
+    at: Timestamp,
 }
 
 /// One node's control-plane state.
@@ -88,7 +90,7 @@ pub struct Node<S, V> {
     /// Something in the next report differs from the last one sent.
     changed: bool,
     next_sequence: u64,
-    last_sent: Option<Micros>,
+    last_sent: Option<Timestamp>,
 }
 
 impl<S: Signer, V: Verifier> Node<S, V> {
@@ -157,7 +159,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         participant: &ParticipantId,
         group_id: u64,
         envelope: &[u8],
-        now: Micros,
+        now: Timestamp,
     ) -> ReportVerdict {
         if participant == &self.me {
             return ReportVerdict::Stale;
@@ -187,10 +189,10 @@ impl<S: Signer, V: Verifier> Node<S, V> {
 
     /// Ask what to send. Returns a report when one is due: the first time, when something in
     /// it changed, or a second after the last. Call again until it returns `None`.
-    pub fn poll(&mut self, now: Micros) -> Option<Output> {
+    pub fn poll(&mut self, now: Timestamp) -> Option<Output> {
         let due = self
             .last_sent
-            .is_none_or(|sent| now.saturating_sub(sent) >= REPORT_INTERVAL);
+            .is_none_or(|sent| now.saturating_since(sent) >= REPORT_INTERVAL);
         if !self.changed && !due {
             return None;
         }
@@ -215,7 +217,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
     }
 
     /// When to call [`Node::poll`] next if nothing else happens.
-    pub fn next_wake(&self, now: Micros) -> Micros {
+    pub fn next_wake(&self, now: Timestamp) -> Timestamp {
         match self.last_sent {
             Some(sent) if !self.changed => sent.saturating_add(REPORT_INTERVAL),
             _ => now,
@@ -224,12 +226,12 @@ impl<S: Signer, V: Verifier> Node<S, V> {
 
     /// The nodes considered present at `now`: this one, and every node whose latest report
     /// arrived less than [`REPORT_TIMEOUT`] ago.
-    pub fn present(&self, now: Micros) -> Vec<ParticipantId> {
+    pub fn present(&self, now: Timestamp) -> Vec<ParticipantId> {
         let mut out = vec![self.me.clone()];
         out.extend(
             self.reports
                 .iter()
-                .filter(|(_, heard)| now.saturating_sub(heard.at) < REPORT_TIMEOUT)
+                .filter(|(_, heard)| now.saturating_since(heard.at) < REPORT_TIMEOUT)
                 .map(|(id, _)| id.clone()),
         );
         out.sort();
@@ -243,7 +245,10 @@ mod tests {
     use palaver_proto::sign::fake::{FakeIdentity, FakeVerifier};
     use palaver_proto::{Edge, Member, PathKind, PlanStamp};
 
-    const MS: Micros = 1000;
+    /// A time, given in milliseconds.
+    fn at(ms: u64) -> Timestamp {
+        Timestamp::from_millis(ms)
+    }
 
     fn meeting() -> MeetingTag {
         MeetingTag::new(b"m-7f3a").unwrap()
@@ -313,46 +318,46 @@ mod tests {
     #[test]
     fn a_node_reports_at_once_then_once_a_second() {
         let mut n = node(1);
-        assert_eq!(n.next_wake(0), 0);
-        let first = opened(n.poll(0), 1);
+        assert_eq!(n.next_wake(at(0)), at(0));
+        let first = opened(n.poll(at(0)), 1);
         assert_eq!((first.sequence, first.applied_plan), (1000, None));
-        assert_eq!(n.poll(0), None);
-        assert_eq!(n.poll(999 * MS), None);
-        assert_eq!(n.next_wake(500 * MS), 1000 * MS);
-        assert_eq!(opened(n.poll(1000 * MS), 1).sequence, 1001);
-        assert_eq!(n.poll(1500 * MS), None);
-        assert_eq!(opened(n.poll(2100 * MS), 1).sequence, 1002);
+        assert_eq!(n.poll(at(0)), None);
+        assert_eq!(n.poll(at(999)), None);
+        assert_eq!(n.next_wake(at(500)), at(1000));
+        assert_eq!(opened(n.poll(at(1000)), 1).sequence, 1001);
+        assert_eq!(n.poll(at(1500)), None);
+        assert_eq!(opened(n.poll(at(2100)), 1).sequence, 1002);
     }
 
     #[test]
     fn a_change_is_reported_at_once_and_an_unchanged_view_is_not() {
         let mut n = node(1);
-        n.poll(0);
+        n.poll(at(0));
         let view = LocalView {
             links: vec![Link {
                 peer: id_of(2),
                 path: PathKind::Direct,
-                rtt_ms: 3,
+                rtt: Duration::from_millis(3),
             }],
             addresses: vec![Redacted::new("192.168.1.5:4433".parse().unwrap())],
             ..LocalView::default()
         };
         n.set_view(view.clone());
-        assert_eq!(n.next_wake(10 * MS), 10 * MS);
-        let report = opened(n.poll(10 * MS), 1);
+        assert_eq!(n.next_wake(at(10)), at(10));
+        let report = opened(n.poll(at(10)), 1);
         assert_eq!(report.links, view.links);
         assert_eq!(report.addresses, view.addresses);
         n.set_view(view);
-        assert_eq!(n.poll(20 * MS), None);
+        assert_eq!(n.poll(at(20)), None);
         // The one-second cadence now runs from the report just sent.
-        assert_eq!(n.poll(1000 * MS), None);
-        assert!(n.poll(1010 * MS).is_some());
+        assert_eq!(n.poll(at(1000)), None);
+        assert!(n.poll(at(1010)).is_some());
     }
 
     #[test]
     fn a_joiner_adopts_the_first_verified_plan_and_reports_it_at_once() {
         let mut n = node(3);
-        n.poll(0);
+        n.poll(at(0));
         let (group, envelope) = plan(4, 7, 1, &[2], 2);
         assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
         assert_eq!(
@@ -363,7 +368,7 @@ mod tests {
             })
         );
         assert_eq!(
-            opened(n.poll(5 * MS), 3).applied_plan,
+            opened(n.poll(at(5)), 3).applied_plan,
             Some(PlanStamp {
                 term: 4,
                 generation: 7
@@ -448,39 +453,39 @@ mod tests {
     fn reports_from_others_are_kept_if_genuine_and_newer() {
         let mut a = node(1);
         let mut b = node(2);
-        let Some(Output::PublishReport { group_id, object }) = b.poll(0) else {
+        let Some(Output::PublishReport { group_id, object }) = b.poll(at(0)) else {
             panic!()
         };
         assert_eq!(
-            a.on_report(&id_of(2), group_id, &object, 5 * MS),
+            a.on_report(&id_of(2), group_id, &object, at(5)),
             ReportVerdict::Accepted
         );
         assert_eq!(a.report_of(&id_of(2)).map(|r| r.sequence), Some(1000));
         // The same report again, as a flood delivers it over a second path.
         assert_eq!(
-            a.on_report(&id_of(2), group_id, &object, 6 * MS),
+            a.on_report(&id_of(2), group_id, &object, at(6)),
             ReportVerdict::Stale
         );
         // Presented on someone else's track.
         assert!(matches!(
-            a.on_report(&id_of(3), group_id, &object, 6 * MS),
+            a.on_report(&id_of(3), group_id, &object, at(6)),
             ReportVerdict::Invalid(_)
         ));
         // The next one replaces it.
-        let Some(Output::PublishReport { group_id, object }) = b.poll(1000 * MS) else {
+        let Some(Output::PublishReport { group_id, object }) = b.poll(at(1000)) else {
             panic!()
         };
         assert_eq!(
-            a.on_report(&id_of(2), group_id, &object, 1005 * MS),
+            a.on_report(&id_of(2), group_id, &object, at(1005)),
             ReportVerdict::Accepted
         );
         assert_eq!(a.report_of(&id_of(2)).map(|r| r.sequence), Some(1001));
         // A node's own report coming back is ignored.
-        let Some(Output::PublishReport { group_id, object }) = a.poll(0) else {
+        let Some(Output::PublishReport { group_id, object }) = a.poll(at(0)) else {
             panic!()
         };
         assert_eq!(
-            a.on_report(&id_of(1), group_id, &object, 0),
+            a.on_report(&id_of(1), group_id, &object, at(0)),
             ReportVerdict::Stale
         );
     }
@@ -489,21 +494,21 @@ mod tests {
     fn a_node_is_present_until_three_seconds_pass_without_a_report() {
         let mut a = node(1);
         let mut b = node(2);
-        assert_eq!(a.present(0), [id_of(1)]);
-        let Some(Output::PublishReport { group_id, object }) = b.poll(0) else {
+        assert_eq!(a.present(at(0)), [id_of(1)]);
+        let Some(Output::PublishReport { group_id, object }) = b.poll(at(0)) else {
             panic!()
         };
-        a.on_report(&id_of(2), group_id, &object, 100 * MS);
+        a.on_report(&id_of(2), group_id, &object, at(100));
         let mut both = vec![id_of(1), id_of(2)];
         both.sort();
-        assert_eq!(a.present(100 * MS), both);
-        assert_eq!(a.present(3099 * MS), both);
-        assert_eq!(a.present(3100 * MS), [id_of(1)]);
+        assert_eq!(a.present(at(100)), both);
+        assert_eq!(a.present(at(3099)), both);
+        assert_eq!(a.present(at(3100)), [id_of(1)]);
         // A fresh report brings it back.
-        let Some(Output::PublishReport { group_id, object }) = b.poll(4000 * MS) else {
+        let Some(Output::PublishReport { group_id, object }) = b.poll(at(4000)) else {
             panic!()
         };
-        a.on_report(&id_of(2), group_id, &object, 4010 * MS);
-        assert_eq!(a.present(4010 * MS), both);
+        a.on_report(&id_of(2), group_id, &object, at(4010));
+        assert_eq!(a.present(at(4010)), both);
     }
 }

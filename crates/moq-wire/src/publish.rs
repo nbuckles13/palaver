@@ -1,9 +1,11 @@
 //! PUBLISH, PUBLISH_DONE, SUBSCRIBE_TRACKS, REQUEST_UPDATE and GOAWAY (sections 9.2, 9.5, 9.8,
 //! 9.9, 9.18).
 
+use crate::params::millis;
 use crate::params::{PUBLISH_PARAMS, Params, REQUEST_UPDATE_PARAMS, SUBSCRIBE_TRACKS_PARAMS};
 use crate::request::{decode_reason, encode_reason, track_properties};
 use crate::{Error, FullTrackName, Namespace, Reader, Result, put_vi64};
+use core::time::Duration;
 
 pub const REQUEST_UPDATE: u64 = 0x02;
 pub const PUBLISH_DONE: u64 = 0x0b;
@@ -57,8 +59,9 @@ pub struct SubscribeTracks {
 pub struct GoAway {
     /// Where to continue; empty means the current URI.
     pub new_session_uri: Vec<u8>,
-    /// Milliseconds the sender will wait; 0 means no specific time, migrate promptly.
-    pub timeout: u64,
+    /// How long the sender will wait; zero means no specific time, migrate promptly. Sent in
+    /// whole milliseconds.
+    pub timeout: Duration,
 }
 
 impl RequestUpdate {
@@ -135,7 +138,7 @@ impl GoAway {
         }
         put_vi64(out, self.new_session_uri.len() as u64);
         out.extend_from_slice(&self.new_session_uri);
-        put_vi64(out, self.timeout);
+        put_vi64(out, millis(self.timeout));
         Ok(())
     }
 
@@ -146,7 +149,7 @@ impl GoAway {
         }
         Ok(Self {
             new_session_uri: body.take(len as usize)?.to_vec(),
-            timeout: body.vi64()?,
+            timeout: Duration::from_millis(body.vi64()?),
         })
     }
 }
@@ -215,11 +218,11 @@ mod tests {
             }),
             Message::GoAway(GoAway {
                 new_session_uri: vec![],
-                timeout: 3000,
+                timeout: Duration::from_millis(3000),
             }),
             Message::GoAway(GoAway {
                 new_session_uri: b"moqt://khef.example/m".to_vec(),
-                timeout: 0,
+                timeout: Duration::from_millis(0),
             }),
         ]
     }
@@ -280,7 +283,7 @@ mod tests {
     fn each_message_refuses_a_parameter_it_does_not_allow() {
         let prefix = namespace(&["m"]);
         let with_expires = Params {
-            expires: Some(1),
+            expires: Some(Duration::from_millis(1)),
             ..Params::default()
         };
         let with_priority = Params {
@@ -336,7 +339,7 @@ mod tests {
     fn goaway_limits_the_uri_length_both_ways() {
         let long = GoAway {
             new_session_uri: vec![b'a'; MAX_URI_BYTES + 1],
-            timeout: 0,
+            timeout: Duration::from_millis(0),
         };
         assert!(matches!(
             Message::GoAway(long).encode(&mut vec![]),

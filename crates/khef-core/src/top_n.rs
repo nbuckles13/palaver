@@ -20,10 +20,9 @@
 //! holder has not ranked in for the hold time; a holder leaves only when someone needs the
 //! slot.
 
+use palaver_proto::Timestamp;
 use std::collections::BTreeMap;
-
-/// Time in microseconds on the caller's clock. Only differences matter.
-pub type Micros = u64;
+use std::time::Duration;
 
 /// The constants of the rule. They are part of the Palaver profile: every khef in a meeting
 /// uses the same values.
@@ -32,13 +31,13 @@ pub struct TopNConfig {
     /// How many tracks are selected.
     pub n: usize,
     /// How long after last ranking in a selected track is protected from replacement.
-    pub hold: Micros,
+    pub hold: Duration,
     /// Levels below this never cause a switch and never refresh protection.
     pub min_level: u8,
     /// A level is taken at face value for this long after its packet (two packet intervals).
-    pub decay_start: Micros,
+    pub decay_start: Duration,
     /// A level has decayed to zero this long after its packet.
-    pub decay_end: Micros,
+    pub decay_end: Duration,
 }
 
 impl Default for TopNConfig {
@@ -46,10 +45,10 @@ impl Default for TopNConfig {
     fn default() -> Self {
         Self {
             n: 3,
-            hold: 250_000,
+            hold: Duration::from_millis(250),
             min_level: 30,
-            decay_start: 40_000,
-            decay_end: 100_000,
+            decay_start: Duration::from_millis(40),
+            decay_end: Duration::from_millis(100),
         }
     }
 }
@@ -57,7 +56,7 @@ impl Default for TopNConfig {
 #[derive(Debug, Clone, Copy)]
 struct Heard {
     level: u8,
-    at: Micros,
+    at: Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +64,7 @@ struct Slot<K> {
     track: K,
     /// When the track last ranked among the N loudest at or above the minimum level. `None`
     /// for a track that filled a free slot without speaking: it is replaceable at once.
-    ranked_in: Option<Micros>,
+    ranked_in: Option<Timestamp>,
 }
 
 /// The selected set for one destination (an overlay link, or the local client).
@@ -88,19 +87,21 @@ impl<K: Ord + Clone> TopN<K> {
     }
 
     /// The level of a track now: as sent, then decaying linearly to zero.
-    fn level_now(&self, heard: Heard, now: Micros) -> u8 {
-        let age = now.saturating_sub(heard.at);
+    fn level_now(&self, heard: Heard, now: Timestamp) -> u8 {
+        let age = now.saturating_since(heard.at);
         if age <= self.config.decay_start {
             return heard.level;
         }
         if age >= self.config.decay_end {
             return 0;
         }
-        let span = self
-            .config
-            .decay_end
-            .saturating_sub(self.config.decay_start);
-        let left = self.config.decay_end.saturating_sub(age);
+        let micros = |span: Duration| u64::try_from(span.as_micros()).unwrap_or(u64::MAX);
+        let span = micros(
+            self.config
+                .decay_end
+                .saturating_sub(self.config.decay_start),
+        );
+        let left = micros(self.config.decay_end.saturating_sub(age));
         let scaled = u64::from(heard.level)
             .saturating_mul(left)
             .checked_div(span)
@@ -108,13 +109,13 @@ impl<K: Ord + Clone> TopN<K> {
         u8::try_from(scaled).unwrap_or(heard.level)
     }
 
-    fn level_of(&self, track: &K, now: Micros) -> u8 {
+    fn level_of(&self, track: &K, now: Timestamp) -> u8 {
         self.heard.get(track).map_or(0, |h| self.level_now(*h, now))
     }
 
     /// Whether `track` is among the N loudest candidates. Ties go to the smaller key, so the
     /// order is total and the same on every run.
-    fn in_loudest(&self, track: &K, now: Micros) -> bool {
+    fn in_loudest(&self, track: &K, now: Timestamp) -> bool {
         let level = self.level_of(track, now);
         let louder = self
             .heard
@@ -133,7 +134,7 @@ impl<K: Ord + Clone> TopN<K> {
 
     /// Record a packet of `track` carrying `level` at time `now`, and say whether to forward
     /// it.
-    pub fn on_packet(&mut self, track: K, level: u8, now: Micros) -> bool {
+    pub fn on_packet(&mut self, track: K, level: u8, now: Timestamp) -> bool {
         self.heard.insert(track.clone(), Heard { level, at: now });
 
         // Step 2: refresh protection of selected tracks that currently rank in.
@@ -173,7 +174,7 @@ impl<K: Ord + Clone> TopN<K> {
             .enumerate()
             .filter(|(_, slot)| {
                 slot.ranked_in
-                    .is_none_or(|at| now.saturating_sub(at) >= self.config.hold)
+                    .is_none_or(|at| now.saturating_since(at) >= self.config.hold)
             })
             .min_by_key(|(_, slot)| (self.level_of(&slot.track, now), slot.ranked_in))
             .map(|(index, _)| index);
@@ -211,7 +212,12 @@ impl<K: Ord + Clone> TopN<K> {
 mod tests {
     use super::*;
 
-    const MS: Micros = 1000;
+    /// Tests keep time as plain microseconds and convert at the call.
+    const MS: u64 = 1000;
+
+    fn feed(t: &mut TopN<u32>, track: u32, level: u8, micros: u64) -> bool {
+        t.on_packet(track, level, Timestamp::from_micros(micros))
+    }
     const SPEECH: u8 = 80;
     const QUIET: u8 = 10;
 
@@ -229,17 +235,17 @@ mod tests {
     fn three_talkers() -> TopN<u32> {
         let mut t = top();
         for track in 1..=3 {
-            assert!(t.on_packet(track, SPEECH, 0));
+            assert!(feed(&mut t, track, SPEECH, 0));
         }
         t
     }
 
     /// Every 20 ms from `from` to `to`, each listed track sends a packet at `level`.
-    fn keep_sending(t: &mut TopN<u32>, tracks: &[u32], level: u8, from: Micros, to: Micros) {
+    fn keep_sending(t: &mut TopN<u32>, tracks: &[u32], level: u8, from: u64, to: u64) {
         let mut now = from;
         while now <= to {
             for track in tracks {
-                t.on_packet(*track, level, now);
+                feed(t, *track, level, now);
             }
             now += 20 * MS;
         }
@@ -248,10 +254,10 @@ mod tests {
     #[test]
     fn free_slots_go_to_the_first_tracks_seen_even_if_silent() {
         let mut t = top();
-        assert!(t.on_packet(7, QUIET, 0));
-        assert!(t.on_packet(8, SPEECH, 0));
-        assert!(t.on_packet(9, QUIET, 0));
-        assert!(!t.on_packet(10, QUIET, 0));
+        assert!(feed(&mut t, 7, QUIET, 0));
+        assert!(feed(&mut t, 8, SPEECH, 0));
+        assert!(feed(&mut t, 9, QUIET, 0));
+        assert!(!feed(&mut t, 10, QUIET, 0));
         assert_eq!(selected(&t), [7, 8, 9]);
     }
 
@@ -260,7 +266,7 @@ mod tests {
         let mut t = three_talkers();
         // Holders fall silent; five seconds later someone new speaks.
         keep_sending(&mut t, &[1, 2, 3], QUIET, 20 * MS, 5000 * MS);
-        assert!(t.on_packet(4, SPEECH, 5010 * MS));
+        assert!(feed(&mut t, 4, SPEECH, 5010 * MS));
         assert_eq!(t.switches(), 1);
         assert!(selected(&t).contains(&4));
     }
@@ -269,9 +275,9 @@ mod tests {
     fn a_silent_holder_that_filled_a_free_slot_is_replaceable_at_once() {
         let mut t = top();
         for track in 1..=3 {
-            t.on_packet(track, QUIET, 0);
+            feed(&mut t, track, QUIET, 0);
         }
-        assert!(t.on_packet(4, SPEECH, MS));
+        assert!(feed(&mut t, 4, SPEECH, MS));
         assert_eq!(selected(&t).len(), 3);
     }
 
@@ -280,10 +286,10 @@ mod tests {
         let mut t = three_talkers();
         keep_sending(&mut t, &[1, 2, 3], SPEECH, 20 * MS, 1000 * MS);
         // All three stop. A fourth voice arrives 100 ms later: still inside the hold.
-        assert!(!t.on_packet(4, SPEECH, 1100 * MS));
+        assert!(!feed(&mut t, 4, SPEECH, 1100 * MS));
         // ...and gets in once a holder has not ranked in for 250 ms.
-        assert!(!t.on_packet(4, SPEECH, 1240 * MS));
-        assert!(t.on_packet(4, SPEECH, 1260 * MS));
+        assert!(!feed(&mut t, 4, SPEECH, 1240 * MS));
+        assert!(feed(&mut t, 4, SPEECH, 1260 * MS));
     }
 
     #[test]
@@ -292,7 +298,7 @@ mod tests {
         keep_sending(&mut t, &[1], QUIET, 20 * MS, 10_000 * MS);
         assert_eq!(selected(&t), [1, 2, 3]);
         assert_eq!(t.switches(), 0);
-        assert!(t.on_packet(1, SPEECH, 10_020 * MS));
+        assert!(feed(&mut t, 1, SPEECH, 10_020 * MS));
     }
 
     #[test]
@@ -309,7 +315,7 @@ mod tests {
         keep_sending(&mut t, &[2, 3], QUIET, 20 * MS, 2000 * MS);
         for (i, newcomer) in [4, 5, 6].into_iter().enumerate() {
             assert!(
-                t.on_packet(newcomer, SPEECH, (2010 + i as u64) * MS),
+                feed(&mut t, newcomer, SPEECH, (2010 + i as u64) * MS),
                 "newcomer {newcomer}"
             );
         }
@@ -323,7 +329,7 @@ mod tests {
         keep_sending(&mut t, &[1], QUIET, 20 * MS, 1000 * MS);
         keep_sending(&mut t, &[2], 25, 20 * MS, 1000 * MS);
         keep_sending(&mut t, &[3], SPEECH, 20 * MS, 1000 * MS);
-        assert!(t.on_packet(4, SPEECH, 1005 * MS));
+        assert!(feed(&mut t, 4, SPEECH, 1005 * MS));
         assert_eq!(selected(&t), [2, 3, 4]);
     }
 
@@ -334,19 +340,19 @@ mod tests {
         let mut now = 20 * MS;
         while now <= 2000 * MS {
             for track in 1..=3 {
-                t.on_packet(track, SPEECH, now);
+                feed(&mut t, track, SPEECH, now);
             }
-            assert!(!t.on_packet(4, SPEECH, now + MS));
+            assert!(!feed(&mut t, 4, SPEECH, now + MS));
             now += 20 * MS;
         }
         // Clearly louder than track 3 for longer than the hold: it displaces track 3.
         let start = now;
         let mut entered_at = None;
         while now <= start + 600 * MS {
-            t.on_packet(1, SPEECH, now);
-            t.on_packet(2, SPEECH, now);
-            t.on_packet(3, 60, now);
-            if t.on_packet(4, 100, now + MS) && entered_at.is_none() {
+            feed(&mut t, 1, SPEECH, now);
+            feed(&mut t, 2, SPEECH, now);
+            feed(&mut t, 3, 60, now);
+            if feed(&mut t, 4, 100, now + MS) && entered_at.is_none() {
                 entered_at = Some(now - start);
             }
             now += 20 * MS;
@@ -369,7 +375,7 @@ mod tests {
         // Three newcomers in turn all get in; without decay the dead track would block one.
         for (i, newcomer) in [4, 5, 6].into_iter().enumerate() {
             assert!(
-                t.on_packet(newcomer, SPEECH, (3010 + i as u64) * MS),
+                feed(&mut t, newcomer, SPEECH, (3010 + i as u64) * MS),
                 "newcomer {newcomer}"
             );
         }
@@ -379,14 +385,26 @@ mod tests {
     #[test]
     fn a_level_is_held_then_decays_linearly_to_zero() {
         let t = top();
-        let heard = Heard { level: 90, at: 0 };
-        assert_eq!(t.level_now(heard, 0), 90);
-        assert_eq!(t.level_now(heard, 40 * MS), 90);
-        assert_eq!(t.level_now(heard, 70 * MS), 45);
-        assert_eq!(t.level_now(heard, 100 * MS), 0);
-        assert_eq!(t.level_now(heard, 10_000 * MS), 0);
+        let heard = Heard {
+            level: 90,
+            at: Timestamp::ZERO,
+        };
+        assert_eq!(t.level_now(heard, Timestamp::from_micros(0)), 90);
+        assert_eq!(t.level_now(heard, Timestamp::from_micros(40 * MS)), 90);
+        assert_eq!(t.level_now(heard, Timestamp::from_micros(70 * MS)), 45);
+        assert_eq!(t.level_now(heard, Timestamp::from_micros(100 * MS)), 0);
+        assert_eq!(t.level_now(heard, Timestamp::from_micros(10_000 * MS)), 0);
         // A packet stamped later than "now" (reordering) is taken at face value.
-        assert_eq!(t.level_now(Heard { level: 90, at: 500 }, 0), 90);
+        assert_eq!(
+            t.level_now(
+                Heard {
+                    level: 90,
+                    at: Timestamp::from_micros(500)
+                },
+                Timestamp::ZERO
+            ),
+            90
+        );
     }
 
     #[test]
@@ -394,7 +412,7 @@ mod tests {
         let mut t = three_talkers();
         t.remove(&2);
         assert_eq!(selected(&t), [1, 3]);
-        assert!(t.on_packet(9, QUIET, MS));
+        assert!(feed(&mut t, 9, QUIET, MS));
         assert_eq!(selected(&t), [1, 3, 9]);
     }
 
@@ -410,7 +428,7 @@ mod tests {
                 x ^= x << 17;
                 let track = (x % 12) as u32;
                 let level = ((x >> 8) % 128) as u8;
-                forwarded += u32::from(t.on_packet(track, level, step * 5 * MS));
+                forwarded += u32::from(feed(&mut t, track, level, step * 5 * MS));
                 assert!(t.selected().count() <= 3);
             }
             (forwarded, selected(&t), t.switches())
@@ -429,7 +447,7 @@ mod tests {
             n: 0,
             ..TopNConfig::default()
         });
-        assert!(!t.on_packet(1, SPEECH, 0));
+        assert!(!feed(&mut t, 1, SPEECH, 0));
         assert_eq!(t.selected().count(), 0);
     }
 }
