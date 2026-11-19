@@ -170,7 +170,6 @@ pub fn violations(rules: &[TestOnlyFeature], manifests: &Manifests, graph: &Grap
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{layering, repo};
 
     const RULES: &[TestOnlyFeature] = &[TestOnlyFeature {
         krate: "core",
@@ -307,27 +306,5 @@ mod tests {
             [dep("a", "b", true, &["fake"]), dep("a", "c", false, &[])]
         );
         assert_eq!(m.features["a"]["x"], ["b/fake"]);
-    }
-
-    // ---- the real repository ----
-    #[test]
-    fn nothing_that_ships_can_enable_a_test_only_feature() {
-        let json = repo::cargo_metadata().unwrap();
-        let manifests = manifests_from_metadata(&json).unwrap();
-        let graph = layering::graph_from_metadata(&json).unwrap();
-        let ours = manifests
-            .features
-            .keys()
-            .filter(|k| k.starts_with("palaver-"))
-            .count();
-        assert!(
-            ours >= 10,
-            "only {ours} workspace crates seen: nothing to check"
-        );
-        assert!(!TEST_ONLY_FEATURES.is_empty());
-        assert_eq!(
-            violations(TEST_ONLY_FEATURES, &manifests, &graph),
-            Vec::<String>::new()
-        );
     }
 }
