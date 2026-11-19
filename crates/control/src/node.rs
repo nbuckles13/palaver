@@ -175,6 +175,22 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         self.conducting.is_some()
     }
 
+    /// Make `next` the plan this node follows. The report names the plan applied; it is sent
+    /// at once only if the plan asks something new of this node, which is when the conductor
+    /// is waiting to hear. Otherwise the news rides on the next regular report: if every
+    /// node reported every plan at once, each plan would set off a report from everyone,
+    /// flooded to everyone.
+    fn adopt(&mut self, next: Plan) {
+        let asks_something_new = self
+            .plan
+            .as_ref()
+            .is_none_or(|held| next.changes_for(held, &self.me));
+        if asks_something_new {
+            self.changed = true;
+        }
+        self.plan = Some(next);
+    }
+
     fn mark_stale(&mut self) {
         if let Some(conducting) = &mut self.conducting {
             conducting.stale = true;
@@ -233,8 +249,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         }
         // Someone else's plan is in force: this node is not, or no longer, the conductor.
         self.conducting = None;
-        self.plan = Some(next);
-        self.changed = true; // the report says which plan is applied
+        self.adopt(next);
         PlanVerdict::Adopted
     }
 
@@ -385,8 +400,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         }
         let object = next.seal(&self.config.meeting, &self.signer);
         let group_id = next.stamp.group_id();
-        self.plan = Some(next);
-        self.changed = true; // the report says which plan is applied
+        self.adopt(next);
         Some(Output::PublishPlan { group_id, object })
     }
 
@@ -1096,5 +1110,56 @@ mod tests {
         }
         assert_eq!(opened(n.poll(at(200)), 3).applied_plan, Some(stamp(1, 2)));
         assert_eq!(n.poll(at(200)), None);
+    }
+
+    /// A plan by conductor 1 for members 1 to 4 with the given peerings, also its audio links.
+    fn plan_with(generation: u32, edges: &[(u8, u8)]) -> (u64, Vec<u8>) {
+        let edges: Vec<Edge> = edges.iter().map(|(a, b)| edge(*a, *b)).collect();
+        let plan = Plan {
+            stamp: stamp(1, generation),
+            conductor: id_of(1),
+            roster: (1..=4)
+                .map(|m| Member {
+                    key: FakeIdentity(m).public_key(),
+                    name: Redacted::new(format!("node {m}")),
+                })
+                .collect(),
+            peerings: edges.clone(),
+            audio_overlay: edges,
+            audio_top_n: 3,
+            successors: vec![],
+        };
+        (
+            plan.stamp.group_id(),
+            plan.seal(&meeting(), &FakeIdentity(1)),
+        )
+    }
+
+    #[test]
+    fn a_plan_that_asks_nothing_new_of_a_node_is_reported_with_the_next_regular_report() {
+        let mut n = node(3);
+        let (group, envelope) = plan_with(0, &[(1, 2), (2, 3)]);
+        n.on_plan(group, &envelope);
+        assert_eq!(opened(n.poll(at(0)), 3).applied_plan, Some(stamp(1, 0)));
+        // 4 is attached to 1: nothing changes for 3.
+        let (group, envelope) = plan_with(1, &[(1, 2), (2, 3), (1, 4)]);
+        assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
+        assert_eq!(n.plan().map(|p| p.stamp), Some(stamp(1, 1)));
+        assert_eq!(n.next_wake(at(300)), at(1000));
+        assert_eq!(n.poll(at(300)), None);
+        assert_eq!(opened(n.poll(at(1000)), 3).applied_plan, Some(stamp(1, 1)));
+    }
+
+    #[test]
+    fn a_plan_that_changes_a_nodes_own_links_is_reported_at_once() {
+        let mut n = node(3);
+        let (group, envelope) = plan_with(0, &[(1, 2), (2, 3)]);
+        n.on_plan(group, &envelope);
+        n.poll(at(0));
+        // 4 is attached to 3.
+        let (group, envelope) = plan_with(1, &[(1, 2), (2, 3), (3, 4)]);
+        assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
+        assert_eq!(n.next_wake(at(300)), at(300));
+        assert_eq!(opened(n.poll(at(300)), 3).applied_plan, Some(stamp(1, 1)));
     }
 }

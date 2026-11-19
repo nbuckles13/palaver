@@ -280,6 +280,25 @@ fn fifty_nodes_form_a_meeting() {
 }
 
 #[test]
+fn a_join_makes_only_the_nodes_it_touches_report_at_once() {
+    let mut m = gathered_every(Duration::from_millis(40), 50, 23);
+    settle(&mut m, 5 * SECOND);
+    m.run_for(2 * SECOND);
+    let before = m.stats();
+    m.join(100, 7);
+    m.run_for(Duration::from_millis(150));
+    m.settled().unwrap();
+    let reports = m.stats().reports_published - before.reports_published;
+    // About 8 regular reports fall in any 150 ms (51 nodes, one a second each), plus the
+    // joiner and the few nodes it was wired to. If every node reported the new plan at
+    // once there would be more than 50.
+    assert!(
+        reports <= 16,
+        "{reports} reports in the 150 ms after a join"
+    );
+}
+
+#[test]
 fn everyone_joining_in_the_same_instant_settles() {
     let mut m = meeting(29);
     m.create(0);
