@@ -393,6 +393,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             Member {
                 key: self.signer.public_key(),
                 name: self.config.name.clone(),
+                number: 0,
             },
         )];
         let mut links: Vec<ReportedLink> = Vec::new();
@@ -418,6 +419,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
                 Member {
                     key: report.key,
                     name: report.name.clone(),
+                    number: 0,
                 },
             ));
         }
@@ -434,6 +436,25 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         unreachable
             .retain(|pair| !self.lost.contains_key(&pair.0) && !self.lost.contains_key(&pair.1));
         roster.sort_by(|a, b| a.0.cmp(&b.0));
+        // Members keep the number they have; newcomers take the next ones, in id order. A
+        // number is never given twice, even after its member has left.
+        let held_numbers: BTreeMap<ParticipantId, u64> = self
+            .plan
+            .iter()
+            .flat_map(|held| &held.roster)
+            .map(|member| (self.verifier.participant_id(&member.key), member.number))
+            .collect();
+        let mut next_member_number = self.plan.as_ref().map_or(0, |held| held.next_member_number);
+        for (id, member) in &mut roster {
+            member.number = match held_numbers.get(id) {
+                Some(number) => *number,
+                None => {
+                    let number = next_member_number;
+                    next_member_number = next_member_number.saturating_add(1);
+                    number
+                }
+            };
+        }
         let (previous_peerings, previous_audio_overlay) = match &self.plan {
             Some(held) => (held.peerings.clone(), held.audio_overlay.clone()),
             None => (Vec::new(), Vec::new()),
@@ -456,6 +477,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             peerings: wiring.peerings,
             audio_overlay: wiring.audio_overlay,
             audio_top_n: AUDIO_TOP_N,
+            next_member_number,
             // Phase 1 has no succession.
             successors: Vec::new(),
         }
@@ -648,6 +670,7 @@ mod tests {
             .map(|m| Member {
                 key: FakeIdentity(m).public_key(),
                 name: Redacted::new(format!("node {m}")),
+                number: u64::from(m),
             })
             .collect();
         let plan = Plan {
@@ -657,6 +680,7 @@ mod tests {
             peerings: vec![Edge(id_of(1), id_of(2))],
             audio_overlay: vec![Edge(id_of(1), id_of(2))],
             audio_top_n: 3,
+            next_member_number: 100,
             successors: successors.iter().map(|s| id_of(*s)).collect(),
         };
         (
@@ -1431,11 +1455,13 @@ mod tests {
                 .map(|m| Member {
                     key: FakeIdentity(m).public_key(),
                     name: Redacted::new(format!("node {m}")),
+                    number: u64::from(m),
                 })
                 .collect(),
             peerings: edges.clone(),
             audio_overlay: edges,
             audio_top_n: 3,
+            next_member_number: 100,
             successors: vec![],
         };
         (
@@ -1473,5 +1499,66 @@ mod tests {
         assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
         assert_eq!(n.next_wake(at(300)), at(300));
         assert_eq!(opened(n.poll(at(300)), 3).applied_plan, Some(stamp(1, 1)));
+    }
+
+    /// The number the plan held by `node` gives member `seed`.
+    fn number_of(node: &Node<FakeIdentity, FakeVerifier>, seed: u8) -> Option<u64> {
+        node.plan()?.member_number(&id_of(seed), &FakeVerifier)
+    }
+
+    #[test]
+    fn members_are_numbered_as_they_join_and_keep_their_number() {
+        let mut c = node(1);
+        c.create_meeting();
+        drain(&mut c, at(0));
+        assert_eq!(number_of(&c, 1), Some(0), "the creator");
+        assert_eq!(c.plan().unwrap().next_member_number, 1);
+        // 3 joins, then 2: numbers follow the order of joining, not the ids.
+        let (mut j, mut k) = (node(2), node(3));
+        links(&mut k, &[1]);
+        report(&mut k, &mut c, at(300));
+        links(&mut c, &[3]);
+        drain(&mut c, at(300));
+        links(&mut j, &[1]);
+        report(&mut j, &mut c, at(600));
+        links(&mut c, &[2, 3]);
+        drain(&mut c, at(600));
+        assert_eq!(
+            (number_of(&c, 1), number_of(&c, 3), number_of(&c, 2)),
+            (Some(0), Some(1), Some(2))
+        );
+        assert_eq!(c.plan().unwrap().next_member_number, 3);
+    }
+
+    #[test]
+    fn a_number_is_not_given_again_after_its_member_leaves() {
+        let [mut c, _, _] = three();
+        let left = number_of(&c, 3).unwrap();
+        let next = c.plan().unwrap().next_member_number;
+        // 3 goes.
+        links(&mut c, &[2]);
+        drain(&mut c, at(1000));
+        drain(&mut c, at(1500));
+        assert_eq!(number_of(&c, 3), None);
+        assert_eq!(c.plan().unwrap().next_member_number, next);
+        // 4 joins: it does not get 3's number. Nor does 3 if it comes back.
+        let mut far = node(4);
+        links(&mut far, &[1]);
+        report(&mut far, &mut c, at(2000));
+        links(&mut c, &[2, 3, 4]);
+        drain(&mut c, at(2000));
+        let (three_again, four) = (number_of(&c, 3).unwrap(), number_of(&c, 4).unwrap());
+        assert!(three_again != left && four != left && three_again != four);
+        assert_eq!(c.plan().unwrap().next_member_number, next + 2);
+    }
+
+    #[test]
+    fn members_that_join_in_the_same_plan_are_numbered_in_id_order() {
+        // All three were there for the first plan.
+        let [c, _, _] = three();
+        let mut by_id = [1u8, 2, 3];
+        by_id.sort_by_key(|seed| id_of(*seed));
+        let numbers: Vec<Option<u64>> = by_id.iter().map(|seed| number_of(&c, *seed)).collect();
+        assert_eq!(numbers, [Some(0), Some(1), Some(2)]);
     }
 }

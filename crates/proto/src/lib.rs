@@ -10,7 +10,7 @@ mod ticket;
 mod time;
 
 pub use fields::{DecodeError, MAX_ENTRIES};
-pub use names::{MeetingTag, ParticipantId, Source, Track, TrackName};
+pub use names::{MeetingTag, PLAN_ALIAS, ParticipantId, Source, Track, TrackName};
 pub use plan::{Edge, Member, Plan, PlanStamp};
 pub use report::{
     Link, MAX_ADDRESSES, MAX_NAME_BYTES, MAX_RELAY_URL_BYTES, PathKind, Report, advertisable,
