@@ -9,8 +9,10 @@
 
 pub mod dedupe;
 pub mod flood;
+pub mod session;
 pub mod top_n;
 
 pub use dedupe::Dedupe;
 pub use flood::{Cached, Flood, Offer};
+pub use session::{Action, CloseCode, Event, Role, Session, StreamId, StreamKind};
 pub use top_n::{TopN, TopNConfig};
