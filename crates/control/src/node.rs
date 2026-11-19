@@ -4,12 +4,16 @@
 //! - keeps the latest verified report from every other node;
 //! - holds the current plan, adopting a new one only under the replacement rule.
 //!
+//! And what the conductor does on top: it keeps the roster (every node whose reports arrive)
+//! and issues a new plan whenever the roster or the wiring it calls for changes.
+//!
 //! Sans-IO: the caller hands in received objects and the current time, and asks what to send.
 
 use palaver_proto::{
-    DecodeError, Link, MeetingTag, ParticipantId, Plan, Redacted, Report, Signer, Timestamp,
-    Verifier,
+    DecodeError, Edge, Link, MeetingTag, Member, ParticipantId, Plan, PlanStamp, Redacted, Report,
+    Signer, Timestamp, Verifier,
 };
+use palaver_topology::{Input, ReportedLink, wire};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -18,6 +22,10 @@ use std::time::Duration;
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 /// A node whose last report is older than this is no longer considered present.
 pub const REPORT_TIMEOUT: Duration = Duration::from_secs(3);
+/// The term of a meeting's first conductor, its creator.
+pub const FIRST_TERM: u32 = 1;
+/// The N of top-N audio selection that a conductor puts in its plans.
+pub const AUDIO_TOP_N: u64 = 3;
 
 /// What a node is told once, at start.
 #[derive(Debug, Clone)]
@@ -45,6 +53,9 @@ pub struct LocalView {
 pub enum Output {
     /// Publish `object` on this node's report track, as the only object of group `group_id`.
     PublishReport { group_id: u64, object: Vec<u8> },
+    /// Publish `object` on the plan track, as the only object of group `group_id`. Only the
+    /// conductor produces this. The node has already adopted the plan.
+    PublishPlan { group_id: u64, object: Vec<u8> },
 }
 
 /// What became of a plan object.
@@ -91,6 +102,16 @@ pub struct Node<S, V> {
     changed: bool,
     next_sequence: u64,
     last_sent: Option<Timestamp>,
+    /// Set while this node is conductor.
+    conducting: Option<Conducting>,
+}
+
+/// The conductor's own state.
+#[derive(Debug, Clone, Copy)]
+struct Conducting {
+    term: u32,
+    /// Reports or this node's links changed since the plan was last checked against them.
+    stale: bool,
 }
 
 impl<S: Signer, V: Verifier> Node<S, V> {
@@ -108,6 +129,32 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             changed: true,
             next_sequence,
             last_sent: None,
+            conducting: None,
+        }
+    }
+
+    /// Become the conductor of a new meeting: this node created it. The first plan, term
+    /// [`FIRST_TERM`] with a roster of one, comes from the next [`Node::poll`]. Returns
+    /// `false`, and does nothing, if the node already follows a plan.
+    pub fn create_meeting(&mut self) -> bool {
+        if self.plan.is_some() {
+            return false;
+        }
+        self.conducting = Some(Conducting {
+            term: FIRST_TERM,
+            stale: true,
+        });
+        true
+    }
+
+    /// Whether this node is the conductor.
+    pub fn is_conductor(&self) -> bool {
+        self.conducting.is_some()
+    }
+
+    fn mark_stale(&mut self) {
+        if let Some(conducting) = &mut self.conducting {
+            conducting.stale = true;
         }
     }
 
@@ -131,6 +178,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         if view != self.view {
             self.view = view;
             self.changed = true;
+            self.mark_stale();
         }
     }
 
@@ -148,6 +196,8 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             // A node with no plan has nothing to check against and takes the first verified one.
             _ => {}
         }
+        // Someone else's plan is in force: this node is not, or no longer, the conductor.
+        self.conducting = None;
         self.plan = Some(next);
         self.changed = true; // the report says which plan is applied
         PlanVerdict::Adopted
@@ -181,15 +231,128 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             Ok(report) => {
                 self.reports
                     .insert(participant.clone(), Heard { report, at: now });
+                self.mark_stale();
                 ReportVerdict::Accepted
             }
             Err(e) => ReportVerdict::Invalid(e),
         }
     }
 
-    /// Ask what to send. Returns a report when one is due: the first time, when something in
-    /// it changed, or a second after the last. Call again until it returns `None`.
+    /// The reports of the other nodes present at `now`.
+    fn heard(&self, now: Timestamp) -> impl Iterator<Item = (&ParticipantId, &Report)> {
+        self.reports
+            .iter()
+            .filter(move |(_, heard)| now.saturating_since(heard.at) < REPORT_TIMEOUT)
+            .map(|(id, heard)| (id, &heard.report))
+    }
+
+    /// The plan the conductor would issue at `now`, with the stamp left for the caller: the
+    /// roster is every node present, wired by the topology rule starting from the plan held.
+    fn draft(&self, term: u32, now: Timestamp) -> Plan {
+        let mut roster = vec![(
+            self.me.clone(),
+            Member {
+                key: self.signer.public_key(),
+                name: self.config.name.clone(),
+            },
+        )];
+        let mut links: Vec<ReportedLink> = Vec::new();
+        let mut unreachable: Vec<Edge> = Vec::new();
+        let mut see = |from: &ParticipantId, theirs: &[Link], cannot: &[ParticipantId]| {
+            links.extend(theirs.iter().map(|link| ReportedLink {
+                from: from.clone(),
+                to: link.peer.clone(),
+                path: link.path,
+                rtt: link.rtt,
+            }));
+            unreachable.extend(cannot.iter().map(|peer| Edge(from.clone(), peer.clone())));
+        };
+        see(&self.me, &self.view.links, &self.view.unreachable);
+        for (id, report) in self.heard(now) {
+            see(id, &report.links, &report.unreachable);
+            roster.push((
+                id.clone(),
+                Member {
+                    key: report.key,
+                    name: report.name.clone(),
+                },
+            ));
+        }
+        roster.sort_by(|a, b| a.0.cmp(&b.0));
+        let (previous_peerings, previous_audio_overlay) = match &self.plan {
+            Some(held) => (held.peerings.clone(), held.audio_overlay.clone()),
+            None => (Vec::new(), Vec::new()),
+        };
+        let wiring = wire(&Input {
+            members: roster.iter().map(|(id, _)| id.clone()).collect(),
+            root: Some(self.me.clone()),
+            links,
+            unreachable,
+            previous_peerings,
+            previous_audio_overlay,
+        });
+        Plan {
+            stamp: PlanStamp {
+                term,
+                generation: 0,
+            },
+            conductor: self.me.clone(),
+            roster: roster.into_iter().map(|(_, member)| member).collect(),
+            peerings: wiring.peerings,
+            audio_overlay: wiring.audio_overlay,
+            audio_top_n: AUDIO_TOP_N,
+            // Phase 1 has no succession.
+            successors: Vec::new(),
+        }
+    }
+
+    /// Whether the roster of the plan held is exactly the nodes present at `now`.
+    fn roster_is_current(&self, now: Timestamp) -> bool {
+        let Some(held) = &self.plan else {
+            return false;
+        };
+        let mut present = self.present(now);
+        let mut roster: Vec<ParticipantId> = held
+            .roster
+            .iter()
+            .map(|member| self.verifier.participant_id(&member.key))
+            .collect();
+        present.sort();
+        roster.sort();
+        present == roster
+    }
+
+    /// As conductor: issue a new plan if the one held no longer matches the meeting.
+    fn poll_plan(&mut self, now: Timestamp) -> Option<Output> {
+        let conducting = self.conducting.as_mut()?;
+        let stale = core::mem::replace(&mut conducting.stale, false);
+        let term = conducting.term;
+        if !stale && self.roster_is_current(now) {
+            return None;
+        }
+        let mut next = self.draft(term, now);
+        if let Some(held) = &self.plan {
+            next.stamp = held.stamp;
+            if next == *held {
+                return None;
+            }
+            // A term with no generations left cannot issue; a later term is another node's.
+            next.stamp.generation = held.stamp.generation.checked_add(1)?;
+        }
+        let object = next.seal(&self.config.meeting, &self.signer);
+        let group_id = next.stamp.group_id();
+        self.plan = Some(next);
+        self.changed = true; // the report says which plan is applied
+        Some(Output::PublishPlan { group_id, object })
+    }
+
+    /// Ask what to send. Returns a plan if this node is conductor and the meeting changed,
+    /// then a report when one is due: the first time, when something in it changed, or a
+    /// second after the last. Call again until it returns `None`.
     pub fn poll(&mut self, now: Timestamp) -> Option<Output> {
+        if let Some(plan) = self.poll_plan(now) {
+            return Some(plan);
+        }
         let due = self
             .last_sent
             .is_none_or(|sent| now.saturating_since(sent) >= REPORT_INTERVAL);
@@ -218,22 +381,29 @@ impl<S: Signer, V: Verifier> Node<S, V> {
 
     /// When to call [`Node::poll`] next if nothing else happens.
     pub fn next_wake(&self, now: Timestamp) -> Timestamp {
-        match self.last_sent {
+        let report = match self.last_sent {
             Some(sent) if !self.changed => sent.saturating_add(REPORT_INTERVAL),
             _ => now,
+        };
+        let Some(conducting) = &self.conducting else {
+            return report;
+        };
+        if conducting.stale {
+            return now;
         }
+        // The conductor must also notice the next member whose reports stop.
+        self.reports
+            .values()
+            .map(|heard| heard.at.saturating_add(REPORT_TIMEOUT))
+            .filter(|expiry| *expiry > now)
+            .fold(report, Timestamp::min)
     }
 
     /// The nodes considered present at `now`: this one, and every node whose latest report
     /// arrived less than [`REPORT_TIMEOUT`] ago.
     pub fn present(&self, now: Timestamp) -> Vec<ParticipantId> {
         let mut out = vec![self.me.clone()];
-        out.extend(
-            self.reports
-                .iter()
-                .filter(|(_, heard)| now.saturating_since(heard.at) < REPORT_TIMEOUT)
-                .map(|(id, _)| id.clone()),
-        );
+        out.extend(self.heard(now).map(|(id, _)| id.clone()));
         out.sort();
         out
     }
@@ -242,8 +412,8 @@ impl<S: Signer, V: Verifier> Node<S, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use palaver_proto::PathKind;
     use palaver_proto::sign::fake::{FakeIdentity, FakeVerifier};
-    use palaver_proto::{Edge, Member, PathKind, PlanStamp};
 
     /// A time, given in milliseconds.
     fn at(ms: u64) -> Timestamp {
@@ -510,5 +680,312 @@ mod tests {
         };
         a.on_report(&id_of(2), group_id, &object, at(4010));
         assert_eq!(a.present(at(4010)), both);
+    }
+
+    // --- The conductor ---
+
+    fn stamp(term: u32, generation: u32) -> PlanStamp {
+        PlanStamp { term, generation }
+    }
+
+    /// The plan `output` publishes, checked as any other node would check it.
+    fn issued(output: Option<Output>) -> Plan {
+        let Some(Output::PublishPlan { group_id, object }) = output else {
+            panic!("no plan: {output:?}")
+        };
+        Plan::open(&meeting(), group_id, &object, &FakeVerifier).unwrap()
+    }
+
+    /// Run `node` until it has nothing to send, returning what it sent.
+    fn drain(node: &mut Node<FakeIdentity, FakeVerifier>, now: Timestamp) -> Vec<Output> {
+        core::iter::from_fn(|| node.poll(now)).collect()
+    }
+
+    /// Deliver `from`'s report, if it has one to send, to `to`.
+    fn report(
+        from: &mut Node<FakeIdentity, FakeVerifier>,
+        to: &mut Node<FakeIdentity, FakeVerifier>,
+        now: Timestamp,
+    ) {
+        for output in drain(from, now) {
+            if let Output::PublishReport { group_id, object } = output {
+                let sender = from.me().clone();
+                assert_eq!(
+                    to.on_report(&sender, group_id, &object, now),
+                    ReportVerdict::Accepted
+                );
+            }
+        }
+    }
+
+    fn roster_of(plan: &Plan) -> Vec<ParticipantId> {
+        plan.roster
+            .iter()
+            .map(|m| FakeVerifier.participant_id(&m.key))
+            .collect()
+    }
+
+    fn sorted(mut ids: Vec<ParticipantId>) -> Vec<ParticipantId> {
+        ids.sort();
+        ids
+    }
+
+    fn edge(a: u8, b: u8) -> Edge {
+        let (a, b) = (id_of(a), id_of(b));
+        if a < b { Edge(a, b) } else { Edge(b, a) }
+    }
+
+    #[test]
+    fn the_creator_issues_a_first_plan_with_a_roster_of_one() {
+        let mut c = node(1);
+        assert!(!c.is_conductor());
+        assert!(c.create_meeting());
+        assert!(c.is_conductor());
+        let plan = issued(c.poll(at(0)));
+        assert_eq!(plan.stamp, stamp(FIRST_TERM, 0));
+        assert_eq!(plan.conductor, id_of(1));
+        assert_eq!(roster_of(&plan), [id_of(1)]);
+        assert_eq!(plan.roster[0].name.reveal(), "node 1");
+        assert_eq!(plan.audio_top_n, AUDIO_TOP_N);
+        assert!(plan.peerings.is_empty() && plan.audio_overlay.is_empty());
+        assert_eq!(c.plan(), Some(&plan), "the conductor follows its own plan");
+        // Then its report, which names the plan; then nothing.
+        assert_eq!(opened(c.poll(at(0)), 1).applied_plan, Some(plan.stamp));
+        assert_eq!(c.poll(at(0)), None);
+    }
+
+    #[test]
+    fn a_node_that_is_not_conductor_never_issues_a_plan() {
+        let (mut a, mut b) = (node(1), node(2));
+        report(&mut b, &mut a, at(0));
+        for output in drain(&mut a, at(0)) {
+            assert!(matches!(output, Output::PublishReport { .. }));
+        }
+        assert_eq!(a.plan(), None);
+    }
+
+    #[test]
+    fn a_node_whose_report_arrives_joins_the_roster_and_is_wired() {
+        let (mut c, mut j) = (node(1), node(2));
+        c.create_meeting();
+        drain(&mut c, at(0));
+        report(&mut j, &mut c, at(100));
+        assert_eq!(c.next_wake(at(100)), at(100));
+        let plan = issued(c.poll(at(100)));
+        assert_eq!(plan.stamp, stamp(FIRST_TERM, 1));
+        assert_eq!(sorted(roster_of(&plan)), sorted(vec![id_of(1), id_of(2)]));
+        assert_eq!(plan.peerings, [edge(1, 2)]);
+        assert_eq!(plan.audio_overlay, [edge(1, 2)]);
+
+        // The joiner adopts it and says so in its next report.
+        let group = plan.stamp.group_id();
+        let object = plan.seal(&meeting(), &FakeIdentity(1));
+        assert_eq!(j.on_plan(group, &object), PlanVerdict::Adopted);
+        assert_eq!(opened(j.poll(at(110)), 2).applied_plan, Some(plan.stamp));
+        // Its own plan coming back round the flood changes nothing for the conductor.
+        assert_eq!(c.on_plan(group, &object), PlanVerdict::Duplicate);
+        assert!(c.is_conductor());
+    }
+
+    #[test]
+    fn no_plan_is_issued_while_nothing_it_says_changes() {
+        let (mut c, mut j) = (node(1), node(2));
+        c.create_meeting();
+        report(&mut j, &mut c, at(0));
+        let first = issued(c.poll(at(0)));
+        drain(&mut c, at(0));
+        // Reports keep coming, with a round-trip time that moves about.
+        for second in 1..10u64 {
+            let now = at(second * 1000);
+            j.set_view(LocalView {
+                links: vec![Link {
+                    peer: id_of(1),
+                    path: PathKind::Direct,
+                    rtt: Duration::from_millis(second),
+                }],
+                ..LocalView::default()
+            });
+            report(&mut j, &mut c, now);
+            for output in drain(&mut c, now) {
+                assert!(matches!(output, Output::PublishReport { .. }));
+            }
+        }
+        assert_eq!(c.plan(), Some(&first));
+    }
+
+    #[test]
+    fn a_member_whose_reports_stop_is_dropped_after_three_seconds() {
+        let (mut c, mut j, mut k) = (node(1), node(2), node(3));
+        c.create_meeting();
+        report(&mut j, &mut c, at(0));
+        report(&mut k, &mut c, at(0));
+        let plan = issued(c.poll(at(0)));
+        assert_eq!(roster_of(&plan).len(), 3);
+        drain(&mut c, at(0));
+
+        // 3 keeps reporting; 2 goes quiet. The conductor asks to be woken when 2 is due out.
+        for ms in [1000, 2000] {
+            report(&mut k, &mut c, at(ms));
+            drain(&mut c, at(ms));
+        }
+        assert_eq!(c.next_wake(at(2000)), at(3000), "its own next report");
+        report(&mut k, &mut c, at(2999));
+        assert!(drain(&mut c, at(2999)).is_empty());
+        assert_eq!(c.next_wake(at(2999)), at(3000));
+
+        let plan = issued(c.poll(at(3000)));
+        assert_eq!(sorted(roster_of(&plan)), sorted(vec![id_of(1), id_of(3)]));
+        assert_eq!(plan.audio_overlay, [edge(1, 3)]);
+        assert!(plan.peerings.iter().all(|e| *e == edge(1, 3)));
+    }
+
+    #[test]
+    fn the_conductor_is_woken_for_a_timeout_that_falls_before_its_next_report() {
+        let (mut c, mut j) = (node(1), node(2));
+        c.create_meeting();
+        drain(&mut c, at(0));
+        report(&mut j, &mut c, at(200));
+        drain(&mut c, at(200)); // plan, and a report naming it
+        drain(&mut c, at(3000)); // a report; the next is due at 4000
+        assert_eq!(c.next_wake(at(3000)), at(3200));
+        assert_eq!(roster_of(&issued(c.poll(at(3200)))), [id_of(1)]);
+    }
+
+    #[test]
+    fn a_node_that_comes_back_is_added_again() {
+        let (mut c, mut j) = (node(1), node(2));
+        c.create_meeting();
+        report(&mut j, &mut c, at(0));
+        drain(&mut c, at(0));
+        assert_eq!(roster_of(&issued(c.poll(at(3000)))), [id_of(1)]);
+        drain(&mut c, at(3000));
+        report(&mut j, &mut c, at(5000));
+        let plan = issued(c.poll(at(5000)));
+        assert_eq!(roster_of(&plan).len(), 2);
+        assert_eq!(plan.stamp, stamp(FIRST_TERM, 2));
+    }
+
+    #[test]
+    fn a_changed_name_is_a_new_plan() {
+        let (mut c, mut j) = (node(1), node(2));
+        c.create_meeting();
+        report(&mut j, &mut c, at(0));
+        drain(&mut c, at(0));
+        let config = Config {
+            meeting: meeting(),
+            name: Redacted::new("Bob".to_owned()),
+            first_sequence: 2000,
+        };
+        let mut renamed = Node::new(config, FakeIdentity(2), FakeVerifier);
+        report(&mut renamed, &mut c, at(500));
+        let plan = issued(c.poll(at(500)));
+        assert!(plan.roster.iter().any(|m| m.name.reveal() == "Bob"));
+    }
+
+    #[test]
+    fn links_and_unreachable_pairs_from_reports_shape_the_wiring() {
+        // 1 conducts. 2 and 3 are connected to each other; 3 cannot reach 1.
+        let (mut c, mut j, mut k) = (node(1), node(2), node(3));
+        c.create_meeting();
+        let direct = |peer: u8| Link {
+            peer: id_of(peer),
+            path: PathKind::Direct,
+            rtt: Duration::from_millis(2),
+        };
+        c.set_view(LocalView {
+            links: vec![direct(2)],
+            ..LocalView::default()
+        });
+        j.set_view(LocalView {
+            links: vec![direct(1), direct(3)],
+            ..LocalView::default()
+        });
+        k.set_view(LocalView {
+            links: vec![direct(2)],
+            unreachable: vec![id_of(1)],
+            ..LocalView::default()
+        });
+        report(&mut j, &mut c, at(0));
+        report(&mut k, &mut c, at(0));
+        let plan = issued(c.poll(at(0)));
+        let mut line = vec![edge(1, 2), edge(2, 3)];
+        line.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        assert_eq!(plan.audio_overlay, line);
+        assert_eq!(plan.peerings, line);
+    }
+
+    #[test]
+    fn a_change_in_the_conductors_own_links_is_planned_for() {
+        let (mut c, mut j, mut k) = (node(1), node(2), node(3));
+        c.create_meeting();
+        report(&mut j, &mut c, at(0));
+        report(&mut k, &mut c, at(0));
+        let before = issued(c.poll(at(0)));
+        assert!(before.audio_overlay.contains(&edge(1, 3)));
+        drain(&mut c, at(0));
+        c.set_view(LocalView {
+            unreachable: vec![id_of(3)],
+            ..LocalView::default()
+        });
+        assert_eq!(c.next_wake(at(10)), at(10));
+        let after = issued(c.poll(at(10)));
+        assert_eq!(after.stamp, stamp(FIRST_TERM, 1));
+        assert!(!after.audio_overlay.contains(&edge(1, 3)));
+        assert!(after.audio_overlay.contains(&edge(2, 3)));
+    }
+
+    #[test]
+    fn existing_wiring_is_kept_as_nodes_join() {
+        let mut c = node(1);
+        c.create_meeting();
+        let mut others: Vec<_> = (2..=12).map(node).collect();
+        let mut held = issued(c.poll(at(0)));
+        for (i, joiner) in others.iter_mut().enumerate() {
+            let now = at(100 * (i as u64 + 1));
+            report(joiner, &mut c, now);
+            let next = issued(c.poll(now));
+            assert!(held.may_replace(&next));
+            for e in &held.audio_overlay {
+                assert!(next.audio_overlay.contains(e));
+            }
+            assert_eq!(next.audio_overlay.len(), held.audio_overlay.len() + 1);
+            held = next;
+        }
+        assert_eq!(held.roster.len(), 12);
+    }
+
+    #[test]
+    fn a_node_that_has_a_plan_cannot_create_a_meeting() {
+        let mut n = node(3);
+        let (group, envelope) = plan(1, 0, 1, &[], 3);
+        assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
+        assert!(!n.create_meeting());
+        assert!(!n.is_conductor());
+    }
+
+    #[test]
+    fn a_creator_that_adopts_another_plan_stops_conducting() {
+        // It created a meeting but, before issuing anything, received the plan of one that
+        // already exists.
+        let mut n = node(3);
+        n.create_meeting();
+        let (group, envelope) = plan(1, 4, 1, &[], 3);
+        assert_eq!(n.on_plan(group, &envelope), PlanVerdict::Adopted);
+        assert!(!n.is_conductor());
+        for output in drain(&mut n, at(0)) {
+            assert!(matches!(output, Output::PublishReport { .. }));
+        }
+    }
+
+    #[test]
+    fn a_plan_from_another_node_does_not_unseat_a_conductor_with_a_plan() {
+        let mut c = node(1);
+        c.create_meeting();
+        drain(&mut c, at(0));
+        let (group, envelope) = plan(1, 5, 2, &[], 2);
+        assert_eq!(c.on_plan(group, &envelope), PlanVerdict::NotAllowed);
+        let (group, envelope) = plan(2, 0, 2, &[], 2);
+        assert_eq!(c.on_plan(group, &envelope), PlanVerdict::NotAllowed);
+        assert!(c.is_conductor());
     }
 }

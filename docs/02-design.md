@@ -245,6 +245,21 @@ otherwise closed once the planned peerings are up.
   is treated as provisional for a second or two, since most upgrade to direct.
 - **Shape**: every edge khef peers with **two or more** khefs where the graph allows. The
   transit graph is connected; a full mesh is preferred, not required. Two nodes may peer directly.
+- **Phase 1 rule** (`topology::wire`; scoring and capacity come later):
+  - *Change as little as possible*: every edge of the plan in force stays while both ends are
+    in the roster and neither reports the other unreachable. A join disturbs nobody else.
+  - *Audio tree*: grown from the conductor one edge at a time. The edge chosen is the best by,
+    in order: a link already up and direct, then a pair not tried yet, then a link through an
+    iroh-relay; the attachment point nearest the conductor; lowest round-trip time; lowest
+    ids. At most 4 tree links per node unless a node can be reached no other way, which bounds
+    a node's audio uplink to 4 × N tracks.
+  - *Peerings*: every tree edge, plus, for each node, its nearest nodes until it has two, so
+    the control flood has a second path and a replacement tree edge is already connected.
+  - The conductor re-runs the rule when a report or its own links change or a member times
+    out, and issues a plan only if the roster or wiring differs from the one in force (a
+    round-trip time that moves does not cause a plan).
+  - The tree is not rebalanced, and a member the tree cannot reach stays in the roster
+    without audio; both are for the scored planner.
 - **Capacity (estimate, to be measured)**: uplink is the binding constraint. A subscriber taking
   5 video tracks plus audio needs very roughly 2–4 Mbps, so a 20 Mbps residential uplink serves
   5–8 subscribers; a 50-person meeting needs on the order of 6–10 transit khefs on residential

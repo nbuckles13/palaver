@@ -3,5 +3,6 @@
 mod node;
 
 pub use node::{
-    Config, LocalView, Node, Output, PlanVerdict, REPORT_INTERVAL, REPORT_TIMEOUT, ReportVerdict,
+    AUDIO_TOP_N, Config, FIRST_TERM, LocalView, Node, Output, PlanVerdict, REPORT_INTERVAL,
+    REPORT_TIMEOUT, ReportVerdict,
 };
