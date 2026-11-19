@@ -6,6 +6,7 @@ mod plan;
 mod report;
 mod sensitive;
 pub mod sign;
+mod ticket;
 mod time;
 
 pub use fields::{DecodeError, MAX_ENTRIES};
@@ -16,4 +17,5 @@ pub use report::{
 };
 pub use sensitive::{Redacted, Secret};
 pub use sign::{PublicKey, SIGNATURE_BYTES, Signature, Signer, Verifier};
+pub use ticket::{EntryPoint, MAX_ENTRY_POINTS, SECRET_BYTES, Ticket, TicketError};
 pub use time::Timestamp;
