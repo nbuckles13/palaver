@@ -171,6 +171,12 @@ catalog track lists each participant's available tracks.
   number. A plan's group id is its term (high half) and generation, so ids keep rising across a
   change of conductor. A khef keeps the latest group of every control track, so a joiner
   subscribing from the current group gets the plan and every report without `FETCH`.
+- **Flood rule in detail** (`khef_core::Flood`): an object is passed on only if its group id
+  is higher than the last seen for its track, to every neighbour except the one it came from.
+  A khef checks the signature before accepting an object, so a member cannot shut out
+  another's reports with a forged high group id. A report is dropped from the cache 3 s
+  after it arrives (its group id is remembered, so it cannot come back from a neighbour that
+  still holds it); the plan is kept until replaced. The number of tracks remembered is capped.
 - **Cadence**: a node sends a report once a second, and at once on change. Phase 1 sends whole
   plans, not deltas.
 - **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
@@ -258,8 +264,21 @@ otherwise closed once the planned peerings are up.
   - The conductor re-runs the rule when a report or its own links change or a member times
     out, and issues a plan only if the roster or wiring differs from the one in force (a
     round-trip time that moves does not cause a plan).
-  - The tree is not rebalanced, and a member the tree cannot reach stays in the roster
-    without audio; both are for the scored planner.
+  - The phase 1 rule never moves an edge that still works, and a member the tree cannot
+    reach stays in the roster without audio; both change with the scored planner.
+- **Rebalancing** (phase 3, with the scored planner). The conductor reshapes a working
+  meeting, not only a broken one: to cut latency (a shorter or lower-RTT path exists) and to
+  move load off a congested or lossy link or an overloaded khef. Rules:
+  - *Always hitless*: every move is make-before-break (section 9). The new path is brought
+    up and delivering before the old one is dropped; khefs dedupe in between. For video
+    routes that is a per-track switch; for the audio overlay the new tree runs alongside the
+    old and the old is retired once every node reports the new one applied, which is the same
+    machinery as the two standing trees.
+  - *Hysteresis*: a move must be worth a clear margin and a node or track is not moved again
+    for a hold time, so plans do not flap on a round-trip time that wanders.
+  - *Bounded*: a plan moves a few edges at a time, so a mistake is small and the next
+    report shows whether it helped.
+  - Tested in the simulator with the invariant "zero lost objects across any plan change".
 - **Capacity (estimate, to be measured)**: uplink is the binding constraint. A subscriber taking
   5 video tracks plus audio needs very roughly 2–4 Mbps, so a 20 Mbps residential uplink serves
   5–8 subscribers; a 50-person meeting needs on the order of 6–10 transit khefs on residential

@@ -8,7 +8,9 @@
 )]
 
 pub mod dedupe;
+pub mod flood;
 pub mod top_n;
 
 pub use dedupe::Dedupe;
+pub use flood::{Cached, Flood, Offer};
 pub use top_n::{TopN, TopNConfig};
