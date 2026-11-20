@@ -8,12 +8,12 @@
 //!   one-way streams, two-way streams and datagrams, which is what MoQ asks of QUIC.
 //! - [`memory`]: a transport that never leaves the process, for tests and for bots that
 //!   share one.
-//!
 //! - [`admission`]: the handshake that lets only holders of the meeting secret connect.
-//!
-//! The QUIC transport (iroh) is to come.
+//! - [`quic`]: the real transport, QUIC by quinn, with each end's key proven in the TLS
+//!   handshake.
 
 pub mod admission;
 pub mod identity;
 pub mod memory;
+pub mod quic;
 pub mod transport;
