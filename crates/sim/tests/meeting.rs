@@ -472,16 +472,14 @@ fn with_more_talkers_than_n_a_listener_hears_the_loudest_three() {
             "{listener} of the quiet one"
         );
     }
-    // Getting there takes time when all four start at the same instant. Slots go to whoever
-    // is heard first, a khef holds a selection for 250 ms before giving it up, and each
-    // khef on the way can only choose among what the one before it passed on. So the third
-    // loudest can be late by a hold time per hop.
+    // Getting there takes time when all four start at the same instant: slots go to whoever
+    // is heard first, and a khef holds a selection for 250 ms before giving it up. How the
+    // wait adds up along the tree is top-N's business and is tested with it.
     let lost: Vec<usize> = [0, 5, 6, 7]
         .iter()
         .map(|listener| 100 - heard(&m, *listener, 3))
         .collect();
     assert!(lost.iter().all(|frames| *frames <= 40), "{lost:?}");
-    eprintln!("frames of the third loudest lost at each listener: {lost:?}");
 }
 
 #[test]
