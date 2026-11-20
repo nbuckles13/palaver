@@ -329,12 +329,13 @@ dependencies = [
 name = "palaver-sdk"
 version = "0.0.0"
 dependencies = [
- "palaver-control",
+ "bytes",
  "palaver-khef-core",
- "palaver-media",
+ "palaver-moq-wire",
  "palaver-net",
+ "palaver-node",
  "palaver-proto",
- "palaver-topology",
+ "tokio",
 ]
 
 [[package]]
