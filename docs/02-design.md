@@ -428,6 +428,9 @@ otherwise closed once the planned peerings are up.
   watch.) Each packet carries `audio_level`, computed on that frame with no smoothing lag.
   It is object property `0x78` (in the draft's application range, one byte on the wire) with an
   integer value from 0 to 127; a typical audio datagram header is 7 bytes.
+  **The scale**: louder is higher, 127 is a full-scale signal and each step down is one
+  decibel, so a level `L` is an RMS of `L - 127` dBFS (the scale of RFC 6464 turned over).
+  Speech into a well-set microphone is around 95 to 110; a quiet room around 60 to 70.
   Opus in-band FEC is on from the start; DRED is added when loss calls for it (section 14).
   One object per group, in datagrams.
 - **Selection rule** (per khef, separately for each overlay link and for its own client; the
@@ -461,6 +464,9 @@ otherwise closed once the planned peerings are up.
     then decays linearly to zero at 100 ms, so a crashed talker or a lost end-of-speech packet
     cannot hold a slot. Computed on arrival of any packet; still no timers.
   - Hold time (250 ms, from spike 4) and minimum level are profile constants.
+  - **The minimum level (30) predates the scale above** and on it means -97 dBFS, which
+    nothing is below. It needs a value between room noise and speech (around 80); to be set
+    when it can be listened to.
   - Known gap: a word whose first frame is below the minimum level loses that 20 ms frame.
     Possible fix: khefs keep the latest packet of each unselected track and send it first.
 - **Consistency is eventual.** Khefs nearer a new speaker switch first; the change crosses the
@@ -667,6 +673,17 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
     work on adapting to the network (and means FEC off or a higher bitrate when it is on).
   - The jitter buffer cannot know how far a packet's DRED reaches; it asks, and the decoder
     answers "not that far" (then conceal).
+- **One voice, without the devices** (`media::voice`): `VoiceSender` takes 20 ms of
+  samples and gives at most one packet, with its level; nothing is sent for a frame the
+  encoder marks as silence, and the frame counter advances all the same. `VoiceReceiver`
+  holds a jitter buffer and a decoder for one remote voice and gives 20 ms to play on every
+  frame interval: the frame, a lost frame rebuilt from the next packet, or the decoder's
+  guess. Voices are summed and passed through a limiter that leaves ordinary levels
+  untouched and squeezes what would clip (`media::mix`).
+- **Made-up voices** (`media::synthetic`) for bots and tests: a pitch with harmonics and a
+  syllable rhythm, which Opus treats as speech. Each voice has its own pitch (eight within
+  one octave), so a listener can tell whose voice is in what it plays after encoding, loss
+  and mixing, by measuring that one frequency.
 - **Audio I/O**: `cpal` (WASAPI, ALSA or PulseAudio, CoreAudio). Devices differ in rate and
   sample format, so the pipeline resamples to 48 kHz float.
 - **Jitter buffer**: our own. Adaptive playout delay and time-stretching, with concealment handed

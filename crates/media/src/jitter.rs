@@ -48,7 +48,8 @@ pub struct Config {
     /// How many frame intervals the delay must be a frame or more below target before a frame
     /// of filler is played.
     pub grow_after: u32,
-    /// A frame at or below this level (0 to 127) is preferred for skipping.
+    /// A frame at or below this level is preferred for skipping. On the scale of
+    /// [`crate::level`], 75 is -52 dBFS: under speech, over a quiet room.
     pub quiet_level: u8,
     /// Whether packets carry FEC data for the frame before them.
     pub fec: bool,
@@ -73,7 +74,7 @@ impl Default for Config {
             decrease_after: Duration::from_secs(2),
             shrink_after: 50,
             grow_after: 5,
-            quiet_level: 30,
+            quiet_level: 75,
             fec: true,
             dred_frames: 0,
             max_conceal_frames: 5,
