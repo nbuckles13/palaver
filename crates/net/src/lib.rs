@@ -9,8 +9,11 @@
 //! - [`memory`]: a transport that never leaves the process, for tests and for bots that
 //!   share one.
 //!
-//! The QUIC transport (iroh) and the admission handshake are to come.
+//! - [`admission`]: the handshake that lets only holders of the meeting secret connect.
+//!
+//! The QUIC transport (iroh) is to come.
 
+pub mod admission;
 pub mod identity;
 pub mod memory;
 pub mod transport;
