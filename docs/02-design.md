@@ -428,24 +428,22 @@ otherwise closed once the planned peerings are up.
   Opus in-band FEC and DRED are planned from the start. One object per group, in datagrams.
 - **Selection rule** (per khef, separately for each overlay link and for its own client; the
   candidates for a link are the tracks not learned from that link). The khef holds a selected
-  set of N tracks, each with the time it last ranked in. On each packet arrival, with every
+  set of N tracks, each with the time it entered the set. On each packet arrival, with every
   track's level taken from its latest packet:
-  1. Rank the candidates by level. Each selected track among the N loudest *and* above the
-     minimum level has its time refreshed.
+  1. Rank the candidates by level.
   2. A track among the N loudest that is not selected, and is above the minimum level, replaces
-     the quietest selected track that is not protected (ties: the oldest). A selected track
-     is protected while its time is within the **hold** and it is still arriving; one that
-     has missed two packets is not. If every selected track is protected, it is not added.
-  - **The hold is for a speaker who is still talking**, to stop a slot flapping between
-    voices of similar loudness. It does not protect a track that has stopped arriving:
-    either its speaker stopped, and the next voice should not wait; or the khef before this
-    one dropped it for another, and holding its slot would add this khef's hold to that
-    one's at every hop. Measured with four talkers starting together and N = 3: the third
-    loudest is 300 ms late for every listener, however many khefs away (250 ms of hold where
-    the talkers meet, then 40 ms once for the dropped track to be seen to have stopped).
-    Before this rule it was 260 ms more at every khef.
-  - **Fast in, slow out**: entry happens on the first speech packet; a track leaves only when
-    someone else needs the slot and it has stopped, or has not ranked in for the hold time. Slots are never
+     the lowest-ranked selected track that is not itself among the N loudest and is past its
+     hold. If there is none, it is not added.
+  - **The hold** runs from the moment a track enters the set: for that long it cannot be
+    replaced. It stops a slot flapping between voices of similar loudness, and it is all that
+    slows a switch: once it has passed, a track that no longer ranks goes the instant someone
+    who does needs the slot.
+  - **Khefs along a path do not add to each other's hold.** A track enters the set at each
+    of them at the same moment (give or take the link delay), so its hold ends at each
+    together. Measured with four talkers starting together and N = 3: the third loudest is
+    260 ms late for every listener, however many khefs away.
+  - **Fast in**: a speaker who ranks gets in on their first speech packet unless every track
+    that does not rank entered within the hold. Slots are never
     emptied, so when everyone is silent the set does not change, and quiet background noise is
     consistently in or out.
   - No timers: the rule runs on packet arrival, so it adds no delay.
@@ -714,7 +712,7 @@ queue, link and fault model, invariants checked as it runs); see `docs/spikes/05
 | Scale | 25–50 participants, single conductor; multi-khef from the start |
 | Architecture | MoQ-based: edge khef per node, named tracks, routing tables, control as tracks |
 | Subscribe resolution | Routing table, longest-prefix match; default per-participant routes; conductor not in the path; unroutable subscribes held pending |
-| Audio | Top-N selected by khefs over a pre-wired overlay of two loop-free trees sharing no middle node (one tree in phase 1); loudness-ranked, fast in, slow out; all audio tracks announced at join; DTX, FEC and DRED |
+| Audio | Top-N selected by khefs over a pre-wired overlay of two loop-free trees sharing no middle node (one tree in phase 1); loudness-ranked, a track is held for a short time after it enters; all audio tracks announced at join; DTX, FEC and DRED |
 | Rendition switching | Receiver-side by default; khef-side track swap allowed if the rate-control spike finds a clean way |
 | Local client↔khef | In-memory MoQ-formatted messages; no sockets, QUIC or crypto |
 | Network edge | Conformant to the pinned draft for our profile |

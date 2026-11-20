@@ -654,12 +654,11 @@ fn when_more_than_n_start_together_the_wait_for_a_slot_is_paid_once_not_at_every
     let missed = |net: &Net, listener: Id| {
         100 - net.played(listener).iter().filter(|(a, _)| *a == 3).count()
     };
-    // At the hub the quiet one is held for 250 ms after it last ranked in: 13 frames. Every
-    // selector after that sees 4 stop, and gives its slot to 3 once 4 has missed two
-    // packets. Those two packets are the same two for all of them, so the wait is two
-    // frames more in all, however many khefs follow. (It was thirteen more at each.)
+    // The quiet one cannot be replaced for 250 ms after it entered: 13 frames. It entered
+    // every selector on the way at the same moment, so when the hub gives its slot to 3,
+    // each of the others does too, on the same packet.
     let missed = [missed(&net, 20), missed(&net, 30), missed(&net, 40)];
-    assert_eq!(missed, [15, 15, 15]);
+    assert_eq!(missed, [13, 13, 13]);
     // After that every listener hears exactly the loudest three.
     for listener in [20, 30, 40] {
         let late: Vec<u64> = net

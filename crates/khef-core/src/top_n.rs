@@ -6,28 +6,25 @@
 //!
 //! 1. Every candidate track has a current level: the level on its latest packet, held for a
 //!    short time and then decayed to zero, so a track that stops sending cannot keep a slot.
-//! 2. Rank the candidates by current level. Each selected track that is among the N loudest
-//!    and at or above the minimum level has its "last ranked in" time refreshed.
+//! 2. Rank the candidates by current level.
 //! 3. If the packet's track is not selected, is among the N loudest and is at or above the
-//!    minimum level, it replaces the quietest selected track that is not protected (ties:
-//!    the one refreshed longest ago). A selected track is protected while its time is
-//!    within the hold **and it is still arriving**; one that has missed two packets is not.
-//!    If every selected track is protected, the packet is not forwarded.
+//!    minimum level, it replaces the lowest-ranked selected track that is not itself among
+//!    the N loudest and is past its hold. If there is none, the packet is not forwarded.
 //!
-//! The hold is for a speaker who is still talking: it stops a slot flapping between voices
-//! of similar loudness. It must not protect a track that has stopped arriving. Its speaker
-//! may have stopped, in which case the next voice should not wait; or the khef before this
-//! one dropped it for another, in which case holding its slot here would add this khef's
-//! hold to that one's, and again at every khef after.
+//! **The hold** runs from the moment a track enters the set: for that long it cannot be
+//! replaced. It is there to stop a slot flapping between voices of similar loudness, and it
+//! is all that slows a switch. Once it has passed, a track that no longer ranks goes the
+//! instant someone who does needs the slot.
+//!
+//! Because the hold is counted from entry, khefs along a path do not add to each other's:
+//! a track enters the set at each of them at the same moment (give or take the link delay),
+//! so its hold ends at each of them together.
 //!
 //! Free slots are filled by the first tracks seen. Slots are never emptied, so when everyone
 //! is silent the set does not change. The rule runs only on packet arrival: no timers.
-//!
-//! Fast in, slow out: a new speaker gets in on their first speech packet as long as some
-//! holder has stopped, or has not ranked in for the hold time; a holder leaves only when
-//! someone needs the slot.
 
 use palaver_proto::Timestamp;
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -37,9 +34,9 @@ use std::time::Duration;
 pub struct TopNConfig {
     /// How many tracks are selected.
     pub n: usize,
-    /// How long after last ranking in a selected track is protected from replacement.
+    /// How long after entering the set a track cannot be replaced.
     pub hold: Duration,
-    /// Levels below this never cause a switch and never refresh protection.
+    /// Levels below this never cause a switch.
     pub min_level: u8,
     /// A level is taken at face value for this long after its packet (two packet intervals).
     pub decay_start: Duration,
@@ -69,9 +66,9 @@ struct Heard {
 #[derive(Debug, Clone)]
 struct Slot<K> {
     track: K,
-    /// When the track last ranked among the N loudest at or above the minimum level. `None`
-    /// for a track that filled a free slot without speaking: it is replaceable at once.
-    ranked_in: Option<Timestamp>,
+    /// When the track entered the set. `None` for a track that filled a free slot without
+    /// speaking: it has no hold.
+    entered: Option<Timestamp>,
 }
 
 /// The selected set for one destination (an overlay link, or the local client).
@@ -144,21 +141,6 @@ impl<K: Ord + Clone> TopN<K> {
     pub fn on_packet(&mut self, track: K, level: u8, now: Timestamp) -> bool {
         self.heard.insert(track.clone(), Heard { level, at: now });
 
-        // Step 2: refresh protection of selected tracks that currently rank in.
-        let refresh: Vec<bool> = self
-            .selected
-            .iter()
-            .map(|slot| {
-                self.level_of(&slot.track, now) >= self.config.min_level
-                    && self.in_loudest(&slot.track, now)
-            })
-            .collect();
-        for (slot, ranked) in self.selected.iter_mut().zip(refresh) {
-            if ranked {
-                slot.ranked_in = Some(now);
-            }
-        }
-
         if self.is_selected(&track) {
             return true;
         }
@@ -166,7 +148,7 @@ impl<K: Ord + Clone> TopN<K> {
         if self.selected.len() < self.config.n {
             self.selected.push(Slot {
                 track,
-                ranked_in: speaking.then_some(now),
+                entered: speaking.then_some(now),
             });
             return true;
         }
@@ -175,31 +157,25 @@ impl<K: Ord + Clone> TopN<K> {
         if !speaking || !self.in_loudest(&track, now) {
             return false;
         }
-        let victim =
-            self.selected
-                .iter()
-                .enumerate()
-                .filter(|(_, slot)| {
-                    // Held for a while after it last ranked in, but only while it is still
-                    // arriving. A track that has missed two packets is no longer protected:
-                    // either its speaker stopped, or a khef before this one dropped it for
-                    // another, and holding its slot here would only add this khef's hold to
-                    // that one's.
-                    let held = slot
-                        .ranked_in
-                        .is_some_and(|at| now.saturating_since(at) < self.config.hold);
-                    let arriving = self.heard.get(&slot.track).is_some_and(|heard| {
-                        now.saturating_since(heard.at) < self.config.decay_start
-                    });
-                    !(held && arriving)
-                })
-                .min_by_key(|(_, slot)| (self.level_of(&slot.track, now), slot.ranked_in))
-                .map(|(index, _)| index);
+        // The one to go is past its hold and no longer ranks. Taking a slot from a track
+        // that still ranks would only have it take one back a moment later.
+        let victim = self
+            .selected
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| {
+                let held = slot
+                    .entered
+                    .is_some_and(|at| now.saturating_since(at) < self.config.hold);
+                !held && !self.in_loudest(&slot.track, now)
+            })
+            .min_by_key(|(_, slot)| (self.level_of(&slot.track, now), Reverse(&slot.track)))
+            .map(|(index, _)| index);
         match victim.and_then(|index| self.selected.get_mut(index)) {
             Some(slot) => {
                 *slot = Slot {
                     track,
-                    ranked_in: Some(now),
+                    entered: Some(now),
                 };
                 self.switches = self.switches.saturating_add(1);
                 true
@@ -299,56 +275,73 @@ mod tests {
     }
 
     #[test]
-    fn the_hold_protects_a_speaker_who_is_still_talking() {
+    fn a_track_that_has_just_entered_cannot_be_replaced_until_its_hold_is_over() {
         let mut t = three_talkers();
-        // A fourth, louder voice joins at 1010 ms while all three keep talking. It ranks in
-        // and track 3 (the last of three equals) no longer does, but 3 is held for 250 ms
-        // from when it last ranked in, at 1000 ms.
+        // A louder voice arrives right behind them. All three entered at time 0, so none
+        // can go before 250 ms.
         let mut admitted = None;
-        for ms in (0..=1400).step_by(20) {
+        for ms in (0..=400).step_by(20) {
             for track in 1..=3 {
                 feed(&mut t, track, SPEECH, ms * MS);
             }
-            if ms >= 1000 && feed(&mut t, 4, 100, (ms + 10) * MS) && admitted.is_none() {
+            if feed(&mut t, 4, 100, (ms + 10) * MS) && admitted.is_none() {
                 admitted = Some(ms + 10);
             }
         }
-        assert_eq!(admitted, Some(1250));
+        assert_eq!(admitted, Some(250));
         assert_eq!(selected(&t), [1, 2, 4]);
     }
 
     #[test]
-    fn a_speaker_who_has_stopped_is_not_protected() {
+    fn past_its_hold_a_track_that_no_longer_ranks_goes_at_once() {
         let mut t = three_talkers();
         keep_sending(&mut t, &[1, 2, 3], SPEECH, 20 * MS, 1000 * MS);
-        // All three stop at 1000 ms. One packet interval later a gap is not yet a stop...
+        // All three are still talking. A louder voice gets in on its first packet.
+        assert!(feed(&mut t, 4, 100, 1010 * MS));
+        assert_eq!(selected(&t), [1, 2, 4]);
+    }
+
+    #[test]
+    fn two_voices_trading_places_switch_no_more_than_once_a_hold() {
+        let mut t = top();
+        // 1 and 2 talk steadily. 3 and 4 are close, and which is louder flips every packet.
+        for frame in 0..100u64 {
+            let now = frame * 20 * MS;
+            feed(&mut t, 1, 90, now);
+            feed(&mut t, 2, 90, now);
+            let (three, four) = if frame % 2 == 0 { (80, 70) } else { (70, 80) };
+            feed(&mut t, 3, three, now);
+            feed(&mut t, 4, four, now);
+        }
+        // Two seconds, 250 ms hold. Without the hold it would be a switch on every packet.
+        assert!((1..=8).contains(&t.switches()), "{}", t.switches());
+    }
+
+    #[test]
+    fn a_new_speaker_does_not_wait_for_speakers_who_have_stopped() {
+        let mut t = three_talkers();
+        keep_sending(&mut t, &[1, 2, 3], SPEECH, 20 * MS, 1000 * MS);
+        // All three stop at 1000 ms. For two packet intervals their levels still stand, and
+        // an equal voice does not outrank them...
         assert!(!feed(&mut t, 4, SPEECH, 1030 * MS));
-        // ...but two missed packets are: the new voice is in on its next packet, with no
-        // wait for the hold.
+        // ...then they decay, and the new voice is in.
         assert!(feed(&mut t, 4, SPEECH, 1050 * MS));
     }
 
     #[test]
     fn a_khef_does_not_add_its_own_hold_to_the_one_before_it() {
         // What a khef further along the tree sees when the khef before it switches from
-        // track 4 to track 3: 4's packets stop and 3's start, in the same instant.
+        // track 4 to track 3 at the end of 4's hold: 4's packets stop and 3's start.
         let mut t = top();
-        for ms in (0..1000).step_by(20) {
+        for ms in (0..260).step_by(20) {
             for track in [1, 2, 4] {
                 feed(&mut t, track, SPEECH, ms * MS);
             }
         }
-        let mut admitted = None;
-        for ms in (1000..1400).step_by(20) {
-            for track in [1, 2] {
-                feed(&mut t, track, SPEECH, ms * MS);
-            }
-            if admitted.is_none() && feed(&mut t, 3, SPEECH, ms * MS) {
-                admitted = Some(ms);
-            }
-        }
-        // Two packet intervals, not the 250 ms hold.
-        assert_eq!(admitted, Some(1020));
+        // 4 entered here when it entered there, so its hold is over here too.
+        assert!(feed(&mut t, 1, SPEECH, 260 * MS));
+        assert!(feed(&mut t, 2, SPEECH, 260 * MS));
+        assert!(feed(&mut t, 3, SPEECH, 260 * MS));
         assert_eq!(selected(&t), [1, 2, 3]);
     }
 
@@ -362,14 +355,14 @@ mod tests {
     }
 
     #[test]
-    fn below_the_minimum_level_never_switches_and_never_refreshes() {
+    fn below_the_minimum_level_never_switches_in_and_does_not_keep_a_slot() {
         let mut t = three_talkers();
         let just_under = TopNConfig::default().min_level - 1;
         // A noisy outsider below the minimum, louder than the silent holders, never gets in.
         keep_sending(&mut t, &[1, 2, 3], QUIET, 20 * MS, 2000 * MS);
         keep_sending(&mut t, &[9], just_under, 20 * MS, 2000 * MS);
         assert_eq!(selected(&t), [1, 2, 3]);
-        // A noisy holder below the minimum is not protected by its noise.
+        // A noisy holder below the minimum does not keep its slot from those who speak.
         let mut t = three_talkers();
         keep_sending(&mut t, &[1], just_under, 20 * MS, 2000 * MS);
         keep_sending(&mut t, &[2, 3], QUIET, 20 * MS, 2000 * MS);
@@ -394,9 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fourth_voice_waits_while_three_are_talking_unless_it_is_louder_for_the_hold() {
+    fn a_fourth_voice_no_louder_than_the_three_talking_stays_out() {
         let mut t = three_talkers();
-        // Equal levels: the incumbents keep ranking in, so the fourth never enters.
         let mut now = 20 * MS;
         while now <= 2000 * MS {
             for track in 1..=3 {
@@ -405,25 +397,7 @@ mod tests {
             assert!(!feed(&mut t, 4, SPEECH, now + MS));
             now += 20 * MS;
         }
-        // Clearly louder than track 3 for longer than the hold: it displaces track 3.
-        let start = now;
-        let mut entered_at = None;
-        while now <= start + 600 * MS {
-            feed(&mut t, 1, SPEECH, now);
-            feed(&mut t, 2, SPEECH, now);
-            feed(&mut t, 3, 60, now);
-            if feed(&mut t, 4, 100, now + MS) && entered_at.is_none() {
-                entered_at = Some(now - start);
-            }
-            now += 20 * MS;
-        }
-        let waited = entered_at.expect("the louder voice never got in");
-        assert!(
-            (240 * MS..=300 * MS).contains(&waited),
-            "entered after {} ms",
-            waited / MS
-        );
-        assert_eq!(selected(&t), [1, 2, 4]);
+        assert_eq!(t.switches(), 0);
     }
 
     #[test]
