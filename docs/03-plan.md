@@ -93,6 +93,8 @@ a machine is killed and the meeting recovers in under a second.
   member-as-introducer punching; iroh-relay fallback; headless node as a reachable khef.
 - Simulcast; priority shedding, congestion marking, rendition switching per the spike; uplink
   adaptation; caps and per-track routes; hardware H.264 on the remaining platforms.
+- Audio adaptation to loss: turn Opus DRED on (and FEC off, or the bitrate up) on links that
+  show bursts of loss; phase 1 sends FEC only.
 - Control hardening: plan deltas, convergence at 50 nodes.
 - Emulated-network matrix; nightly soak; distributed bot runs (cloud VM added here).
 - Frame encryption (prerequisite for any non-member relay), then optionally a public MoQ relay

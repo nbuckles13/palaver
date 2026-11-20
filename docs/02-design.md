@@ -425,7 +425,8 @@ otherwise closed once the planned peerings are up.
   watch.) Each packet carries `audio_level`, computed on that frame with no smoothing lag.
   It is object property `0x78` (in the draft's application range, one byte on the wire) with an
   integer value from 0 to 127; a typical audio datagram header is 7 bytes.
-  Opus in-band FEC and DRED are planned from the start. One object per group, in datagrams.
+  Opus in-band FEC is on from the start; DRED is added when loss calls for it (section 14).
+  One object per group, in datagrams.
 - **Selection rule** (per khef, separately for each overlay link and for its own client; the
   candidates for a link are the tracks not learned from that link). The khef holds a selected
   set of N tracks, each with the time it entered the set. On each packet arrival, with every
@@ -632,7 +633,8 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
 
 - **Audio processing**: `sonora`, a pure-Rust port of WebRTC's echo canceller, noise suppression
   and gain control. Platform voice-processing units on Apple/Android where better.
-- **Audio codec**: libopus 1.6 (C, built from source) with DTX, in-band FEC and DRED.
+- **Audio codec**: libopus 1.6 (C, built from source) with DTX and in-band FEC; DRED when
+  loss calls for it.
   - Wrapped by `palaver-opus`, the one crate allowed `unsafe`: mono speech at 48 kHz in
     20 ms frames; decode, decode from the next packet's FEC, decode from a later packet's
     DRED, conceal.
@@ -649,10 +651,9 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
     | 48 kbit/s | 30% | 415 ms | 495 ms |
     | 64 kbit/s | 15% | 175 ms | 495 ms |
 
-    So "DTX, FEC and DRED" at 32 kbit/s means, in practice, FEC and no DRED. Open: FEC only
-    (best for single losses), DRED only (covers bursts of about 135 ms, weaker on single
-    losses), or 48 kbit/s for both. To settle by listening on real speech; the encoder
-    settings can also follow the loss a link reports.
+    So at 32 kbit/s it is one or the other. **Decided: start with FEC only.** DRED is
+    turned on when a link shows the bursts of loss it is for, which belongs with the later
+    work on adapting to the network (and means FEC off or a higher bitrate when it is on).
   - The jitter buffer cannot know how far a packet's DRED reaches; it asks, and the decoder
     answers "not that far" (then conceal).
 - **Audio I/O**: `cpal` (WASAPI, ALSA or PulseAudio, CoreAudio). Devices differ in rate and

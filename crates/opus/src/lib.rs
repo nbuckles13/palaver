@@ -85,11 +85,13 @@ pub struct EncoderConfig {
 }
 
 impl Default for EncoderConfig {
-    /// 32 kbit/s, DTX and FEC on, up to half a second of DRED, planning for 15% loss.
+    /// 32 kbit/s, DTX and FEC on, DRED off, planning for 15% loss.
     ///
-    /// FEC and DRED are paid for out of the bitrate, and the encoder decides frame by frame
-    /// what it can afford. Measured with libopus 1.6.1 on a voice-like test signal, how far
-    /// back a packet's DRED history reached:
+    /// DRED is off to begin with: it is to be turned on when a link shows the bursts of
+    /// loss it is for, as part of adapting to the network. FEC and DRED are both paid for
+    /// out of the bitrate, and the encoder decides frame by frame what it can afford.
+    /// Measured with libopus 1.6.1 on a voice-like test signal, how far back a packet's
+    /// DRED history reached when 500 ms was asked for:
     ///
     /// | Bitrate | Loss planned for | FEC and DRED | DRED only |
     /// |---|---|---|---|
@@ -100,14 +102,13 @@ impl Default for EncoderConfig {
     /// | 48 kbit/s | 30% | 415 ms | 495 ms |
     /// | 64 kbit/s | 15% | 175 ms | 495 ms |
     ///
-    /// So at this default the packets carry FEC and no DRED. Which of FEC, DRED or a higher
-    /// bitrate serves a meeting best is to be settled by listening, not here.
+    /// So turning DRED on at 32 kbit/s means turning FEC off, or raising the bitrate.
     fn default() -> Self {
         Self {
             bitrate: 32_000,
             dtx: true,
             fec: true,
-            dred_frames: 25,
+            dred_frames: 0,
             expected_loss_percent: 15,
         }
     }
@@ -515,10 +516,19 @@ mod tests {
         filled
     }
 
-    /// FEC off, so that at 32 kbit/s the packets carry DRED.
+    /// DRED on and FEC off, so that at 32 kbit/s the packets carry DRED.
     fn dred_only() -> EncoderConfig {
         EncoderConfig {
             fec: false,
+            dred_frames: 25,
+            ..EncoderConfig::default()
+        }
+    }
+
+    /// FEC and DRED both asked for.
+    fn both() -> EncoderConfig {
+        EncoderConfig {
+            dred_frames: 25,
             ..EncoderConfig::default()
         }
     }
@@ -597,21 +607,22 @@ mod tests {
                 *reaches.iter().max().unwrap(),
             )
         };
-        // The default: FEC, and no room left for DRED.
+        // The default has DRED off.
         assert_eq!(reach(EncoderConfig::default()), (0, 0));
+        // Asking for both at 32 kbit/s: FEC, and no room left for DRED.
+        assert_eq!(reach(both()), (0, 0));
         // DRED alone at the same bitrate: about 135 ms.
         let (low, high) = reach(dred_only());
         assert!(low >= 4 && high <= 10, "{low} to {high} frames");
         // Both, at 64 kbit/s: there is room for some.
         let both_at_64 = EncoderConfig {
             bitrate: 64_000,
-            ..EncoderConfig::default()
+            ..both()
         };
         assert!(reach(both_at_64).0 >= 4);
         // DRED off: none, whatever the bitrate.
         let off = EncoderConfig {
             bitrate: 64_000,
-            dred_frames: 0,
             ..EncoderConfig::default()
         };
         assert_eq!(reach(off), (0, 0));
