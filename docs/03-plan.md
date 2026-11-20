@@ -95,6 +95,13 @@ a machine is killed and the meeting recovers in under a second.
   adaptation; caps and per-track routes; hardware H.264 on the remaining platforms.
 - Audio adaptation to loss: turn Opus DRED on (and FEC off, or the bitrate up) on links that
   show bursts of loss; phase 1 sends FEC only.
+- Audio bitrate and FEC budget: the phase 1 defaults (32 kbit/s, FEC planning for 15% loss)
+  are placeholders nobody has listened to. FEC is paid for out of the bitrate, not added to
+  it, and a higher loss setting moves more bits from the voice to its backup copy, so a
+  constant 15% costs quality on a good link. To do: measure the copy's share of a packet at
+  5%, 10% and 15%; listen to speech at 32 and 40 kbit/s with and without loss; pick fixed
+  defaults from that; then set the loss figure from what each path measures, and raise the
+  bitrate with protection where the link allows.
 - Control hardening: plan deltas, convergence at 50 nodes.
 - Emulated-network matrix; nightly soak; distributed bot runs (cloud VM added here).
 - Frame encryption (prerequisite for any non-member relay), then optionally a public MoQ relay
