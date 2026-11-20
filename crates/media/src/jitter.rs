@@ -52,7 +52,8 @@ pub struct Config {
     pub quiet_level: u8,
     /// Whether packets carry FEC data for the frame before them.
     pub fec: bool,
-    /// How many frames back a packet's DRED data reaches; 0 if DRED is off.
+    /// How many frames back a packet's DRED data reaches; 0 if DRED is off, which it is to
+    /// begin with: the encoder sends FEC only until loss calls for more.
     pub dred_frames: u32,
     /// After this many concealed frames in a row the output is silence.
     pub max_conceal_frames: u32,
@@ -74,7 +75,7 @@ impl Default for Config {
             grow_after: 5,
             quiet_level: 30,
             fec: true,
-            dred_frames: 25,
+            dred_frames: 0,
             max_conceal_frames: 5,
             max_buffered: 100,
             resync_after_late: 10,
@@ -688,8 +689,10 @@ mod tests {
 
     #[test]
     fn a_burst_of_losses_is_rebuilt_from_a_later_packets_dred() {
-        // The delay is raised so that the packet after the burst is in the buffer in time.
+        // DRED on, and the delay raised so that the packet after the burst is in the buffer
+        // in time.
         let config = Config {
+            dred_frames: 25,
             min_delay_frames: 6,
             ..Config::default()
         };
@@ -987,10 +990,9 @@ mod tests {
         let lost = 3000 - stats.received;
         assert!((120..=180).contains(&lost), "{lost} lost");
         assert!(stats.late <= 15, "{stats:?}");
-        assert!(
-            stats.recovered_fec + stats.recovered_dred >= lost - 5,
-            "{stats:?}"
-        );
+        // With FEC alone: every loss that had its next packet behind it in time.
+        assert_eq!(stats.recovered_dred, 0);
+        assert!(stats.recovered_fec >= lost - 8, "{stats:?}");
         assert!(stats.concealed + stats.silent <= 15, "{stats:?}");
         // 90 ms of jitter needs 5 frames plus one; the delay in force is close to that.
         assert!((100..=160).contains(&latency), "{latency} ms");
