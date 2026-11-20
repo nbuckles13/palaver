@@ -283,6 +283,15 @@ otherwise closed once the planned peerings are up.
   distinct from the standard MoQ one, which is kept for a future standard client edge.
 - **Admission in phase 1**: each side proves knowledge of the meeting secret, bound to the
   connection, before any MoQ message. The password handshake replaces this in phase 4.
+  It runs on the first two-way stream (`net::admission`): the dialler sends a version and a
+  nonce; the accepter answers with its nonce and its proof; the dialler sends its proof;
+  the accepter says "admitted". A proof is an HMAC-SHA-256, under a key derived from the
+  meeting secret (HKDF, label `palaver admission key v1`), of which end is proving, both
+  transport keys and both nonces, so it is good for one direction of one connection
+  between one pair of keys. A wrong proof, an unknown version, or five seconds of nothing
+  closes the connection. An endpoint wrapped in `Admitted` gives out only connections
+  that passed, so nothing above it sees one that did not. This is sound only because the
+  secret is 32 random bytes; a password would be open to guessing by anyone who can dial.
 - **Control flood**: on connect each khef sends `SUBSCRIBE_TRACKS` for the control prefix. The
   other side answers with a `PUBLISH` per control track and sends the latest group it holds of
   each, then new ones as they arrive. Control objects travel on streams, not datagrams (a plan

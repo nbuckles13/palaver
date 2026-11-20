@@ -20,7 +20,9 @@
 //! same moment), both keep the connection dialled by the node with the lower participant
 //! id and close the other. Both apply the same rule, so they keep the same one.
 //!
-//! Not here yet: admission. Any node that can reach the endpoint gets a link.
+//! The engine gives a link to every connection its endpoint gives it. Who may connect is
+//! the endpoint's business: wrap it in [`palaver_net::admission::Admitted`] and only
+//! holders of the meeting secret get that far.
 
 use bytes::Bytes;
 use palaver_khef_core::{Action, LinkWatchConfig, Role, StreamId, StreamKind};

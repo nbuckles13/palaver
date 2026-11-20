@@ -8,8 +8,9 @@
 
 use bytes::Bytes;
 use palaver_khef_core::LinkWatchConfig;
+use palaver_net::admission::{AdmissionKey, Admitted};
 use palaver_net::identity::{Identity, meeting_tag};
-use palaver_net::memory::MemoryNetwork;
+use palaver_net::memory::{MemoryEndpoint, MemoryNetwork};
 use palaver_net::transport::Peer;
 use palaver_proto::{MediaTrack, ParticipantId, Secret, Signer, Source};
 use palaver_sdk::{Engine, EngineConfig, Status};
@@ -39,9 +40,15 @@ fn config(name: &str, secret: u8) -> EngineConfig {
     }
 }
 
+/// An endpoint for `identity` that lets in only holders of meeting secret `secret`.
+fn endpoint(network: &MemoryNetwork, identity: &Identity, secret: u8) -> Admitted<MemoryEndpoint> {
+    let key = AdmissionKey::from_meeting_secret(&Secret::new([secret; 32])).unwrap();
+    Admitted::new(network.endpoint(identity.public_key()).unwrap(), key)
+}
+
 fn member(network: &MemoryNetwork, name: &str) -> Member {
     let identity = Identity::generate().unwrap();
-    let endpoint = network.endpoint(identity.public_key()).unwrap();
+    let endpoint = endpoint(network, &identity, 7);
     let address = Peer::by_key(identity.public_key());
     Member {
         engine: Engine::start(endpoint, identity, config(name, 7)),
@@ -174,18 +181,21 @@ async fn a_node_that_stops_is_dropped_from_the_plan() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_node_with_the_wrong_meeting_secret_does_not_get_into_the_plan() {
+async fn a_node_with_the_wrong_meeting_secret_is_turned_away_at_the_door() {
     let network = MemoryNetwork::new();
     let members = meeting(&network, 2).await;
     let identity = Identity::generate().unwrap();
-    let endpoint = network.endpoint(identity.public_key()).unwrap();
+    let endpoint = endpoint(&network, &identity, 8);
     let stranger = Engine::start(endpoint, identity, config("stranger", 8));
     stranger.join(vec![members[0].address.clone()]).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    for m in &members {
-        assert_eq!(m.engine.status().borrow().roster.len(), 2);
-    }
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    // It never has a link, so it is sent nothing and can send nothing.
+    assert!(stranger.status().borrow().links.is_empty());
     assert!(stranger.status().borrow().plan.is_none());
+    for m in &members {
+        let status = m.engine.status().borrow().clone();
+        assert_eq!((status.roster.len(), status.links.len()), (2, 1));
+    }
 }
 
 #[tokio::test(start_paused = true)]

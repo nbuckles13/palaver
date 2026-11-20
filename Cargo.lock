@@ -296,6 +296,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom",
  "hkdf",
+ "hmac",
  "palaver-proto",
  "sha2",
  "tokio",

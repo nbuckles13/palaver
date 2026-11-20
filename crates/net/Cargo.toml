@@ -14,11 +14,12 @@ bytes = { workspace = true }
 ed25519-dalek = { workspace = true }
 getrandom = { workspace = true }
 hkdf = { workspace = true }
+hmac = { workspace = true }
 sha2 = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "time", "test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
