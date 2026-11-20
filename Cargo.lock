@@ -277,6 +277,7 @@ dependencies = [
 name = "palaver-media"
 version = "0.0.0"
 dependencies = [
+ "palaver-opus",
  "palaver-proto",
 ]
 
