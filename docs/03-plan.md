@@ -89,6 +89,11 @@ a machine is killed and the meeting recovers in under a second.
 
 ## Phase 4 — real discovery, rate control, scale to 25–50
 
+- Open question for the password work: a PAKE stops offline guessing at admission, but
+  anything else an outsider can see that is derived from the password (the meeting tag on
+  the wire, announcements encrypted under the rendezvous key) can still be tested against
+  guesses without dialling. Either keep those from outsiders or accept that Argon2id is
+  their only protection.
 - Meeting id + password: Argon2id/HKDF, PAKE admission; mDNS and DHT rendezvous;
   member-as-introducer punching; iroh-relay fallback; headless node as a reachable khef.
 - Simulcast; priority shedding, congestion marking, rendition switching per the spike; uplink

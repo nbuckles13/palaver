@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 palaver-khef-core = { workspace = true }
+palaver-media = { workspace = true }
 palaver-moq-wire = { workspace = true }
 palaver-net = { workspace = true }
 palaver-node = { workspace = true }

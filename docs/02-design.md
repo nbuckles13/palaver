@@ -475,6 +475,13 @@ otherwise closed once the planned peerings are up.
   - Hold time (250 ms, from spike 4) and minimum level are profile constants.
   - **The minimum level is 80** (-47 dBFS): over a quiet room, under speech. Like the hold
     time it has not been tuned by ear.
+  - **Known weakness: voices of similar loudness can swap for a moment, and the swap then
+    lasts the hold.** A voice is ranked by its latest packet, and a level moves several
+    decibels between packets as syllables rise and fall. So a quieter voice whose new
+    packet is compared with a louder voice's packet from a frame or two earlier can outrank
+    it for an instant, take its slot (it is past its hold), and keep it for 250 ms. Seen
+    with bots 6 dB apart. A fix to consider: rank on the highest level of the last 100 ms
+    or so rather than on the latest packet.
   - Known gap: a word whose first frame is below the minimum level loses that 20 ms frame.
     Possible fix: khefs keep the latest packet of each unselected track and send it first.
 - **Consistency is eventual.** Khefs nearer a new speaker switch first; the change crosses the
@@ -590,6 +597,15 @@ A **profile** of MoQT, deliberately small:
   handed to the player as slices of the same buffer.
   - **Two nodes that dial each other at once** keep the connection dialled by the lower
     participant id and close the other; both apply the same rule.
+- **A call** (`sdk::Call`) puts a voice on an engine. Its owner keeps a 20 ms beat and on
+  each one gives it the frame captured and asks for the frame to play. Speaking is level,
+  Opus, and a datagram to the engine. Listening is one jitter buffer and decoder per voice
+  the engine delivers (the khefs have already chosen the loudest few), mixed. A voice that
+  has been silent for five seconds is forgotten.
+- **A bot** (`apps/bot`) is a whole participant with a made-up voice and ears: the same
+  node, encoder, decoders and `Call` as an application with a sound card. It can say
+  whose pitch is in what it was given to play, so a room of bots checks the product end to
+  end by what a listener would notice.
 - **The khef** (`khef_core::Khef`) holds a session and a link watch per neighbour and ties
   them to the flood and to top-N:
   - *Control*: an object that arrives is handed up to the node's control logic, which

@@ -90,6 +90,8 @@ pub struct Status {
     pub roster: Vec<ParticipantId>,
     /// The nodes this one has a connection to.
     pub links: Vec<ParticipantId>,
+    /// Whose microphone each audio alias is, by the plan.
+    pub microphones: Vec<(u64, ParticipantId)>,
 }
 
 enum Command {
@@ -220,6 +222,11 @@ impl Engine {
     /// The next frame of someone's audio to play. `None` once the engine has stopped.
     pub async fn next_audio(&mut self) -> Option<AudioIn> {
         self.audio.recv().await
+    }
+
+    /// The next frame to play if one is waiting; never waits.
+    pub fn try_next_audio(&mut self) -> Option<AudioIn> {
+        self.audio.try_recv().ok()
     }
 
     /// Stop the node: close its endpoint and every connection.
@@ -532,6 +539,22 @@ impl<E: Endpoint> Run<E> {
                     .collect()
             }),
             links: self.links.keys().cloned().collect(),
+            microphones: self.node.plan().map_or_else(Vec::new, |plan| {
+                let mut microphones: Vec<(u64, ParticipantId)> = plan
+                    .roster
+                    .iter()
+                    .flat_map(|member| {
+                        let id = participant_id(&member.key);
+                        member
+                            .tracks
+                            .iter()
+                            .filter(|assigned| assigned.track.audio)
+                            .map(move |assigned| (assigned.alias, id.clone()))
+                    })
+                    .collect();
+                microphones.sort();
+                microphones
+            }),
         };
         self.status.send_if_modified(|held| {
             if *held == status {
