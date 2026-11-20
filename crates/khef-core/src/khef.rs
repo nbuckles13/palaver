@@ -25,6 +25,7 @@ use crate::{
     Action, Dedupe, Event, Flood, LinkWatch, LinkWatchConfig, Offer, Role, Session, StreamId,
     StreamKind, TopN, TopNConfig,
 };
+use core::ops::Range;
 use palaver_moq_wire::{
     Datagram, FullTrackName, Kvp, Namespace, ObjectBody, PROPERTY_AUDIO_LEVEL, Setup, Value,
     encode_kvps, int_property,
@@ -103,6 +104,10 @@ pub struct AudioOut<N> {
     pub alias: u64,
     /// The frame counter.
     pub group: u64,
+    /// The `audio_level` the packet carries.
+    pub level: u8,
+    /// Where the encoded frame lies in the datagram, for a client that is to play it.
+    pub payload: Range<usize>,
 }
 
 struct Link {
@@ -393,6 +398,7 @@ impl<N: Ord + Clone> Khef<N> {
             alias,
             group,
             properties,
+            payload,
             ..
         } = link.session.on_datagram(datagram)
         else {
@@ -411,7 +417,9 @@ impl<N: Ord + Clone> Khef<N> {
             .ok()
             .flatten()
             .unwrap_or(0);
-        self.route(Some(peer), alias, group, level, now)
+        // The payload is the last thing in a datagram.
+        let payload = datagram.len().saturating_sub(payload.len())..datagram.len();
+        self.route(Some(peer), alias, group, level, payload, now)
     }
 
     /// The node's own client produced an audio frame. Appends the datagram to `out` and says
@@ -450,7 +458,8 @@ impl<N: Ord + Clone> Khef<N> {
             out.truncate(start);
             return None;
         }
-        self.route(None, alias, group, level, now)
+        let payload = out.len().saturating_sub(payload.len())..out.len();
+        self.route(None, alias, group, level, payload, now)
     }
 
     /// Decide where a packet of `alias` goes: every tree link but the one it came in on,
@@ -461,6 +470,7 @@ impl<N: Ord + Clone> Khef<N> {
         alias: u64,
         group: u64,
         level: u64,
+        payload: Range<usize>,
         now: Timestamp,
     ) -> Option<AudioOut<N>> {
         if !self.dedupe.accept(&alias, group, 0) {
@@ -487,6 +497,8 @@ impl<N: Ord + Clone> Khef<N> {
             for_client,
             alias,
             group,
+            level,
+            payload,
         })
     }
 

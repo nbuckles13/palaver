@@ -254,6 +254,13 @@ impl Net {
         let Some(out) = out else {
             return;
         };
+        // Wherever a packet is, the khef says where the frame lies in it: every speaker's
+        // frame is 80 bytes of its own number.
+        assert_eq!(
+            bytes.get(out.payload.clone()),
+            Some(&[out.alias as u8; 80][..]),
+            "at node {at_node}"
+        );
         if out.for_client {
             self.nodes
                 .get_mut(&at_node)
@@ -289,6 +296,7 @@ impl Net {
             now,
         );
         assert!(out.is_some(), "node {node} has no audio track in its plan");
+        assert_eq!(out.as_ref().map(|o| o.level), Some(level));
         self.carry_audio(node, out, bytes.clone());
         bytes
     }
