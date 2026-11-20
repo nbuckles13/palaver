@@ -104,6 +104,9 @@ K_auth  = HKDF(root, "auth")                 → never published; input to a PAK
   neighbours (the introducer function) are added with NAT traversal.
 - **Derivations**: SHA-256 and HKDF. The meeting tag is an HKDF output of the meeting secret;
   a participant id is the first 16 bytes of the SHA-256 of the node's public key.
+  The tag is 16 bytes of HKDF-SHA-256 with no salt and the label `palaver meeting tag v1`.
+  Signatures are Ed25519, verified strictly, so that every node agrees on what verifies.
+  These live in `net` (`identity`); the sans-IO crates take them through traits.
 - **Rendezvous** is pluggable and merged: invite ticket (as above), mDNS/LAN,
   mainline DHT under `K_topic`, optionally Nostr relays or a public MoQ relay network.
 - **Reachability**: public STUN-like address discovery, port mapping, IPv6, hole punching with
@@ -551,6 +554,14 @@ A **profile** of MoQT, deliberately small:
   Introduction is done by members over the control tracks, with iroh-relay as the helper and
   fallback (spike 1); quinn as fallback; behind a trait that offers request streams, unidirectional
   streams and datagrams.
+  - **What every transport promises** (`net::transport`): a connection is to a key, and
+    addresses are only hints; a stream delivers its bytes in order and then says whether it
+    was finished or reset; a datagram arrives whole or not at all, and is dropped rather
+    than queued when the path cannot take it; a close is final, is seen by both ends, and
+    ends everything waiting on the connection; a writer waits when the reader is behind.
+  - **The in-memory transport** (`net::memory`) keeps those promises with channels, for
+    running real nodes against each other in one process. It has no delay or loss and no
+    path that goes quiet without closing; those are the simulator's.
 - **The node** (`palaver_node::Node`) owns the khef and the control logic, which do not know
   of each other. Control objects go up from the khef to be checked and come down to be
   flooded; an adopted plan is carried out (dial planned peers, tell the khef where audio
