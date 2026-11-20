@@ -61,6 +61,11 @@ port-restricted filtering (typical home router); "sym" = a different random port
 
 ## Recommendation
 
+**Superseded 2026-11-20: quinn, with no relay.** When iroh was added to the product it
+took the dependency tree from 65 packages to 379 and needed licence and advisory
+exceptions; quinn takes it to 112 with none. See design sections 3 (Reachability) and 12
+(Transport). What follows is the earlier reasoning, kept for the record.
+
 **Revised 2026-11-16: use iroh with a public or self-hosted iroh-relay enabled by default (URL
 list configurable), and do introduction ourselves over the control tracks when a reachable
 member exists.** Keep it behind the transport trait with quinn as the fallback. Not embedding an

@@ -8,7 +8,8 @@ Terms: a **node** is one running instance (app or headless). A node contains a *
 **edge khef** for its own client; the conductor also uses some as **transit khefs** ("hubs").
 One node at a time holds the **conductor** role. An **iroh-relay** is the separate, optional
 connection helper from the iroh project (STUN/TURN-like, not MoQ); "relay" alone is not used
-for either. MoQT = Media over QUIC Transport; facts about it
+for either. (iroh is no longer the transport, see section 12; where this document still
+speaks of an iroh-relay path it means a relayed path, should one ever be added.) MoQT = Media over QUIC Transport; facts about it
 are from draft-ietf-moq-transport-23 unless noted (see [archive/moq-evaluation.md](archive/moq-evaluation.md)).
 
 Scope: **25–50 participants**, single conductor.
@@ -109,11 +110,26 @@ K_auth  = HKDF(root, "auth")                 → never published; input to a PAK
   These live in `net` (`identity`); the sans-IO crates take them through traits.
 - **Rendezvous** is pluggable and merged: invite ticket (as above), mDNS/LAN,
   mainline DHT under `K_topic`, optionally Nostr relays or a public MoQ relay network.
-- **Reachability**: public STUN-like address discovery, port mapping, IPv6, hole punching with
-  members as introducers. An **iroh-relay** (enabled by default, URL list configurable) covers
-  what members cannot: first contact when no member is publicly reachable, and a last-resort
-  path for pairs that cannot punch. Its path is QUIC tunnelled over TCP, so it is poor for
-  media; a headless Palaver node on a reachable machine is the server-free alternative.
+- **Reachability** (decided 2026-11-20: quinn, not iroh; see section 12). No relay server
+  is part of the product. What gets two nodes connected, in the order it is being built:
+  1. *Direct*: a node on a LAN, with a public address, or behind a router with a port
+     mapped is dialled at its address.
+  2. *Punching inside a meeting*: each node reports the public address it observes for
+     each neighbour. When the plan pairs two nodes, both dial each other at once, so each
+     router sees an outgoing packet before the other's arrive.
+  3. *STUN from the node's own socket*: a node learns its public address before it knows
+     anyone, for the ticket and its report; and by asking two servers it can tell that its
+     router gives a different port per destination (symmetric NAT), where punching fails.
+  4. *The ticket comes back*: when nobody in a meeting is reachable from outside, a joiner
+     adds itself to the ticket and sends it back the way it came; a member pastes it and
+     dials. Needed once per joiner (to reach one member; the rest follow by step 2).
+     Members on one network (same public address) need only one entry between them.
+  5. *Rendezvous* (phase 4) does step 4 without the pasting.
+  - **Not covered**: a node behind a symmetric NAT can connect only to a node that is
+    reachable without punching, and then talks to the others through it. If there is no
+    such node, it cannot join. A headless Palaver node on a reachable machine is the
+    answer we offer; a public TURN service or an iroh-relay behind a build feature are
+    the alternatives if that proves too little.
 - **Admission**: every new connection runs a balanced PAKE (CPace or SPAKE2) on `K_auth`, bound
   to both transport keys, before any MoQ message. Node identity is a per-meeting Ed25519 key.
 - **Host**: the meeting creator. Host is a roster attribute independent of the conductor role and
@@ -572,10 +588,18 @@ A **profile** of MoQT, deliberately small:
   are ignored by older ones, and the lower of the two versions is the one in force. The number
   is self-assigned: the draft's setup option registry has no private-use range and asks for a
   provisional registration, which we should request before interoperating with others.
-- **Transport**: iroh; always QUIC end to end, over a direct UDP path or an iroh-relay path.
-  Introduction is done by members over the control tracks, with iroh-relay as the helper and
-  fallback (spike 1); quinn as fallback; behind a trait that offers request streams, unidirectional
-  streams and datagrams.
+- **Transport**: QUIC, by quinn, behind a trait that offers request streams, unidirectional
+  streams and datagrams (`net::quic`). One UDP socket per node, for dialling and accepting.
+  - **A connection is to a key.** Each end presents its Ed25519 key in the TLS 1.3
+    handshake as a raw public key (RFC 7250, no certificates) and signs the handshake with
+    it. The dialler accepts only the key it meant to reach; the accepter takes any key and
+    learns which, leaving who may join to admission.
+  - **Why not iroh** (which spike 1 recommended for its relay): it took the dependency
+    tree from 65 packages to 379 (an HTTP client, a DNS resolver, a relay client, crates
+    for browsers), needed two licence exceptions and an advisory exception, and rests on
+    its makers' own fork of quinn. quinn takes the tree to 112 with no exceptions. What
+    iroh gave beyond quinn was dialling by key (now ours, as above), hole punching (ours
+    by design: section 3) and the relay, which is a server and a poor path for media.
   - **What every transport promises** (`net::transport`): a connection is to a key, and
     addresses are only hints; a stream delivers its bytes in order and then says whether it
     was finished or reset; a datagram arrives whole or not at all, and is dropped rather
@@ -783,7 +807,8 @@ queue, link and fault model, invariants checked as it runs); see `docs/spikes/05
 ## 18. Risks
 
 1. **Rate adaptation** across multi-hop khefs; least proven part. Dedicated spike.
-2. **First-contact NAT traversal** without an operated server (iroh-relay is the fallback).
+2. **First-contact NAT traversal** without an operated server (section 3, Reachability; a
+   symmetric NAT with no reachable member is not covered).
 3. **MoQ draft churn** (five drafts in six months; RFC unlikely before mid/late 2027). Contained
    by `moq-wire` and by conformance being an edge property.
 4. **Uplink limits** on residential transit khefs at 25–50 participants.
@@ -807,7 +832,7 @@ queue, link and fault model, invariants checked as it runs); see `docs/spikes/05
 | Local client↔khef | In-memory MoQ-formatted messages; no sockets, QUIC or crypto |
 | Network edge | Conformant to the pinned draft for our profile |
 | Draft / codec | Draft 22; our own codec in `moq-wire` for our profile; `moqtap-codec` as the test oracle |
-| Transport | iroh; members introduce, iroh-relay as helper and last-resort path; quinn as fallback |
+| Transport | quinn; keys proven in the TLS handshake; members introduce; no relay server |
 | Link preference | Direct, then via a transit khef, then iroh-relay path (media only if nothing else) |
 | Naming | **khef** = the MoQ relay in each node; **iroh-relay** = iroh's connection helper |
 | Infrastructure | Public STUN-like services fine; iroh-relay as last resort; public MoQ relay network later |

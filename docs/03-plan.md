@@ -95,7 +95,7 @@ a machine is killed and the meeting recovers in under a second.
   guesses without dialling. Either keep those from outsiders or accept that Argon2id is
   their only protection.
 - Meeting id + password: Argon2id/HKDF, PAKE admission; mDNS and DHT rendezvous;
-  member-as-introducer punching; iroh-relay fallback; headless node as a reachable khef.
+  member-as-introducer punching; headless node as a reachable khef.
 - Simulcast; priority shedding, congestion marking, rendition switching per the spike; uplink
   adaptation; caps and per-track routes; hardware H.264 on the remaining platforms.
 - Audio adaptation to loss: turn Opus DRED on (and FEC off, or the bitrate up) on links that
@@ -131,6 +131,12 @@ password, surviving khef and conductor churn.
 ## Backlog
 
 Topics that need a design before they can be scheduled.
+
+### Bots that say words
+
+For manual testing by ear, a bot that says something recognisable ("alpha, alpha, alpha")
+rather than a tone with a rhythm, so a person listening can tell bots apart and hear
+clipping. Needs recorded or synthesised speech as a source.
 
 ### Post-mortem debugging of packet flows
 
