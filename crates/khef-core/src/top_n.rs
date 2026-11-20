@@ -9,16 +9,23 @@
 //! 2. Rank the candidates by current level. Each selected track that is among the N loudest
 //!    and at or above the minimum level has its "last ranked in" time refreshed.
 //! 3. If the packet's track is not selected, is among the N loudest and is at or above the
-//!    minimum level, it replaces the quietest selected track whose time is older than the
-//!    hold (ties: the one refreshed longest ago). If no selected track is that old, the
-//!    packet is not forwarded.
+//!    minimum level, it replaces the quietest selected track that is not protected (ties:
+//!    the one refreshed longest ago). A selected track is protected while its time is
+//!    within the hold **and it is still arriving**; one that has missed two packets is not.
+//!    If every selected track is protected, the packet is not forwarded.
+//!
+//! The hold is for a speaker who is still talking: it stops a slot flapping between voices
+//! of similar loudness. It must not protect a track that has stopped arriving. Its speaker
+//! may have stopped, in which case the next voice should not wait; or the khef before this
+//! one dropped it for another, in which case holding its slot here would add this khef's
+//! hold to that one's, and again at every khef after.
 //!
 //! Free slots are filled by the first tracks seen. Slots are never emptied, so when everyone
 //! is silent the set does not change. The rule runs only on packet arrival: no timers.
 //!
 //! Fast in, slow out: a new speaker gets in on their first speech packet as long as some
-//! holder has not ranked in for the hold time; a holder leaves only when someone needs the
-//! slot.
+//! holder has stopped, or has not ranked in for the hold time; a holder leaves only when
+//! someone needs the slot.
 
 use palaver_proto::Timestamp;
 use std::collections::BTreeMap;
@@ -168,16 +175,26 @@ impl<K: Ord + Clone> TopN<K> {
         if !speaking || !self.in_loudest(&track, now) {
             return false;
         }
-        let victim = self
-            .selected
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| {
-                slot.ranked_in
-                    .is_none_or(|at| now.saturating_since(at) >= self.config.hold)
-            })
-            .min_by_key(|(_, slot)| (self.level_of(&slot.track, now), slot.ranked_in))
-            .map(|(index, _)| index);
+        let victim =
+            self.selected
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| {
+                    // Held for a while after it last ranked in, but only while it is still
+                    // arriving. A track that has missed two packets is no longer protected:
+                    // either its speaker stopped, or a khef before this one dropped it for
+                    // another, and holding its slot here would only add this khef's hold to
+                    // that one's.
+                    let held = slot
+                        .ranked_in
+                        .is_some_and(|at| now.saturating_since(at) < self.config.hold);
+                    let arriving = self.heard.get(&slot.track).is_some_and(|heard| {
+                        now.saturating_since(heard.at) < self.config.decay_start
+                    });
+                    !(held && arriving)
+                })
+                .min_by_key(|(_, slot)| (self.level_of(&slot.track, now), slot.ranked_in))
+                .map(|(index, _)| index);
         match victim.and_then(|index| self.selected.get_mut(index)) {
             Some(slot) => {
                 *slot = Slot {
@@ -282,14 +299,57 @@ mod tests {
     }
 
     #[test]
-    fn the_hold_protects_recent_speakers_then_expires() {
+    fn the_hold_protects_a_speaker_who_is_still_talking() {
+        let mut t = three_talkers();
+        // A fourth, louder voice joins at 1010 ms while all three keep talking. It ranks in
+        // and track 3 (the last of three equals) no longer does, but 3 is held for 250 ms
+        // from when it last ranked in, at 1000 ms.
+        let mut admitted = None;
+        for ms in (0..=1400).step_by(20) {
+            for track in 1..=3 {
+                feed(&mut t, track, SPEECH, ms * MS);
+            }
+            if ms >= 1000 && feed(&mut t, 4, 100, (ms + 10) * MS) && admitted.is_none() {
+                admitted = Some(ms + 10);
+            }
+        }
+        assert_eq!(admitted, Some(1250));
+        assert_eq!(selected(&t), [1, 2, 4]);
+    }
+
+    #[test]
+    fn a_speaker_who_has_stopped_is_not_protected() {
         let mut t = three_talkers();
         keep_sending(&mut t, &[1, 2, 3], SPEECH, 20 * MS, 1000 * MS);
-        // All three stop. A fourth voice arrives 100 ms later: still inside the hold.
-        assert!(!feed(&mut t, 4, SPEECH, 1100 * MS));
-        // ...and gets in once a holder has not ranked in for 250 ms.
-        assert!(!feed(&mut t, 4, SPEECH, 1240 * MS));
-        assert!(feed(&mut t, 4, SPEECH, 1260 * MS));
+        // All three stop at 1000 ms. One packet interval later a gap is not yet a stop...
+        assert!(!feed(&mut t, 4, SPEECH, 1030 * MS));
+        // ...but two missed packets are: the new voice is in on its next packet, with no
+        // wait for the hold.
+        assert!(feed(&mut t, 4, SPEECH, 1050 * MS));
+    }
+
+    #[test]
+    fn a_khef_does_not_add_its_own_hold_to_the_one_before_it() {
+        // What a khef further along the tree sees when the khef before it switches from
+        // track 4 to track 3: 4's packets stop and 3's start, in the same instant.
+        let mut t = top();
+        for ms in (0..1000).step_by(20) {
+            for track in [1, 2, 4] {
+                feed(&mut t, track, SPEECH, ms * MS);
+            }
+        }
+        let mut admitted = None;
+        for ms in (1000..1400).step_by(20) {
+            for track in [1, 2] {
+                feed(&mut t, track, SPEECH, ms * MS);
+            }
+            if admitted.is_none() && feed(&mut t, 3, SPEECH, ms * MS) {
+                admitted = Some(ms);
+            }
+        }
+        // Two packet intervals, not the 250 ms hold.
+        assert_eq!(admitted, Some(1020));
+        assert_eq!(selected(&t), [1, 2, 3]);
     }
 
     #[test]

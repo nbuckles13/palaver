@@ -627,6 +627,53 @@ fn only_the_loudest_n_cross_a_link() {
 }
 
 #[test]
+fn when_more_than_n_start_together_the_wait_for_a_slot_is_paid_once_not_at_every_khef() {
+    // Four talkers on a hub, 10; listeners 20, 30 and 40 in a line behind it. Three tracks
+    // per link. All four start in the same instant, the quietest (4) being heard first, so
+    // it takes a slot and the third loudest (3) has to wait for it.
+    let mut net = Net::new(&[10, 1, 2, 3, 4, 20, 30, 40]);
+    let edges = [
+        (10, 1),
+        (10, 2),
+        (10, 3),
+        (10, 4),
+        (10, 20),
+        (20, 30),
+        (30, 40),
+    ];
+    for (a, b) in edges {
+        net.link(a, b);
+    }
+    net.audio_tree(&edges, 3);
+    for frame in 0..100u64 {
+        net.now = at(frame * 20);
+        for (speaker, level) in [(4, 40), (1, 90), (2, 85), (3, 80)] {
+            net.speak(speaker, frame, level);
+        }
+    }
+    let missed = |net: &Net, listener: Id| {
+        100 - net.played(listener).iter().filter(|(a, _)| *a == 3).count()
+    };
+    // At the hub the quiet one is held for 250 ms after it last ranked in: 13 frames. Every
+    // selector after that sees 4 stop, and gives its slot to 3 once 4 has missed two
+    // packets. Those two packets are the same two for all of them, so the wait is two
+    // frames more in all, however many khefs follow. (It was thirteen more at each.)
+    let missed = [missed(&net, 20), missed(&net, 30), missed(&net, 40)];
+    assert_eq!(missed, [15, 15, 15]);
+    // After that every listener hears exactly the loudest three.
+    for listener in [20, 30, 40] {
+        let late: Vec<u64> = net
+            .played(listener)
+            .iter()
+            .filter(|(_, frame)| *frame >= 50)
+            .map(|(alias, _)| *alias)
+            .collect();
+        assert_eq!(late.len(), 150, "node {listener}");
+        assert!(!late.contains(&4), "node {listener}");
+    }
+}
+
+#[test]
 fn audio_before_the_plan_or_outside_it_goes_nowhere() {
     let mut net = Net::new(&[1, 2]);
     net.link(1, 2);
