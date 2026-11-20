@@ -433,10 +433,19 @@ otherwise closed once the planned peerings are up.
   1. Rank the candidates by level. Each selected track among the N loudest *and* above the
      minimum level has its time refreshed.
   2. A track among the N loudest that is not selected, and is above the minimum level, replaces
-     the quietest selected track whose time is older than the **hold** (ties: the oldest). If no
-     selected track is that old, it is not added.
+     the quietest selected track that is not protected (ties: the oldest). A selected track
+     is protected while its time is within the **hold** and it is still arriving; one that
+     has missed two packets is not. If every selected track is protected, it is not added.
+  - **The hold is for a speaker who is still talking**, to stop a slot flapping between
+    voices of similar loudness. It does not protect a track that has stopped arriving:
+    either its speaker stopped, and the next voice should not wait; or the khef before this
+    one dropped it for another, and holding its slot would add this khef's hold to that
+    one's at every hop. Measured with four talkers starting together and N = 3: the third
+    loudest is 300 ms late for every listener, however many khefs away (250 ms of hold where
+    the talkers meet, then 40 ms once for the dropped track to be seen to have stopped).
+    Before this rule it was 260 ms more at every khef.
   - **Fast in, slow out**: entry happens on the first speech packet; a track leaves only when
-    someone else needs the slot and it has not ranked in for the hold time. Slots are never
+    someone else needs the slot and it has stopped, or has not ranked in for the hold time. Slots are never
     emptied, so when everyone is silent the set does not change, and quiet background noise is
     consistently in or out.
   - No timers: the rule runs on packet arrival, so it adds no delay.
