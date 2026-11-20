@@ -385,7 +385,7 @@ fn a_speaker_is_heard_by_everyone_else_over_the_plans_tree() {
     let mut m = gathered(8, 47);
     settle(&mut m, 3 * SECOND);
     let before = m.stats().audio_sent;
-    talk(&mut m, 3, 0, 50, 70);
+    talk(&mut m, 3, 0, 50, 100);
     m.run_for(Duration::from_millis(200));
     for listener in [0, 1, 2, 4, 5, 6, 7] {
         assert_eq!(heard(&m, listener, 3), 50, "node {listener}");
@@ -410,8 +410,8 @@ fn audio_crosses_the_three_node_line_through_the_middle() {
     m.run_for(SECOND);
     m.join(2, 1);
     settle(&mut m, 3 * SECOND);
-    talk(&mut m, 0, 0, 25, 70);
-    talk(&mut m, 2, 0, 25, 70);
+    talk(&mut m, 0, 0, 25, 100);
+    talk(&mut m, 2, 0, 25, 100);
     m.run_for(Duration::from_millis(200));
     assert_eq!(heard(&m, 2, 0), 25);
     assert_eq!(heard(&m, 0, 2), 25);
@@ -426,13 +426,13 @@ fn a_node_cannot_speak_before_the_plan_lists_it_and_can_soon_after_joining() {
     assert!(!m.speak(9, 0, 70), "not in any plan yet");
     let took = settle(&mut m, 2 * SECOND);
     assert!(took <= Duration::from_millis(300), "took {took:?}");
-    talk(&mut m, 9, 1, 10, 70);
+    talk(&mut m, 9, 1, 10, 100);
     m.run_for(Duration::from_millis(200));
     for listener in 0..4 {
         assert_eq!(heard(&m, listener, 9), 10, "node {listener}");
     }
     // And the joiner hears the others.
-    talk(&mut m, 0, 0, 10, 70);
+    talk(&mut m, 0, 0, 10, 100);
     m.run_for(Duration::from_millis(200));
     assert_eq!(heard(&m, 9, 0), 10);
 }
@@ -444,7 +444,7 @@ fn with_more_talkers_than_n_a_listener_hears_the_loudest_three() {
     assert_eq!(m.settled().unwrap().audio_top_n, 3);
     // Four talk at once for two seconds; node 4 is the quietest.
     for frame in 0..100 {
-        for (speaker, level) in [(1, 90), (2, 85), (3, 80), (4, 40)] {
+        for (speaker, level) in [(1, 110), (2, 105), (3, 100), (4, 85)] {
             assert!(m.speak(speaker, frame, level));
         }
         m.run_for(Duration::from_millis(20));
@@ -498,9 +498,9 @@ fn when_a_node_in_the_middle_crashes_audio_resumes_once_the_tree_is_rejoined() {
     let middle = (2..12).find(|n| degree(*n) > 1).unwrap();
     let speaker = 1;
     // The speaker talks throughout: one second before, and four after.
-    talk(&mut m, speaker, 0, 50, 70);
+    talk(&mut m, speaker, 0, 50, 100);
     m.crash(middle);
-    talk(&mut m, speaker, 50, 200, 70);
+    talk(&mut m, speaker, 50, 200, 100);
     m.run_for(Duration::from_millis(200));
     m.settled().unwrap();
     assert_eq!(m.stats().sessions_closed, 0);

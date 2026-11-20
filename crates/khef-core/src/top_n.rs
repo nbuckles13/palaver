@@ -39,7 +39,8 @@ pub struct TopNConfig {
     pub n: usize,
     /// How long after entering the set a track cannot be replaced.
     pub hold: Duration,
-    /// Levels below this never cause a switch.
+    /// Levels below this never cause a switch. On the scale of design section 8, 80 is
+    /// -47 dBFS: over a quiet room, under speech.
     pub min_level: u8,
     /// A level is taken at face value for this long after its packet (two packet intervals).
     pub decay_start: Duration,
@@ -53,7 +54,7 @@ impl Default for TopNConfig {
         Self {
             n: 3,
             hold: Duration::from_millis(250),
-            min_level: 30,
+            min_level: 80,
             decay_start: Duration::from_millis(40),
             decay_end: Duration::from_millis(100),
         }
@@ -210,8 +211,9 @@ mod tests {
     fn feed(t: &mut TopN<u32>, track: u32, level: u8, micros: u64) -> bool {
         t.on_packet(track, level, Timestamp::from_micros(micros))
     }
-    const SPEECH: u8 = 80;
-    const QUIET: u8 = 10;
+    // On the scale of design section 8: ordinary speech, and a quiet room.
+    const SPEECH: u8 = 100;
+    const QUIET: u8 = 60;
 
     fn top() -> TopN<u32> {
         TopN::new(TopNConfig::default())
@@ -282,10 +284,10 @@ mod tests {
         // hold rather than cut it off after one packet.
         let mut admitted = None;
         for ms in (0..=400).step_by(20) {
-            for (track, level) in [(4, 40), (1, 90), (2, 85)] {
+            for (track, level) in [(4, 85), (1, 110), (2, 105)] {
                 feed(&mut t, track, level, ms * MS);
             }
-            if feed(&mut t, 3, 80, ms * MS) && admitted.is_none() {
+            if feed(&mut t, 3, 100, ms * MS) && admitted.is_none() {
                 admitted = Some(ms);
             }
         }
@@ -303,7 +305,7 @@ mod tests {
             for track in 1..=3 {
                 feed(&mut t, track, SPEECH, ms * MS);
             }
-            if feed(&mut t, 4, 100, (ms + 10) * MS) && admitted.is_none() {
+            if feed(&mut t, 4, 110, (ms + 10) * MS) && admitted.is_none() {
                 admitted = Some(ms + 10);
             }
         }
@@ -316,7 +318,7 @@ mod tests {
         let mut t = three_talkers();
         keep_sending(&mut t, &[1, 2, 3], SPEECH, 20 * MS, 1000 * MS);
         // All three are still talking. A louder voice gets in on its first packet.
-        assert!(feed(&mut t, 4, 100, 1010 * MS));
+        assert!(feed(&mut t, 4, 110, 1010 * MS));
         assert_eq!(selected(&t), [1, 2, 4]);
     }
 
@@ -326,9 +328,9 @@ mod tests {
         // 1 and 2 talk steadily. 3 and 4 are close, and which is louder flips every packet.
         for frame in 0..100u64 {
             let now = frame * 20 * MS;
-            feed(&mut t, 1, 90, now);
-            feed(&mut t, 2, 90, now);
-            let (three, four) = if frame % 2 == 0 { (80, 70) } else { (70, 80) };
+            feed(&mut t, 1, 110, now);
+            feed(&mut t, 2, 110, now);
+            let (three, four) = if frame % 2 == 0 { (100, 90) } else { (90, 100) };
             feed(&mut t, 3, three, now);
             feed(&mut t, 4, four, now);
         }
@@ -353,17 +355,17 @@ mod tests {
         // 4 at 400 ms, and then 4's to 3 when 4's hold ends at 660 ms.
         let mut t = top();
         for ms in (0..400).step_by(20) {
-            for (track, level) in [(1, 90), (2, 85), (5, 50)] {
+            for (track, level) in [(1, 110), (2, 105), (5, 90)] {
                 feed(&mut t, track, level, ms * MS);
             }
         }
         for ms in (400..660).step_by(20) {
-            for (track, level) in [(1, 90), (2, 85), (4, 60)] {
+            for (track, level) in [(1, 110), (2, 105), (4, 95)] {
                 assert!(feed(&mut t, track, level, ms * MS));
             }
         }
         // 4 entered here when it entered there, so its hold is over here too.
-        for (track, level) in [(1, 90), (2, 85), (3, 80)] {
+        for (track, level) in [(1, 110), (2, 105), (3, 100)] {
             assert!(feed(&mut t, track, level, 660 * MS));
         }
         assert_eq!(selected(&t), [1, 2, 3]);
@@ -404,7 +406,7 @@ mod tests {
         let mut t = three_talkers();
         // 1 is silent, 2 murmurs below the minimum, 3 keeps talking.
         keep_sending(&mut t, &[1], QUIET, 20 * MS, 1000 * MS);
-        keep_sending(&mut t, &[2], 25, 20 * MS, 1000 * MS);
+        keep_sending(&mut t, &[2], 75, 20 * MS, 1000 * MS);
         keep_sending(&mut t, &[3], SPEECH, 20 * MS, 1000 * MS);
         assert!(feed(&mut t, 4, SPEECH, 1005 * MS));
         assert_eq!(selected(&t), [2, 3, 4]);

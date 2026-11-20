@@ -464,9 +464,8 @@ otherwise closed once the planned peerings are up.
     then decays linearly to zero at 100 ms, so a crashed talker or a lost end-of-speech packet
     cannot hold a slot. Computed on arrival of any packet; still no timers.
   - Hold time (250 ms, from spike 4) and minimum level are profile constants.
-  - **The minimum level (30) predates the scale above** and on it means -97 dBFS, which
-    nothing is below. It needs a value between room noise and speech (around 80); to be set
-    when it can be listened to.
+  - **The minimum level is 80** (-47 dBFS): over a quiet room, under speech. Like the hold
+    time it has not been tuned by ear.
   - Known gap: a word whose first frame is below the minimum level loses that 20 ms frame.
     Possible fix: khefs keep the latest packet of each unselected track and send it first.
 - **Consistency is eventual.** Khefs nearer a new speaker switch first; the change crosses the

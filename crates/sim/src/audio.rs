@@ -180,6 +180,9 @@ pub struct Spurt {
 /// Turns a script of speech into packets, the way an Opus sender behaves: a packet every
 /// 20 ms while speaking (varying in level, with dips between syllables), a few quiet packets
 /// after speech ends, then a quiet packet every 400 ms.
+///
+/// Levels are on the scale of design section 8 (127 is full scale, a step is a decibel):
+/// speech between 83 and 118, a quiet room between 50 and 70.
 pub struct Voices {
     rng: Rng,
     base: Vec<u8>,
@@ -193,9 +196,11 @@ impl Voices {
     pub fn new(participants: u32, seed: u64) -> Self {
         let mut rng = Rng::new(seed);
         let base = (0..participants)
-            .map(|_| 60 + rng.below(31) as u8)
+            .map(|_| 95 + rng.below(16) as u8)
             .collect();
-        let floor = (0..participants).map(|_| 5 + rng.below(21) as u8).collect();
+        let floor = (0..participants)
+            .map(|_| 50 + rng.below(21) as u8)
+            .collect();
         Self {
             rng,
             base,
@@ -224,9 +229,9 @@ impl Voices {
             if let Some(spurt) = spurt {
                 let wobble = self.rng.below(17) as u8;
                 let level = if now == spurt.start {
-                    base - 15 // a word's first frame is weaker
+                    base - 12 // a word's first frame is weaker
                 } else if self.rng.chance(120_000) {
-                    20 // a dip between syllables, below the minimum level
+                    70 // a dip between syllables, below the minimum level
                 } else {
                     base - 8 + wobble
                 };
