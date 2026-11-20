@@ -652,13 +652,13 @@ fn when_more_than_n_start_together_the_wait_for_a_slot_is_paid_once_not_at_every
         for (speaker, level) in [(1, 90), (2, 85), (5, 50)] {
             net.speak(speaker, frame, level);
         }
-        if frame >= 10 {
+        if frame >= 20 {
             net.speak(4, frame, 60);
             net.speak(3, frame, 80);
         }
     }
     let missed =
-        |net: &Net, listener: Id| 90 - net.played(listener).iter().filter(|(a, _)| *a == 3).count();
+        |net: &Net, listener: Id| 80 - net.played(listener).iter().filter(|(a, _)| *a == 3).count();
     // 4 cannot be replaced for 250 ms after it took the slot: 13 frames. It took the slot at
     // every selector on the way at the same moment, so when the hub gives it to 3, each of
     // the others does too, on the same packet.
