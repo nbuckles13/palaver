@@ -1,6 +1,6 @@
 [package]
 name = "palaver-net"
-description = "Transport: QUIC (iroh) and in-memory links behind one trait; admission handshake."
+description = "Transport: QUIC (iroh) and in-memory links behind one trait; node identity; admission handshake."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-palaver-moq-wire = { workspace = true }
 palaver-proto = { workspace = true }
+bytes = { workspace = true }
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "time", "test-util"] }
 
 [lints]
 workspace = true
