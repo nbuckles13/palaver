@@ -427,22 +427,25 @@ otherwise closed once the planned peerings are up.
   Opus in-band FEC and DRED are planned from the start. One object per group, in datagrams.
 - **Selection rule** (per khef, separately for each overlay link and for its own client; the
   candidates for a link are the tracks not learned from that link). The khef holds a selected
-  set of N tracks, each with the time it entered the set. On each packet arrival, with every
+  set of N tracks, each with the time it took its slot from another. On each packet arrival, with every
   track's level taken from its latest packet:
   1. Rank the candidates by level.
   2. A track among the N loudest that is not selected, and is above the minimum level, replaces
      the lowest-ranked selected track that is not itself among the N loudest and is past its
      hold. If there is none, it is not added.
-  - **The hold** runs from the moment a track enters the set: for that long it cannot be
-    replaced. It stops a slot flapping between voices of similar loudness, and it is all that
-    slows a switch: once it has passed, a track that no longer ranks goes the instant someone
-    who does needs the slot.
-  - **Khefs along a path do not add to each other's hold.** A track enters the set at each
+  - **The hold** runs from the moment a track takes another's slot: for that long it cannot
+    be replaced in turn. It stops a slot flapping between voices of similar loudness, and it
+    is all that slows a switch: once it has passed, a track that no longer ranks goes the
+    instant someone who does needs the slot.
+  - **A track that filled a free slot has no hold**: it displaced nobody. So when more than
+    N start together, the loudest N are through from their first packets, whatever order
+    they were heard in.
+  - **Khefs along a path do not add to each other's hold.** A track takes a slot at each
     of them at the same moment (give or take the link delay), so its hold ends at each
-    together. Measured with four talkers starting together and N = 3: the third loudest is
-    260 ms late for every listener, however many khefs away.
+    together. Measured with N = 3: a voice that has to wait out another's hold is 260 ms
+    late for every listener, however many khefs away.
   - **Fast in**: a speaker who ranks gets in on their first speech packet unless every track
-    that does not rank entered within the hold. Slots are never
+    that does not rank took its slot within the hold. Slots are never
     emptied, so when everyone is silent the set does not change, and quiet background noise is
     consistently in or out.
   - No timers: the rule runs on packet arrival, so it adds no delay.

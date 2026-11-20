@@ -628,15 +628,17 @@ fn only_the_loudest_n_cross_a_link() {
 
 #[test]
 fn when_more_than_n_start_together_the_wait_for_a_slot_is_paid_once_not_at_every_khef() {
-    // Four talkers on a hub, 10; listeners 20, 30 and 40 in a line behind it. Three tracks
-    // per link. All four start in the same instant, the quietest (4) being heard first, so
-    // it takes a slot and the third loudest (3) has to wait for it.
-    let mut net = Net::new(&[10, 1, 2, 3, 4, 20, 30, 40]);
+    // Talkers on a hub, 10; listeners 20, 30 and 40 in a line behind it. Three tracks per
+    // link. 1, 2 and 5 are talking. Then 4 and 3 start in the same instant, 4 being heard
+    // first: it is louder than 5 and takes its slot, and 3, louder still, has to wait out
+    // 4's hold.
+    let mut net = Net::new(&[10, 1, 2, 3, 4, 5, 20, 30, 40]);
     let edges = [
         (10, 1),
         (10, 2),
         (10, 3),
         (10, 4),
+        (10, 5),
         (10, 20),
         (20, 30),
         (30, 40),
@@ -647,16 +649,19 @@ fn when_more_than_n_start_together_the_wait_for_a_slot_is_paid_once_not_at_every
     net.audio_tree(&edges, 3);
     for frame in 0..100u64 {
         net.now = at(frame * 20);
-        for (speaker, level) in [(4, 40), (1, 90), (2, 85), (3, 80)] {
+        for (speaker, level) in [(1, 90), (2, 85), (5, 50)] {
             net.speak(speaker, frame, level);
         }
+        if frame >= 10 {
+            net.speak(4, frame, 60);
+            net.speak(3, frame, 80);
+        }
     }
-    let missed = |net: &Net, listener: Id| {
-        100 - net.played(listener).iter().filter(|(a, _)| *a == 3).count()
-    };
-    // The quiet one cannot be replaced for 250 ms after it entered: 13 frames. It entered
-    // every selector on the way at the same moment, so when the hub gives its slot to 3,
-    // each of the others does too, on the same packet.
+    let missed =
+        |net: &Net, listener: Id| 90 - net.played(listener).iter().filter(|(a, _)| *a == 3).count();
+    // 4 cannot be replaced for 250 ms after it took the slot: 13 frames. It took the slot at
+    // every selector on the way at the same moment, so when the hub gives it to 3, each of
+    // the others does too, on the same packet.
     let missed = [missed(&net, 20), missed(&net, 30), missed(&net, 40)];
     assert_eq!(missed, [13, 13, 13]);
     // After that every listener hears exactly the loudest three.

@@ -11,10 +11,12 @@
 //!    minimum level, it replaces the lowest-ranked selected track that is not itself among
 //!    the N loudest and is past its hold. If there is none, the packet is not forwarded.
 //!
-//! **The hold** runs from the moment a track enters the set: for that long it cannot be
-//! replaced. It is there to stop a slot flapping between voices of similar loudness, and it
-//! is all that slows a switch. Once it has passed, a track that no longer ranks goes the
-//! instant someone who does needs the slot.
+//! **The hold** runs from the moment a track takes another's slot: for that long it cannot
+//! be replaced in turn. It is there to stop a slot flapping between voices of similar
+//! loudness, and it is all that slows a switch. Once it has passed, a track that no longer
+//! ranks goes the instant someone who does needs the slot. A track that filled a free slot
+//! displaced nobody and has no hold, so when more than N start together the loudest N are
+//! through from their first packets, whatever order they were heard in.
 //!
 //! Because the hold is counted from entry, khefs along a path do not add to each other's:
 //! a track enters the set at each of them at the same moment (give or take the link delay),
@@ -34,7 +36,7 @@ use std::time::Duration;
 pub struct TopNConfig {
     /// How many tracks are selected.
     pub n: usize,
-    /// How long after entering the set a track cannot be replaced.
+    /// How long a track that replaced another cannot itself be replaced.
     pub hold: Duration,
     /// Levels below this never cause a switch.
     pub min_level: u8,
@@ -66,8 +68,8 @@ struct Heard {
 #[derive(Debug, Clone)]
 struct Slot<K> {
     track: K,
-    /// When the track entered the set. `None` for a track that filled a free slot without
-    /// speaking: it has no hold.
+    /// When the track took this slot from another. `None` for a track that filled a free
+    /// slot: it displaced nobody, so it has no hold.
     entered: Option<Timestamp>,
 }
 
@@ -144,17 +146,16 @@ impl<K: Ord + Clone> TopN<K> {
         if self.is_selected(&track) {
             return true;
         }
-        let speaking = level >= self.config.min_level;
         if self.selected.len() < self.config.n {
             self.selected.push(Slot {
                 track,
-                entered: speaking.then_some(now),
+                entered: None,
             });
             return true;
         }
 
         // Step 3: a newcomer needs to be speaking, to rank in, and to find a replaceable slot.
-        if !speaking || !self.in_loudest(&track, now) {
+        if level < self.config.min_level || !self.in_loudest(&track, now) {
             return false;
         }
         // The one to go is past its hold and no longer ranks. Taking a slot from a track
@@ -275,21 +276,38 @@ mod tests {
     }
 
     #[test]
-    fn a_track_that_has_just_entered_cannot_be_replaced_until_its_hold_is_over() {
-        let mut t = three_talkers();
-        // A louder voice arrives right behind them. All three entered at time 0, so none
-        // can go before 250 ms.
-        let mut admitted = None;
-        for ms in (0..=400).step_by(20) {
-            for track in 1..=3 {
-                feed(&mut t, track, SPEECH, ms * MS);
-            }
-            if feed(&mut t, 4, 100, (ms + 10) * MS) && admitted.is_none() {
-                admitted = Some(ms + 10);
+    fn when_more_than_n_start_together_the_loudest_n_are_through_at_once() {
+        let mut t = top();
+        // The quietest is heard first and fills a slot. It displaced nobody, so it has no
+        // hold, and the third loudest takes the slot on its own first packet.
+        assert!(feed(&mut t, 4, 40, 0));
+        assert!(feed(&mut t, 1, 90, 0));
+        assert!(feed(&mut t, 2, 85, 0));
+        assert!(feed(&mut t, 3, 80, 0));
+        assert!(!feed(&mut t, 4, 40, 20 * MS));
+        assert_eq!(selected(&t), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_track_that_took_a_slot_cannot_be_replaced_until_its_hold_is_over() {
+        let mut t = top();
+        feed(&mut t, 1, 100, 0);
+        feed(&mut t, 2, 100, 0);
+        feed(&mut t, 3, 80, 0);
+        // 4 is louder than 3 and takes its slot at 10 ms. From then on 3 is the louder of
+        // the two, but 4 cannot go before 260 ms.
+        assert!(feed(&mut t, 4, 90, 10 * MS));
+        let mut back = None;
+        for ms in (20..=400).step_by(20) {
+            feed(&mut t, 1, 100, ms * MS);
+            feed(&mut t, 2, 100, ms * MS);
+            feed(&mut t, 4, 90, ms * MS);
+            if feed(&mut t, 3, 95, ms * MS) && back.is_none() {
+                back = Some(ms);
             }
         }
-        assert_eq!(admitted, Some(250));
-        assert_eq!(selected(&t), [1, 2, 4]);
+        assert_eq!(back, Some(260));
+        assert_eq!(selected(&t), [1, 2, 3]);
     }
 
     #[test]
@@ -330,18 +348,23 @@ mod tests {
 
     #[test]
     fn a_khef_does_not_add_its_own_hold_to_the_one_before_it() {
-        // What a khef further along the tree sees when the khef before it switches from
-        // track 4 to track 3 at the end of 4's hold: 4's packets stop and 3's start.
+        // What a khef further along the tree sees when the khef before it gives 5's slot to
+        // 4 at 200 ms, and then 4's to 3 when 4's hold ends at 460 ms.
         let mut t = top();
-        for ms in (0..260).step_by(20) {
-            for track in [1, 2, 4] {
-                feed(&mut t, track, SPEECH, ms * MS);
+        for ms in (0..200).step_by(20) {
+            for (track, level) in [(1, 90), (2, 85), (5, 50)] {
+                feed(&mut t, track, level, ms * MS);
             }
         }
-        // 4 entered here when it entered there, so its hold is over here too.
-        assert!(feed(&mut t, 1, SPEECH, 260 * MS));
-        assert!(feed(&mut t, 2, SPEECH, 260 * MS));
-        assert!(feed(&mut t, 3, SPEECH, 260 * MS));
+        for ms in (200..460).step_by(20) {
+            for (track, level) in [(1, 90), (2, 85), (4, 60)] {
+                assert!(feed(&mut t, track, level, ms * MS));
+            }
+        }
+        // 4 took its slot here when it took it there, so its hold is over here too.
+        for (track, level) in [(1, 90), (2, 85), (3, 80)] {
+            assert!(feed(&mut t, track, level, 460 * MS));
+        }
         assert_eq!(selected(&t), [1, 2, 3]);
     }
 
