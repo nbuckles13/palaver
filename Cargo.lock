@@ -233,7 +233,12 @@ dependencies = [
 name = "palaver-bot"
 version = "0.0.0"
 dependencies = [
+ "palaver-khef-core",
+ "palaver-media",
+ "palaver-net",
+ "palaver-proto",
  "palaver-sdk",
+ "tokio",
 ]
 
 [[package]]
@@ -333,6 +338,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "palaver-khef-core",
+ "palaver-media",
  "palaver-moq-wire",
  "palaver-net",
  "palaver-node",

@@ -9,7 +9,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+palaver-khef-core = { workspace = true }
+palaver-media = { workspace = true }
+palaver-net = { workspace = true }
+palaver-proto = { workspace = true }
 palaver-sdk = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
