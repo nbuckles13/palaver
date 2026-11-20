@@ -480,8 +480,9 @@ otherwise closed once the planned peerings are up.
     decibels between packets as syllables rise and fall. So a quieter voice whose new
     packet is compared with a louder voice's packet from a frame or two earlier can outrank
     it for an instant, take its slot (it is past its hold), and keep it for 250 ms. Seen
-    with bots 6 dB apart. A fix to consider: rank on the highest level of the last 100 ms
-    or so rather than on the latest packet.
+    with bots 6 dB apart. **Accepted for now**: it only shows when more than N people talk
+    at once, which is a muddle whatever is selected. If it ever matters, rank on the
+    highest level of the last 100 ms or so rather than on the latest packet.
   - Known gap: a word whose first frame is below the minimum level loses that 20 ms frame.
     Possible fix: khefs keep the latest packet of each unselected track and send it first.
 - **Consistency is eventual.** Khefs nearer a new speaker switch first; the change crosses the
