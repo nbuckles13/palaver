@@ -450,13 +450,6 @@ otherwise closed once the planned peerings are up.
   overlay at forwarding speed. With more than N simultaneous talkers, listeners may hear
   different subsets. No overlay link carries more than N tracks per direction. A leaf khef
   always forwards its own client; a transit khef ranks its client against its other links.
-  - *The hold compounds per hop.* Measured in the full simulation: when four talkers start
-    in the same instant with N = 3, the quietest may take a slot first. Each khef holds a
-    selection for 250 ms before giving it up, and a khef further on can only choose among
-    what the one before it passes. So the third loudest reached listeners one hop away
-    260 ms late and listeners two hops away 520 ms late; after that everyone heard exactly
-    the loudest three. This only happens when more than N start together. If it matters,
-    the hold could apply only at the khef nearest each talker.
 - Declared levels are untrusted and bounded by conductor priority rules (host/pinned always
   pass; server-muted never pass).
 
