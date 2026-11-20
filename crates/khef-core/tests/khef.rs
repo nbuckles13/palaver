@@ -553,7 +553,7 @@ fn line() -> Net {
 #[test]
 fn audio_crosses_the_tree_exactly_as_it_was_sent_and_is_played_by_everyone_else() {
     let mut net = line();
-    let sent = net.speak(1, 500, 60);
+    let sent = net.speak(1, 500, 100);
     assert_eq!(sent.len(), 80 + 7, "one byte of alias");
     assert_eq!(net.played(1), [], "nobody hears themselves");
     assert_eq!(net.played(2), [(1, 500)]);
@@ -569,7 +569,7 @@ fn audio_crosses_the_tree_exactly_as_it_was_sent_and_is_played_by_everyone_else(
 #[test]
 fn audio_from_the_middle_goes_both_ways() {
     let mut net = line();
-    net.speak(2, 1, 60);
+    net.speak(2, 1, 100);
     assert_eq!(net.played(1), [(2, 1)]);
     assert_eq!(net.played(3), [(2, 1)]);
     assert_eq!(net.played(2), []);
@@ -583,7 +583,7 @@ fn audio_goes_only_over_links_of_the_tree() {
     net.link(2, 3);
     net.link(1, 3);
     net.audio_tree(&[(1, 2), (2, 3)], 3);
-    net.speak(1, 9, 60);
+    net.speak(1, 9, 100);
     assert_eq!(net.sent(1, 3), 0);
     assert_eq!(net.sent(1, 2), 1);
     assert_eq!(net.sent(2, 3), 1);
@@ -593,7 +593,7 @@ fn audio_goes_only_over_links_of_the_tree() {
 #[test]
 fn a_packet_that_arrives_twice_is_passed_on_once() {
     let mut net = line();
-    let sent = net.speak(1, 77, 60);
+    let sent = net.speak(1, 77, 100);
     // The same datagram again, as a second path would deliver it.
     net.deliver(1, 2, Wire::Datagram(sent));
     assert_eq!(net.played(2), [(1, 77)]);
@@ -613,9 +613,9 @@ fn only_the_loudest_n_cross_a_link() {
     // Leaves 1, 2 and 3 talk at once for two seconds; 3 is the quietest.
     for frame in 0..100u64 {
         net.now = at(frame * 20);
-        net.speak(1, frame, 90);
-        net.speak(2, frame, 80);
-        net.speak(3, frame, 40);
+        net.speak(1, frame, 110);
+        net.speak(2, frame, 100);
+        net.speak(3, frame, 85);
     }
     // Leaf 5 hears 1 and 2, and of 3 only its first packets, before the louder two
     // had been heard from.
@@ -657,12 +657,12 @@ fn when_more_than_n_start_together_the_wait_for_a_slot_is_paid_once_not_at_every
     net.audio_tree(&edges, 3);
     for frame in 0..100u64 {
         net.now = at(frame * 20);
-        for (speaker, level) in [(1, 90), (2, 85), (5, 50)] {
+        for (speaker, level) in [(1, 110), (2, 105), (5, 90)] {
             net.speak(speaker, frame, level);
         }
         if frame >= 20 {
-            net.speak(4, frame, 60);
-            net.speak(3, frame, 80);
+            net.speak(4, frame, 95);
+            net.speak(3, frame, 100);
         }
     }
     let missed =
@@ -704,7 +704,7 @@ fn audio_before_the_plan_or_outside_it_goes_nowhere() {
         None
     );
     // A datagram under an alias no plan knows.
-    let sent = net.speak(1, 1, 60);
+    let sent = net.speak(1, 1, 100);
     let mut stray = sent.clone();
     stray[1] = 99;
     assert_eq!(net.khef(2).on_datagram(&1, &stray, now), None);
@@ -714,7 +714,7 @@ fn audio_before_the_plan_or_outside_it_goes_nowhere() {
 #[test]
 fn when_the_plan_drops_a_track_its_packets_stop_and_a_new_one_starts() {
     let mut net = line();
-    net.speak(3, 1, 60);
+    net.speak(3, 1, 100);
     assert_eq!(net.played(1), [(3, 1)]);
     // The plan now has 3 gone from the tree, with only 1 and 2 left in it.
     let tracks: BTreeMap<u64, FullTrackName> = [(1, mic(1)), (2, mic(2))].into();
@@ -738,7 +738,7 @@ fn when_the_plan_drops_a_track_its_packets_stop_and_a_new_one_starts() {
     assert_eq!(net.sent(2, 1), before);
     assert_eq!(net.played(1), [(3, 1)]);
     // 1 and 2 still hear each other.
-    net.speak(1, 5, 60);
+    net.speak(1, 5, 100);
     assert_eq!(net.played(2).last(), Some(&(1, 5)));
 }
 
@@ -747,14 +747,14 @@ fn a_link_added_to_the_tree_later_starts_carrying_audio() {
     let mut net = Net::new(&[1, 2, 3]);
     net.link(1, 2);
     net.audio_tree(&[(1, 2)], 3);
-    net.speak(1, 1, 60);
+    net.speak(1, 1, 100);
     assert_eq!(net.played(2), [(1, 1)]);
     assert_eq!(net.played(3), []);
     net.link(2, 3);
     net.audio_tree(&[(1, 2), (2, 3)], 3);
-    net.speak(1, 2, 60);
+    net.speak(1, 2, 100);
     assert_eq!(net.played(3), [(1, 2)]);
-    net.speak(3, 9, 60);
+    net.speak(3, 9, 100);
     assert_eq!(net.played(1), [(3, 9)]);
 }
 
@@ -780,7 +780,7 @@ fn a_link_carrying_audio_needs_no_fillers() {
     net.audio_tree(&[(1, 2)], 3);
     for frame in 0..100u64 {
         net.now = at(frame * 20);
-        net.speak(1, frame, 60);
+        net.speak(1, frame, 100);
         if frame % 5 == 4 {
             let now = net.now;
             net.khef(1).poll(now);
