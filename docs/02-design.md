@@ -568,6 +568,14 @@ A **profile** of MoQT, deliberately small:
   goes, close unplanned links once both ends are wired); link changes go into the node's
   report. It is sans-IO, so the simulator runs the same code the product will: every
   simulated node is a real `Node`, and what crosses the simulated links is real MoQ.
+- **The engine** (`sdk::Engine`) is the part that touches things. It owns the node and is
+  the only caller of it, from one task, so the khef and the control logic run in one loop
+  with no locks. Small tasks around it only carry bytes (one per stream, and per
+  connection one each for incoming streams, datagrams and the connection's end) and turn
+  what they see into messages to that task. A received audio datagram is forwarded and
+  handed to the player as slices of the same buffer.
+  - **Two nodes that dial each other at once** keep the connection dialled by the lower
+    participant id and close the other; both apply the same rule.
 - **The khef** (`khef_core::Khef`) holds a session and a link watch per neighbour and ties
   them to the flood and to top-N:
   - *Control*: an object that arrives is handed up to the node's control logic, which
