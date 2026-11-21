@@ -120,6 +120,12 @@ K_auth  = HKDF(root, "auth")                 → never published; input to a PAK
   3. *STUN from the node's own socket*: a node learns its public address before it knows
      anyone, for the ticket and its report; and by asking two servers it can tell that its
      router gives a different port per destination (symmetric NAT), where punching fails.
+     The question and its answer use the QUIC socket, since the address a router gives is
+     per socket; a layer under QUIC takes the answers out (`net::stun`). The server learns
+     the node's address and that it asked, and nothing of the meeting. By default a node
+     asks only when it needs to: not when it has a public address of its own, and not
+     when everyone it must reach is on its own network. The servers and whether to ask at
+     all are the user's to set. (The transport can ask; the rule for when is not built.)
   4. *The ticket comes back*: when nobody in a meeting is reachable from outside, a joiner
      adds itself to the ticket and sends it back the way it came; a member pastes it and
      dials. Needed once per joiner (to reach one member; the rest follow by step 2).
@@ -130,6 +136,9 @@ K_auth  = HKDF(root, "auth")                 → never published; input to a PAK
     such node, it cannot join. A headless Palaver node on a reachable machine is the
     answer we offer; a public TURN service or an iroh-relay behind a build feature are
     the alternatives if that proves too little.
+- **Private mode**: one switch that puts every setting that tells an outsider something
+  at its most private value. The list so far: never ask a STUN server. Later entries:
+  rendezvous announcements, always-on tickets.
 - **Admission**: every new connection runs a balanced PAKE (CPace or SPAKE2) on `K_auth`, bound
   to both transport keys, before any MoQ message. Node identity is a per-meeting Ed25519 key.
 - **Host**: the meeting creator. Host is a roster attribute independent of the conductor role and
