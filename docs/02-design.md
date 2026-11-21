@@ -881,6 +881,15 @@ options to run without devices, without transit duty, or as khef-only. Rust firs
 behaviour, metrics and event log; it serves tests, manual dev sessions, load, the reachable-khef
 role, and as the skeleton for recorder/transcriber/AI participants.
 
+What there is so far, in three layers:
+
+- `sdk::Engine` runs one node (its khef and its control logic) over a transport.
+- `sdk::Call` puts a voice on it: 20 ms of samples in, 20 ms out.
+- `sdk::Participant` is the two on a network with a key of its own, which is what an
+  application or a bot starts with: over QUIC or in memory, it makes tickets, joins by
+  them, answers a ticket that came back, and finds out what network it is on. The bot is
+  a participant with a made-up voice and ears; the app is one with a sound card.
+
 ## 16. Operability without servers
 
 Local structured event log and metrics ring per node; every plan logged with generation and

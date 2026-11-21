@@ -79,8 +79,12 @@ async fn room(count: u32, seconds: u64) -> Result<(), BotError> {
         };
         let bot = Bot::on_memory(&network, &secret, &format!("bot {n}"), script)?;
         match bots.first() {
-            None => bot.create_meeting().await,
-            Some(first) => bot.join(vec![first.address().clone()]).await,
+            None => bot.participant().create_meeting().await,
+            Some(first) => {
+                bot.participant()
+                    .join(vec![first.participant().address().clone()])
+                    .await;
+            }
         }
         bots.push(bot);
     }
@@ -93,9 +97,9 @@ async fn room(count: u32, seconds: u64) -> Result<(), BotError> {
         }
         if frame % 50 == 49 {
             let second = frame / 50 + 1;
-            let roster = bots
-                .first()
-                .map_or(0, |bot| bot.engine().status().borrow().roster.len());
+            let roster = bots.first().map_or(0, |bot| {
+                bot.participant().engine().status().borrow().roster.len()
+            });
             println!("second {second}: {roster} in the meeting");
             for (n, bot) in bots.iter().enumerate() {
                 println!("  bot {n} hears {:?}", bot.hears_among(0..count));
@@ -205,13 +209,16 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
     };
 
     if let Some(ticket) = &ticket {
-        bot.join(entry_points(ticket)).await;
+        bot.participant().join(entry_points(ticket)).await;
     } else {
         // An invitation is about to be made: now is when the public address matters.
         say_network(find_network(&mut bot, &names).await);
-        bot.create_meeting().await;
+        bot.participant().create_meeting().await;
         // The ticket holds the meeting secret; showing it is the point of this line.
-        println!("ticket {}", bot.ticket(&secret).to_text().expose());
+        println!(
+            "ticket {}",
+            bot.participant().ticket(&secret).to_text().expose()
+        );
     }
 
     // Tickets sent back by those who could not get in arrive as lines on standard input.
@@ -235,7 +242,7 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
                 match Ticket::parse(line.trim()) {
                     Ok(back) => {
                         println!("reaching for whoever sent a ticket back");
-                        bot.reach(&back).await;
+                        bot.participant().reach(&back).await;
                     }
                     Err(error) => eprintln!("not a ticket: {error:?}"),
                 }
@@ -243,17 +250,20 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
             }
         }
         bot.tick().map_err(BotError::Codec)?;
-        let nobody_answers = bot.engine().status().borrow().nobody_answers;
+        let nobody_answers = bot.participant().engine().status().borrow().nobody_answers;
         if let (true, false, Some(invitation)) = (nobody_answers, replied, &ticket) {
             // It cannot get in on its own. Its public address is wanted now, for the
             // ticket that goes back to whoever invited it.
             replied = true;
             say_network(find_network(&mut bot, &names).await);
-            println!("reply {}", bot.reply_to(invitation).to_text().expose());
+            println!(
+                "reply {}",
+                bot.participant().reply_to(invitation).to_text().expose()
+            );
         }
         if frame % 50 == 49 {
             let (roster, links) = {
-                let status = bot.engine().status();
+                let status = bot.participant().engine().status();
                 let status = status.borrow();
                 (status.roster.len(), status.links.len())
             };
@@ -271,7 +281,12 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
 
 /// Find what network `bot` is on, asking the STUN servers named if it needs to.
 async fn find_network(bot: &mut Bot, names: &[String]) -> Network {
-    let local = bot.address().addresses.first().map(|a| *a.reveal());
+    let local = bot
+        .participant()
+        .address()
+        .addresses
+        .first()
+        .map(|a| *a.reveal());
     let servers = match local {
         Some(local) if !is_public(local.ip()) => resolve(names, local).await,
         _ => Vec::new(),
@@ -285,7 +300,7 @@ async fn find_network(bot: &mut Bot, names: &[String]) -> Network {
         servers,
         patience: STUN_PATIENCE,
     };
-    bot.find_network(&config).await
+    bot.participant_mut().find_network(&config).await
 }
 
 fn say_network(network: Network) {

@@ -24,19 +24,23 @@ async fn room(scripts: &[Script]) -> Vec<Bot> {
     for (n, script) in scripts.iter().enumerate() {
         let bot = Bot::on_memory(&network, &secret, &format!("bot {n}"), *script).unwrap();
         match bots.first() {
-            None => bot.create_meeting().await,
-            Some(first) => bot.join(vec![first.address().clone()]).await,
+            None => bot.participant().create_meeting().await,
+            Some(first) => {
+                bot.participant()
+                    .join(vec![first.participant().address().clone()])
+                    .await;
+            }
         }
         bots.push(bot);
     }
     for bot in &bots {
-        let mut status = bot.engine().status();
+        let mut status = bot.participant().engine().status();
         let settled = status
             .wait_for(|s| s.roster.len() == scripts.len() && s.microphones.len() == scripts.len());
         assert!(
             timeout(Duration::from_secs(30), settled).await.is_ok(),
             "the room never formed: {:?}",
-            *bot.engine().status().borrow()
+            *bot.participant().engine().status().borrow()
         );
     }
     bots
@@ -132,5 +136,14 @@ async fn a_bot_that_leaves_is_dropped_and_the_rest_carry_on() {
     run(&mut bots, 3).await;
     assert_eq!(bots[0].hears_among(0..4), [1]);
     assert_eq!(bots[2].hears_among(0..4), [1]);
-    assert_eq!(bots[0].engine().status().borrow().roster.len(), 3);
+    assert_eq!(
+        bots[0]
+            .participant()
+            .engine()
+            .status()
+            .borrow()
+            .roster
+            .len(),
+        3
+    );
 }

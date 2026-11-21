@@ -1,31 +1,23 @@
 //! A headless participant with a made-up voice.
 //!
-//! A [`Bot`] is a whole participant: a real node, a real encoder and decoders, the same
-//! [`Call`] an application with a sound card uses. The only things made up are its voice
+//! A [`Bot`] is a whole [`Participant`]: a real node, a real encoder and decoders, the same
+//! call an application with a sound card uses. The only things made up are its voice
 //! (a [`Voice`] at the pitch of its speaker number, talking to a [`Rhythm`]) and its ears
 //! (it keeps what it was given to play, and can say whose pitch is in it).
 //!
 //! So a room of bots checks the product end to end by what a listener would notice: who
 //! is heard, by whom, and who is not.
 
-use palaver_khef_core::LinkWatchConfig;
-use palaver_media::jitter::Config as JitterConfig;
 use palaver_media::synthetic::{Rhythm, Voice, hears, pitch_of, strength};
-use palaver_media::{Channels, CodecError, EncoderConfig, FRAME_SAMPLES, SAMPLE_RATE};
-use palaver_net::admission::{AdmissionKey, Admitted};
-use palaver_net::identity::{Identity, meeting_tag};
+use palaver_media::{CodecError, FRAME_SAMPLES, SAMPLE_RATE};
 use palaver_net::memory::MemoryNetwork;
-use palaver_net::quic::{BindError, QuicEndpoint, QuicOptions};
-use palaver_net::reach::{self, Network, StunConfig};
-use palaver_net::transport::{Endpoint, Peer};
-use palaver_proto::{
-    EntryPoint, MAX_ENTRY_POINTS, MediaTrack, Redacted, SECRET_BYTES, Secret, Signer, Source,
-    Ticket,
-};
-use palaver_sdk::{Call, Engine, EngineConfig};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
+use palaver_net::quic::QuicOptions;
+use palaver_proto::{SECRET_BYTES, Secret};
+use palaver_sdk::{Options, Participant};
+use std::net::SocketAddr;
 use std::time::Duration;
+
+pub use palaver_sdk::{StartError as BotError, entry_points};
 
 /// The length of one frame of audio.
 pub const FRAME: Duration = Duration::from_millis(20);
@@ -66,29 +58,11 @@ impl Script {
     }
 }
 
-/// Why a bot could not be made.
-#[derive(Debug)]
-pub enum BotError {
-    /// The operating system would not give random bytes for a key.
-    NoRandomness,
-    /// Another endpoint on the network already has this key.
-    KeyInUse,
-    /// The meeting secret could not be turned into keys.
-    Derivation,
-    Codec(CodecError),
-    /// The QUIC endpoint could not be opened.
-    Bind(BindError),
-}
-
 /// One headless participant.
 pub struct Bot {
-    call: Call,
+    participant: Participant,
     script: Script,
     voice: Voice,
-    /// Where others can find this bot.
-    address: Peer,
-    /// The QUIC endpoint the bot runs on, if it is on the network.
-    quic: Option<Arc<QuicEndpoint>>,
     /// Frames made so far.
     frames: u64,
     /// What it has been given to play, most recent last, up to [`Bot::EARS`].
@@ -101,37 +75,28 @@ impl Bot {
     pub const EARS: usize = 2 * SAMPLE_RATE as usize;
 
     /// A bot on an in-memory network, for a meeting with this secret. It does nothing
-    /// until told to [`create_meeting`](Self::create_meeting) or [`join`](Self::join).
-    /// Must be called inside a tokio runtime.
+    /// until its participant is told to create a meeting or to join one. Must be called
+    /// inside a tokio runtime.
     ///
     /// # Errors
     ///
-    /// When the operating system gives no random bytes for a key, the network already
-    /// has an endpoint with that key, the secret cannot be turned into keys, or the
-    /// codec cannot be set up.
+    /// As [`Participant::on_memory`].
     pub fn on_memory(
         network: &MemoryNetwork,
         secret: &Secret<[u8; SECRET_BYTES]>,
         name: &str,
         script: Script,
     ) -> Result<Self, BotError> {
-        let identity = Identity::generate().map_err(|_| BotError::NoRandomness)?;
-        let endpoint = network
-            .endpoint(identity.public_key())
-            .ok_or(BotError::KeyInUse)?;
-        Self::start(endpoint, identity, secret, name, script, Vec::new(), None)
+        Participant::on_memory(network, secret, Options::named(name))
+            .map(|participant| Self::with(participant, script))
     }
 
-    /// A bot on the network, over QUIC, for a meeting with this secret. It tells the
-    /// meeting it can be reached at `advertise`; if that is empty, at the address it is
-    /// bound to, with the machine's outward address in place of "every interface".
-    /// Must be called inside a tokio runtime.
+    /// A bot on the network, over QUIC, for a meeting with this secret; `advertise` as
+    /// for [`Participant::on_quic`]. Must be called inside a tokio runtime.
     ///
     /// # Errors
     ///
-    /// When the operating system gives no random bytes for a key, the QUIC endpoint
-    /// cannot be opened, the secret cannot be turned into keys, or the codec cannot be
-    /// set up.
+    /// As [`Participant::on_quic`].
     pub fn on_quic(
         options: QuicOptions,
         advertise: Vec<SocketAddr>,
@@ -139,147 +104,34 @@ impl Bot {
         name: &str,
         script: Script,
     ) -> Result<Self, BotError> {
-        let identity = Identity::generate().map_err(|_| BotError::NoRandomness)?;
-        let endpoint = Arc::new(QuicEndpoint::bind(&identity, options).map_err(BotError::Bind)?);
-        let advertise = if advertise.is_empty() {
-            endpoint
-                .local_address()
-                .and_then(reachable_form)
-                .into_iter()
-                .collect()
-        } else {
-            advertise
-        };
-        let quic = Some(Arc::clone(&endpoint));
-        Self::start(endpoint, identity, secret, name, script, advertise, quic)
+        Participant::on_quic(options, advertise, secret, Options::named(name))
+            .map(|participant| Self::with(participant, script))
     }
 
-    /// Find out what kind of network the bot is on, asking STUN servers if `config` says
-    /// to. A public address that is learned is added to those the bot gives the meeting
-    /// and puts in its tickets. A bot not on the network learns nothing.
-    pub async fn find_network(&mut self, config: &StunConfig) -> Network {
-        let (Some(quic), Some(local)) = (&self.quic, self.address.addresses.first()) else {
-            return Network::Unknown;
-        };
-        let network = reach::find(quic, *local.reveal(), config).await;
-        if let Some(public) = network.public_address().map(Redacted::new)
-            && !self.address.addresses.contains(&public)
-        {
-            self.address.addresses.push(public);
-            let all = self.address.addresses.iter().map(|a| *a.reveal()).collect();
-            self.call.engine().set_addresses(all).await;
-        }
-        network
-    }
-
-    fn start<E: Endpoint>(
-        endpoint: E,
-        identity: Identity,
-        secret: &Secret<[u8; SECRET_BYTES]>,
-        name: &str,
-        script: Script,
-        addresses: Vec<SocketAddr>,
-        quic: Option<Arc<QuicEndpoint>>,
-    ) -> Result<Self, BotError> {
-        let key = AdmissionKey::from_meeting_secret(secret).ok_or(BotError::Derivation)?;
-        let address = Peer {
-            key: identity.public_key(),
-            addresses: addresses.iter().copied().map(Redacted::new).collect(),
-        };
-        let config = EngineConfig {
-            meeting: meeting_tag(secret).ok_or(BotError::Derivation)?,
-            name: name.into(),
-            tracks: vec![MediaTrack {
-                audio: true,
-                source: Source::Main,
-                rendition: b"opus".to_vec(),
-            }],
-            addresses,
-            link_watch: LinkWatchConfig::default(),
-        };
-        let engine = Engine::start(Admitted::new(endpoint, key), identity, config);
-        let call = Call::new(
-            engine,
-            EncoderConfig::default(),
-            JitterConfig::default(),
-            Channels::Mono,
-        )
-        .map_err(BotError::Codec)?;
-        Ok(Self {
-            call,
+    fn with(participant: Participant, script: Script) -> Self {
+        Self {
+            participant,
             script,
             voice: Voice::new(pitch_of(script.speaker), script.loudness),
-            address,
-            quic,
             frames: 0,
             played: Vec::new(),
             frame: vec![0.0; FRAME_SAMPLES],
-        })
-    }
-
-    #[must_use]
-    pub const fn address(&self) -> &Peer {
-        &self.address
-    }
-
-    /// An invitation to the meeting with `secret`, with this bot as the way in.
-    #[must_use]
-    pub fn ticket(&self, secret: &Secret<[u8; SECRET_BYTES]>) -> Ticket {
-        Ticket {
-            secret: Secret::new(*secret.expose()),
-            entry_points: vec![EntryPoint {
-                key: self.address.key,
-                addresses: self.address.addresses.clone(),
-            }],
         }
     }
 
-    /// The ticket to send back to whoever gave this bot `invitation`, when it could not
-    /// get in by it: the same meeting, with this bot first among the ways in. A member
-    /// who is given it can [`reach`](Self::reach) for this bot.
+    /// The node and the call behind the bot: creating, joining, tickets, status.
     #[must_use]
-    pub fn reply_to(&self, invitation: &Ticket) -> Ticket {
-        let mut reply = self.ticket(&invitation.secret);
-        reply
-            .entry_points
-            .extend(invitation.entry_points.iter().cloned());
-        reply.entry_points.truncate(MAX_ENTRY_POINTS);
-        reply
+    pub const fn participant(&self) -> &Participant {
+        &self.participant
     }
 
-    /// Dial everyone `ticket` names: for a ticket sent back by someone who cannot get in.
-    #[expect(
-        clippy::future_not_send,
-        reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
-    )]
-    pub async fn reach(&self, ticket: &Ticket) {
-        self.call.engine().reach(entry_points(ticket)).await;
-    }
-
-    #[must_use]
-    pub const fn engine(&self) -> &Engine {
-        self.call.engine()
+    pub const fn participant_mut(&mut self) -> &mut Participant {
+        &mut self.participant
     }
 
     #[must_use]
     pub const fn script(&self) -> Script {
         self.script
-    }
-
-    #[expect(
-        clippy::future_not_send,
-        reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
-    )]
-    pub async fn create_meeting(&self) {
-        self.call.engine().create_meeting().await;
-    }
-
-    #[expect(
-        clippy::future_not_send,
-        reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
-    )]
-    pub async fn join(&self, entry_points: Vec<Peer>) {
-        self.call.engine().join(entry_points).await;
     }
 
     /// One 20 ms step: say the next frame of its script, and play what it is given.
@@ -292,8 +144,9 @@ impl Bot {
         self.frames = self.frames.saturating_add(1);
         let talking = self.script.rhythm.talking(elapsed);
         self.voice.frame(talking, &mut self.frame);
-        self.call.speak(&self.frame)?;
-        self.call.listen(&mut self.frame)?;
+        let call = self.participant.call();
+        call.speak(&self.frame)?;
+        call.listen(&mut self.frame)?;
         self.played.extend_from_slice(&self.frame);
         let extra = self.played.len().saturating_sub(Self::EARS);
         self.played.drain(..extra);
@@ -328,32 +181,6 @@ impl Bot {
     }
 
     pub async fn stop(self) {
-        self.call.stop().await;
+        self.participant.stop().await;
     }
-}
-
-/// `bound` as others can dial it: an address bound to every interface becomes the
-/// address this machine sends from towards the internet. `None` if it has no such route.
-fn reachable_form(bound: SocketAddr) -> Option<SocketAddr> {
-    if !bound.ip().is_unspecified() {
-        return Some(bound);
-    }
-    // Connecting a UDP socket sends nothing; it only makes the system choose a route.
-    let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    probe.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
-    let ip: IpAddr = probe.local_addr().ok()?.ip();
-    (!ip.is_unspecified()).then(|| SocketAddr::new(ip, bound.port()))
-}
-
-/// The members a ticket says to connect to first.
-#[must_use]
-pub fn entry_points(ticket: &Ticket) -> Vec<Peer> {
-    ticket
-        .entry_points
-        .iter()
-        .map(|entry| Peer {
-            key: entry.key,
-            addresses: entry.addresses.clone(),
-        })
-        .collect()
 }

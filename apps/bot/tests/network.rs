@@ -23,12 +23,12 @@ fn bot(secret: &Secret<[u8; 32]>, script: Script) -> Bot {
 #[tokio::test]
 async fn a_bot_given_only_a_ticket_joins_and_hears_the_one_who_talks() {
     let first = bot(&Secret::new([7; 32]), Script::silent(0));
-    first.create_meeting().await;
+    first.participant().create_meeting().await;
     // The ticket crosses as text, as it would through a chat program.
-    let text = first.ticket(&Secret::new([7; 32])).to_text();
+    let text = first.participant().ticket(&Secret::new([7; 32])).to_text();
     let ticket = Ticket::parse(text.expose()).unwrap();
     let talker = bot(&ticket.secret, Script::talking(1, 0.4));
-    talker.join(entry_points(&ticket)).await;
+    talker.participant().join(entry_points(&ticket)).await;
     let mut bots = [first, talker];
 
     let mut beat = tokio::time::interval(FRAME);
@@ -87,22 +87,29 @@ async fn a_bot_finds_what_network_it_is_on_and_its_ticket_gains_its_public_addre
 
     // Seen where it is: nothing stands between.
     let mut open = bot(&secret, Script::silent(0));
-    let own = *open.address().addresses[0].reveal();
+    let own = *open.participant().address().addresses[0].reveal();
     let found = open
+        .participant_mut()
         .find_network(&asking(vec![plain], StunMode::WhenNeeded))
         .await;
     assert_eq!(found, Network::Open(own));
-    assert_eq!(open.ticket(&secret).entry_points[0].addresses.len(), 1);
+    assert_eq!(
+        open.participant().ticket(&secret).entry_points[0]
+            .addresses
+            .len(),
+        1
+    );
 
     // Seen elsewhere, the same by all who are asked: a router, and the ticket says where.
     let mut behind = bot(&secret, Script::silent(0));
-    let own = *behind.address().addresses[0].reveal();
+    let own = *behind.participant().address().addresses[0].reveal();
     let public = SocketAddr::new(own.ip(), own.port().wrapping_add(5));
     let found = behind
+        .participant_mut()
         .find_network(&asking(vec![shifted], StunMode::WhenNeeded))
         .await;
     assert_eq!(found, Network::BehindRouter(public));
-    let listed: Vec<SocketAddr> = behind.ticket(&secret).entry_points[0]
+    let listed: Vec<SocketAddr> = behind.participant().ticket(&secret).entry_points[0]
         .addresses
         .iter()
         .map(|a| *a.reveal())
@@ -112,14 +119,21 @@ async fn a_bot_finds_what_network_it_is_on_and_its_ticket_gains_its_public_addre
     // Seen differently by each: no address to hand out.
     let mut symmetric = bot(&secret, Script::silent(0));
     let found = symmetric
+        .participant_mut()
         .find_network(&asking(vec![shifted, other], StunMode::WhenNeeded))
         .await;
     assert_eq!(found, Network::PerDestination);
-    assert_eq!(symmetric.ticket(&secret).entry_points[0].addresses.len(), 1);
+    assert_eq!(
+        symmetric.participant().ticket(&secret).entry_points[0]
+            .addresses
+            .len(),
+        1
+    );
 
     // Told never to ask, it does not, and knows nothing.
     let mut private = bot(&secret, Script::silent(0));
     let found = private
+        .participant_mut()
         .find_network(&asking(vec![shifted], StunMode::Never))
         .await;
     assert_eq!(found, Network::Unknown);
