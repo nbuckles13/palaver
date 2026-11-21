@@ -50,3 +50,16 @@ jobs:
         run: cargo nextest run --locked
       - if: matrix.os != 'ubuntu-latest'
         run: cargo nextest run --locked -E 'not (package(palaver-guards) & binary(workspace))'
+
+  # Bots through real NATs, made by the kernel in network namespaces: a hole punch through
+  # two routers, and the case where no punch is possible. Linux only, and in real time.
+  nat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: command -v nft || sudo apt-get install -y nftables
+      - run: cargo build --locked -p palaver-bot
+      - run: sudo scripts/nat-test.sh cone
+      - run: sudo scripts/nat-test.sh symmetric
