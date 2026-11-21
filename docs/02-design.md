@@ -832,7 +832,14 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
     held only while samples are copied. To revisit if it shows up as glitches: a
     lock-free queue.
   - To hear it: `cargo run -p palaver-sound --example loopback` plays the microphone
-    through Opus and a jitter buffer to the speaker.
+    through Opus and a jitter buffer to the speaker. With `other` it plays a made-up
+    other voice instead and saves what a call would send, which is the way to judge
+    echo cancelling on real devices: played back to its own talker, a canceller takes
+    the talker for an echo and drops words, and that says nothing about a call.
+  - Heard on real devices (2026-11-21): clean on Windows (WASAPI, a USB headset at
+    48 kHz float). Through WSLg it is not: the microphone delivered 2 to 10% more sound
+    than real time and the speaker took 3% too little, so words were lost whatever the
+    code did. WSLg is no place to judge sound.
 - **Jitter buffer**: our own. Adaptive playout delay and time-stretching, with concealment handed
   to Opus (FEC, DRED, neural concealment). The `neteq` crate is reference material.
   - It decides, once per frame interval, what the decoder plays: the frame; the frame

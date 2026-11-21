@@ -1,7 +1,7 @@
 //! Hear yourself: the microphone, through the whole voice path, to the speaker.
 //!
 //! ```text
-//! cargo run -p palaver-sound --example loopback [seconds] [stereo] [raw] [echo] [save]
+//! cargo run -p palaver-sound --example loopback [seconds] [stereo] [raw] [echo] [save] [other]
 //! ```
 //!
 //! What the microphone gives is cut into frames, cleaned of noise and brought to a level,
@@ -15,6 +15,12 @@
 //!   what you say next for its echo and turns it down. In a call it is shown the others.
 //! - `save`: write what was captured, what was sent on and what was played to
 //!   `loopback-captured.wav`, `loopback-cleaned.wav` and `loopback-played.wav`.
+//!
+//! - `other`: the test of echo cancelling. The speaker plays someone else (a made-up
+//!   voice: bursts of hiss in syllables, two seconds in every three) and not you; all
+//!   cleaning is on, and the three files are saved. Talk over it, and between its bursts.
+//!   `loopback-cleaned.wav` is what the others in a call would hear of you: it should
+//!   hold your voice and none of the other's. Try it with headphones, then with speakers.
 //!
 //! Each second it prints:
 //!
@@ -53,6 +59,52 @@ struct Options {
     /// `None` for no cleaning.
     cleaning: Option<Settings>,
     save: bool,
+    /// Play a made-up other voice in place of the microphone's own.
+    other: bool,
+}
+
+/// Someone else's voice, made up: broadband sound in syllables, two seconds in every three.
+#[derive(Debug)]
+struct Other {
+    state: u32,
+    low: f32,
+    sample: u32,
+}
+
+impl Other {
+    const fn new() -> Self {
+        Self {
+            state: 7,
+            low: 0.0,
+            sample: 0,
+        }
+    }
+
+    /// The next frame, the same on every channel.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a counter of samples and 24 random bits, as floats to make a sound"
+    )]
+    fn frame(&mut self, out: &mut [f32], channels: Channels) {
+        for group in out.chunks_mut(channels.count()) {
+            self.state = self
+                .state
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
+            let white = (self.state >> 8) as f32 / 8_388_608.0 - 1.0;
+            // Most of a voice's energy is low.
+            self.low += 0.15 * (white - self.low);
+            let seconds = self.sample as f32 / SAMPLE_RATE as f32;
+            self.sample = self.sample.wrapping_add(1);
+            let syllable = (0.5 + 0.5 * (std::f32::consts::TAU * 4.0 * seconds).sin()).powi(2);
+            let talking = seconds % 3.0 < 2.0;
+            group.fill(if talking {
+                0.6 * self.low * syllable
+            } else {
+                0.0
+            });
+        }
+    }
 }
 
 fn say(what: &str, device: &Device) {
@@ -83,7 +135,9 @@ fn save(name: &str, pcm: &[f32], channels: Channels) -> Result<(), String> {
     bytes.extend_from_slice(&data.to_le_bytes());
     bytes.extend(pcm.iter().flat_map(|sample| to_i16(*sample).to_le_bytes()));
     std::fs::write(name, bytes).map_err(|error| format!("{name}: {error}"))?;
-    println!("saved {name}");
+    // Say where: the files go wherever this was run from.
+    let place = std::env::current_dir().map_or_else(|_| name.into(), |dir| dir.join(name));
+    println!("saved {}", place.display());
     Ok(())
 }
 
@@ -130,6 +184,7 @@ fn run(options: Options) -> Result<(), String> {
     let mut captured = vec![0.0; channels.frame_len()];
     let mut played = vec![0.0; channels.frame_len()];
     let (mut all_captured, mut all_cleaned, mut all_played) = (Vec::new(), Vec::new(), Vec::new());
+    let mut other = Other::new();
     let began = Instant::now();
     let (mut frames, mut sent) = (0u64, 0u64);
     let mut second = Second::default();
@@ -163,6 +218,9 @@ fn run(options: Options) -> Result<(), String> {
             Played::Silent => &mut second.silent,
         };
         *count = count.saturating_add(1);
+        if options.other {
+            other.frame(&mut played, channels);
+        }
         second.played = second.played.max(audio_level(&played));
         if options.save {
             all_played.extend_from_slice(&played);
@@ -213,16 +271,22 @@ fn main() -> ExitCode {
             ..Settings::default()
         }),
         save: false,
+        other: false,
     };
     for arg in std::env::args().skip(1) {
         match (arg.as_str(), arg.parse()) {
             ("stereo", _) => options.channels = Channels::Stereo,
             ("raw", _) => options.cleaning = None,
             ("echo", _) => options.cleaning = Some(Settings::default()),
+            ("other", _) => {
+                options.other = true;
+                options.save = true;
+                options.cleaning = Some(Settings::default());
+            }
             ("save", _) => options.save = true,
             (_, Ok(number)) => options.seconds = number,
             _ => {
-                eprintln!("usage: loopback [seconds] [stereo] [raw] [echo] [save]");
+                eprintln!("usage: loopback [seconds] [stereo] [raw] [echo] [save] [other]");
                 return ExitCode::FAILURE;
             }
         }
