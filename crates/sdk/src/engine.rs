@@ -174,6 +174,7 @@ impl Engine {
             links: BTreeMap::new(),
             entry_points: BTreeMap::new(),
             awaiting: BTreeMap::new(),
+            dials: BTreeMap::new(),
             answering: BTreeSet::new(),
             answered_for: None,
             next_number: 0,
@@ -250,7 +251,8 @@ impl Engine {
 enum Input<C: Connection> {
     /// A connection is up, dialled by either end.
     Connected(C),
-    DialFailed {
+    /// One attempt to connect to `peer` is over, with a connection or without.
+    DialEnded {
         peer: ParticipantId,
     },
     /// It is time to dial `peer`, which should have dialled this node, if it has not.
@@ -304,6 +306,17 @@ struct Link<C> {
     theirs: BTreeMap<u64, mpsc::UnboundedSender<Write>>,
 }
 
+/// The attempts under way to connect to one peer.
+#[derive(Default)]
+struct Dialling {
+    /// The addresses tried so far.
+    tried: Vec<Redacted<SocketAddr>>,
+    /// Attempts that have not ended.
+    under_way: u32,
+    /// The node asked for the dial, so it is told if every attempt fails.
+    asked: bool,
+}
+
 struct Run<E: Endpoint> {
     node: Node<Identity, Ed25519>,
     endpoint: Arc<E>,
@@ -312,6 +325,8 @@ struct Run<E: Endpoint> {
     entry_points: BTreeMap<ParticipantId, Peer>,
     /// Nodes to dial once it is known where they are, and since when each has waited.
     awaiting: BTreeMap<ParticipantId, Timestamp>,
+    /// Dials under way.
+    dials: BTreeMap<ParticipantId, Dialling>,
     /// Planned peers that should dial this node and that it has dialled as well, or is
     /// about to. One is dropped when its link comes up or the plan drops it, so that a
     /// link lost later is answered again.
@@ -401,7 +416,7 @@ impl<E: Endpoint> Run<E> {
         let now = self.now();
         match input {
             Input::Connected(connection) => self.connected(connection),
-            Input::DialFailed { peer } => self.node.dial_failed(&peer, now),
+            Input::DialEnded { peer } => self.dial_ended(&peer),
             Input::Answer { peer } => self.answer(peer),
             Input::Opened {
                 peer,
@@ -542,6 +557,7 @@ impl<E: Endpoint> Run<E> {
     /// Do everything the node has asked for, then say what it now knows.
     fn carry_out(&mut self) {
         self.dial_the_awaited();
+        self.try_new_addresses();
         while let Some(output) = self.node.poll_output() {
             match output {
                 Output::Dial { peer } => self.dial(peer),
@@ -627,22 +643,72 @@ impl<E: Endpoint> Run<E> {
     }
 
     fn dial(&mut self, peer: ParticipantId) {
-        let Some(target) = self.whereabouts(&peer) else {
-            // The plan names it, so word of where it is is on its way here.
-            let now = self.now();
-            self.awaiting.entry(peer).or_insert(now);
+        match self.whereabouts(&peer) {
+            Some(target) => self.attempt(peer, target, true),
+            None => {
+                // The plan names it, so word of where it is is on its way here.
+                let now = self.now();
+                self.awaiting.entry(peer).or_insert(now);
+            }
+        }
+    }
+
+    /// Try to connect to `peer` at the addresses in `target` not yet tried. `asked` if
+    /// the node asked for the dial: it is then told if every attempt fails.
+    fn attempt(&mut self, peer: ParticipantId, mut target: Peer, asked: bool) {
+        let dialling = self.dials.entry(peer.clone()).or_default();
+        dialling.asked |= asked;
+        target
+            .addresses
+            .retain(|address| !dialling.tried.contains(address));
+        if dialling.under_way > 0 && target.addresses.is_empty() {
+            // Everything known is being tried already.
             return;
-        };
+        }
+        dialling.tried.extend(target.addresses.iter().cloned());
+        dialling.under_way = dialling.under_way.saturating_add(1);
         let (endpoint, inputs) = (Arc::clone(&self.endpoint), self.inputs.clone());
         tokio::spawn(async move {
-            let input = match endpoint.dial(&target).await {
-                Ok(connection) => Input::Connected(connection),
-                Err(DialError::Unreachable | DialError::Refused | DialError::EndpointClosed) => {
-                    Input::DialFailed { peer }
+            match endpoint.dial(&target).await {
+                Ok(connection) => {
+                    let _ = inputs.send(Input::Connected(connection)).await;
                 }
-            };
-            let _ = inputs.send(input).await;
+                Err(DialError::Unreachable | DialError::Refused | DialError::EndpointClosed) => {}
+            }
+            let _ = inputs.send(Input::DialEnded { peer }).await;
         });
+    }
+
+    /// An attempt to reach `peer` is over. If it was the last and there is no link, the
+    /// dial has failed.
+    fn dial_ended(&mut self, peer: &ParticipantId) {
+        let Some(dialling) = self.dials.get_mut(peer) else {
+            return;
+        };
+        dialling.under_way = dialling.under_way.saturating_sub(1);
+        if dialling.under_way > 0 {
+            return;
+        }
+        let asked = dialling.asked;
+        self.dials.remove(peer);
+        if asked && !self.links.contains_key(peer) {
+            let now = self.now();
+            self.node.dial_failed(peer, now);
+        }
+    }
+
+    /// A peer being dialled may have become known at more addresses since: a neighbour's
+    /// report, with the address it sees the peer at, can come after the dial began.
+    fn try_new_addresses(&mut self) {
+        if self.dials.is_empty() {
+            return;
+        }
+        let peers: Vec<ParticipantId> = self.dials.keys().cloned().collect();
+        for peer in peers {
+            if let Some(target) = self.whereabouts(&peer) {
+                self.attempt(peer, target, false);
+            }
+        }
     }
 
     /// Planned peers with a lower id dial this node. Through NATs their packets arrive
@@ -684,13 +750,8 @@ impl<E: Endpoint> Run<E> {
             self.answered_for = None;
             return;
         };
-        let (endpoint, inputs) = (Arc::clone(&self.endpoint), self.inputs.clone());
-        tokio::spawn(async move {
-            // A failure is the dialler's to report, not this node's.
-            if let Ok(connection) = endpoint.dial(&target).await {
-                let _ = inputs.send(Input::Connected(connection)).await;
-            }
-        });
+        // A failure is the dialler's to report, not this node's.
+        self.attempt(peer, target, false);
     }
 
     /// Dial those it is now known where to find, and give up on those the plan has
