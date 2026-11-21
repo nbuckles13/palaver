@@ -61,6 +61,8 @@ pub struct Path {
     pub kind: PathKind,
     /// The round-trip time the transport measures.
     pub rtt: Duration,
+    /// The address the peer's packets come from, where the transport has addresses.
+    pub remote: Option<SocketAddr>,
 }
 
 /// Why a dial did not give a connection.
@@ -118,6 +120,10 @@ pub trait Endpoint: Send + Sync + 'static {
 
     /// The key this endpoint proves it holds to everyone it connects to.
     fn key(&self) -> PublicKey;
+
+    /// Whether a dial needs an address: without one it cannot succeed, so the caller does
+    /// better to wait until it has learned one.
+    fn dials_by_address(&self) -> bool;
 
     /// Connect to `peer`.
     fn dial(&self, peer: &Peer)

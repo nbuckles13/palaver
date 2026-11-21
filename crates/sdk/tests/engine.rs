@@ -211,3 +211,26 @@ async fn joining_through_a_node_that_is_not_there_keeps_trying_the_next() {
     late.until_roster(&all).await;
     members[0].until_roster(&all).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn nodes_behind_nats_reach_each_other_because_both_dial() {
+    let network = MemoryNetwork::new();
+    let first = member(&network, "open");
+    first.engine.create_meeting().await;
+    let mut members = vec![first];
+    for n in 1..5 {
+        let joiner = member(&network, &format!("behind a nat {n}"));
+        // It can be reached only by those it has dialled itself.
+        network.put_behind_nat(joiner.address.key);
+        joiner.engine.join(vec![members[0].address.clone()]).await;
+        members.push(joiner);
+    }
+    let all: Vec<&Member> = members.iter().collect();
+    for m in &members {
+        m.until_roster(&all).await;
+        // Every node is given two peers, and a joiner has met only the first: its second
+        // is another joiner, which the one with the lower id cannot reach until the other
+        // has dialled it too.
+        m.until("two links", |status| status.links.len() >= 2).await;
+    }
+}

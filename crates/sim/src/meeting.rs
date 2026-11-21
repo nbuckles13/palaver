@@ -459,7 +459,7 @@ impl Meeting {
                     let role = if dialled { Role::Client } else { Role::Server };
                     member
                         .node
-                        .link_up(Self::id_of(peer), role, PathKind::Direct, rtt, now);
+                        .link_up(Self::id_of(peer), role, PathKind::Direct, rtt, None, now);
                 }
             }
             Event::LinkDown { peer, connection } => {

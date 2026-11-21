@@ -31,6 +31,7 @@ const TRACK: u64 = 13;
 
 const LINK_PEER: u64 = 1;
 const LINK_PATH: u64 = 2;
+const LINK_OBSERVED: u64 = 3;
 const LINK_RTT_MS: u64 = 4;
 
 /// How packets travel on a link.
@@ -49,6 +50,10 @@ pub struct Link {
     pub path: PathKind,
     /// Round-trip time. Sent in whole milliseconds.
     pub rtt: Duration,
+    /// The address this node sees the peer's packets come from. Behind a NAT that is an
+    /// address the peer cannot see for itself, and the one others must send to to reach
+    /// it. Redacted in debug output.
+    pub observed: Option<Redacted<SocketAddr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +125,7 @@ pub fn advertisable(address: &SocketAddr, allow_loopback: bool) -> bool {
 
 impl Link {
     fn encode(&self) -> Vec<u8> {
+        let observed = self.observed.as_ref().map(|a| encode_address(a.reveal()));
         let mut w = Writer::default();
         w.bytes(LINK_PEER, self.peer.as_bytes());
         w.int(LINK_PATH, u64::from(self.path == PathKind::IrohRelay));
@@ -127,11 +133,15 @@ impl Link {
             LINK_RTT_MS,
             u64::try_from(self.rtt.as_millis()).unwrap_or(u64::MAX),
         );
+        if let Some(observed) = &observed {
+            w.bytes(LINK_OBSERVED, observed);
+        }
         w.finish()
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let (mut peer, mut path, mut rtt) = (None, PathKind::Direct, Duration::ZERO);
+        let mut observed = None;
         for pair in fields(bytes) {
             let pair = pair?;
             match (pair.ty, pair.value) {
@@ -140,6 +150,10 @@ impl Link {
                 (LINK_PATH, Value::Int(1)) => path = PathKind::IrohRelay,
                 (LINK_PATH, _) => return Err(DecodeError::Invalid("link path kind")),
                 (LINK_RTT_MS, Value::Int(v)) => rtt = Duration::from_millis(v),
+                (LINK_OBSERVED, Value::Bytes(b)) => {
+                    let address = decode_address(b).ok_or(DecodeError::Invalid("address"))?;
+                    observed = Some(Redacted::new(address));
+                }
                 _ => {}
             }
         }
@@ -147,6 +161,7 @@ impl Link {
             peer: peer.ok_or(DecodeError::Missing("link peer"))?,
             path,
             rtt,
+            observed,
         })
     }
 }
@@ -315,11 +330,13 @@ mod tests {
                     peer: id_of(2),
                     path: PathKind::Direct,
                     rtt: Duration::from_millis(12),
+                    observed: Some(addr("203.0.113.9:50123")),
                 },
                 Link {
                     peer: id_of(3),
                     path: PathKind::IrohRelay,
                     rtt: Duration::from_millis(180),
+                    observed: None,
                 },
             ],
             unreachable: vec![id_of(4)],
@@ -383,7 +400,8 @@ mod tests {
             [Link {
                 peer: id_of(2),
                 path: PathKind::Direct,
-                rtt: Duration::from_millis(12)
+                rtt: Duration::from_millis(12),
+                observed: None,
             }]
         );
         assert_eq!(decoded.sequence, 42);

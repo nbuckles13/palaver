@@ -52,6 +52,12 @@ const AUDIO_IN_QUEUE: usize = 256;
 const CLOSE_DUPLICATE: u64 = 0x100;
 /// Close code when the node hangs up on a peer the plan no longer gives it.
 const CLOSE_HANGUP: u64 = 0x101;
+/// How long the node with the higher id waits for a planned peer to dial it before it
+/// dials too. Long enough that on an open network the first dial has arrived and there
+/// is nothing to do; short enough that through NATs the first dial is still trying.
+/// How long a dial waits to learn where its peer is before it is given up.
+const ADDRESS_PATIENCE: Duration = Duration::from_secs(10);
+const ANSWER_DELAY: Duration = Duration::from_millis(200);
 
 /// What the engine is told once, at start.
 #[derive(Debug, Clone)]
@@ -167,7 +173,9 @@ impl Engine {
             endpoint,
             links: BTreeMap::new(),
             entry_points: BTreeMap::new(),
-            awaiting_report: BTreeSet::new(),
+            awaiting: BTreeMap::new(),
+            answering: BTreeSet::new(),
+            answered_for: None,
             next_number: 0,
             inputs,
             started: Instant::now(),
@@ -245,6 +253,10 @@ enum Input<C: Connection> {
     DialFailed {
         peer: ParticipantId,
     },
+    /// It is time to dial `peer`, which should have dialled this node, if it has not.
+    Answer {
+        peer: ParticipantId,
+    },
     /// The peer opened a two-way stream; this is how to write on it.
     Opened {
         peer: ParticipantId,
@@ -298,8 +310,14 @@ struct Run<E: Endpoint> {
     links: BTreeMap<ParticipantId, Link<E::Connection>>,
     /// Where to find the nodes the meeting was joined through.
     entry_points: BTreeMap<ParticipantId, Peer>,
-    /// Nodes to dial once their report says where they are.
-    awaiting_report: BTreeSet<ParticipantId>,
+    /// Nodes to dial once it is known where they are, and since when each has waited.
+    awaiting: BTreeMap<ParticipantId, Timestamp>,
+    /// Planned peers that should dial this node and that it has dialled as well, or is
+    /// about to. One is dropped when its link comes up or the plan drops it, so that a
+    /// link lost later is answered again.
+    answering: BTreeSet<ParticipantId>,
+    /// The plan and the links `answering` was last worked out for.
+    answered_for: Option<(Option<PlanStamp>, usize, u64)>,
     next_number: u64,
     inputs: mpsc::Sender<Input<E::Connection>>,
     started: Instant,
@@ -384,6 +402,7 @@ impl<E: Endpoint> Run<E> {
         match input {
             Input::Connected(connection) => self.connected(connection),
             Input::DialFailed { peer } => self.node.dial_failed(&peer, now),
+            Input::Answer { peer } => self.answer(peer),
             Input::Opened {
                 peer,
                 number,
@@ -491,6 +510,7 @@ impl<E: Endpoint> Run<E> {
                     role_of(connection.side()),
                     connection.path().kind,
                     connection.path().rtt,
+                    connection.path().remote,
                     now,
                 );
                 return;
@@ -515,7 +535,8 @@ impl<E: Endpoint> Run<E> {
                 theirs: BTreeMap::new(),
             },
         );
-        self.node.link_up(peer, role, path.kind, path.rtt, now);
+        self.node
+            .link_up(peer, role, path.kind, path.rtt, path.remote, now);
     }
 
     /// Do everything the node has asked for, then say what it now knows.
@@ -533,6 +554,7 @@ impl<E: Endpoint> Run<E> {
                 Output::Stream { peer, action } => self.stream(peer, action),
             }
         }
+        self.answer_dials();
         let status = Status {
             plan: self.node.plan().map(|plan| plan.stamp),
             conductor: self.node.is_conductor(),
@@ -571,7 +593,8 @@ impl<E: Endpoint> Run<E> {
 
     /// Where to find `peer`: its key, and every address known for it. An entry point is
     /// known from the ticket; any other node from its report, which names its key and
-    /// lists its addresses. `None` until one of the two is known.
+    /// lists its addresses, and from the reports of its neighbours, which say where they
+    /// see it. `None` until enough is known to dial.
     fn whereabouts(&self, peer: &ParticipantId) -> Option<Peer> {
         let entry = self.entry_points.get(peer);
         let report = self.node.report_of(peer);
@@ -590,13 +613,24 @@ impl<E: Endpoint> Run<E> {
             }
             target.addresses = addresses;
         }
+        // Where others see it: behind a NAT, the only address that leads to it.
+        for address in self.node.observed_addresses_of(peer) {
+            let address = Redacted::new(address);
+            if !target.addresses.contains(&address) {
+                target.addresses.push(address);
+            }
+        }
+        if target.addresses.is_empty() && self.endpoint.dials_by_address() {
+            return None;
+        }
         Some(target)
     }
 
     fn dial(&mut self, peer: ParticipantId) {
         let Some(target) = self.whereabouts(&peer) else {
-            // The plan names it, so its report is on its way here.
-            self.awaiting_report.insert(peer);
+            // The plan names it, so word of where it is is on its way here.
+            let now = self.now();
+            self.awaiting.entry(peer).or_insert(now);
             return;
         };
         let (endpoint, inputs) = (Arc::clone(&self.endpoint), self.inputs.clone());
@@ -611,26 +645,74 @@ impl<E: Endpoint> Run<E> {
         });
     }
 
-    /// Dial those whose report has come, and give up on those the plan has dropped or a
-    /// connection has reached first.
+    /// Planned peers with a lower id dial this node. Through NATs their packets arrive
+    /// only once this node has sent some the other way, so after a moment it dials any
+    /// that have not got through. Two connections that result are settled as always.
+    fn answer_dials(&mut self) {
+        // This runs after every message, most of them audio: look only on a change.
+        let stamp = self.node.plan().map(|plan| plan.stamp);
+        let state = Some((stamp, self.links.len(), self.next_number));
+        if self.answered_for == state {
+            return;
+        }
+        self.answered_for = state;
+        let planned = self.node.planned_peers_now();
+        let links = &self.links;
+        self.answering
+            .retain(|peer| planned.contains(peer) && !links.contains_key(peer));
+        for peer in planned {
+            if peer < *self.node.me()
+                && !self.links.contains_key(&peer)
+                && self.answering.insert(peer.clone())
+            {
+                let inputs = self.inputs.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(ANSWER_DELAY).await;
+                    let _ = inputs.send(Input::Answer { peer }).await;
+                });
+            }
+        }
+    }
+
+    fn answer(&mut self, peer: ParticipantId) {
+        if self.links.contains_key(&peer) || !self.answering.contains(&peer) {
+            return;
+        }
+        let Some(target) = self.whereabouts(&peer) else {
+            // Its report has not come; ask again in a moment.
+            self.answering.remove(&peer);
+            self.answered_for = None;
+            return;
+        };
+        let (endpoint, inputs) = (Arc::clone(&self.endpoint), self.inputs.clone());
+        tokio::spawn(async move {
+            // A failure is the dialler's to report, not this node's.
+            if let Ok(connection) = endpoint.dial(&target).await {
+                let _ = inputs.send(Input::Connected(connection)).await;
+            }
+        });
+    }
+
+    /// Dial those it is now known where to find, and give up on those the plan has
+    /// dropped, a connection has reached first, or nothing has been heard of for too long.
     fn dial_the_awaited(&mut self) {
-        if self.awaiting_report.is_empty() {
+        if self.awaiting.is_empty() {
             return;
         }
         let now = self.now();
-        for peer in std::mem::take(&mut self.awaiting_report) {
+        for (peer, since) in std::mem::take(&mut self.awaiting) {
             let planned = self
                 .node
                 .plan()
                 .is_some_and(|plan| plan.member(&peer, &Ed25519).is_some());
             if self.links.contains_key(&peer) {
                 // It dialled us meanwhile; the node already knows.
-            } else if !planned {
+            } else if !planned || now.saturating_since(since) >= ADDRESS_PATIENCE {
                 self.node.dial_failed(&peer, now);
-            } else if self.node.report_of(&peer).is_some() {
+            } else if self.whereabouts(&peer).is_some() {
                 self.dial(peer);
             } else {
-                self.awaiting_report.insert(peer);
+                self.awaiting.insert(peer, since);
             }
         }
     }

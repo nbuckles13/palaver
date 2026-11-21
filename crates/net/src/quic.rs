@@ -344,6 +344,10 @@ impl Endpoint for QuicEndpoint {
         self.key
     }
 
+    fn dials_by_address(&self) -> bool {
+        true
+    }
+
     async fn dial(&self, peer: &Peer) -> Result<QuicConnection, DialError> {
         if peer.key == self.key {
             return Err(DialError::Unreachable);
@@ -501,6 +505,7 @@ impl Connection for QuicConnection {
         Path {
             kind: PathKind::Direct,
             rtt: self.connection.rtt(),
+            remote: Some(self.connection.remote_address()),
         }
     }
 

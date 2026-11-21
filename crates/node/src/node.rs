@@ -54,6 +54,7 @@ pub enum Output {
 struct LinkInfo {
     path: PathKind,
     rtt: Duration,
+    observed: Option<SocketAddr>,
 }
 
 /// How long the khef keeps the latest object of a control track.
@@ -165,6 +166,18 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         self.control.report_of(participant)
     }
 
+    /// The addresses other nodes say they see `participant` at.
+    pub fn observed_addresses_of(&self, participant: &ParticipantId) -> Vec<SocketAddr> {
+        self.control.observed_addresses_of(participant)
+    }
+
+    /// The nodes the plan pairs this one with.
+    pub fn planned_peers_now(&self) -> BTreeSet<ParticipantId> {
+        self.control
+            .plan()
+            .map_or_else(BTreeSet::new, |plan| Self::planned_peers(plan, self.me()))
+    }
+
     pub fn counters(&self) -> Counters {
         self.counters
     }
@@ -214,6 +227,7 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         role: Role,
         path: PathKind,
         rtt: Duration,
+        observed: Option<SocketAddr>,
         now: Timestamp,
     ) {
         self.dialing.remove(&peer);
@@ -222,7 +236,14 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         }
         // It answered, whatever was thought before.
         self.unreachable.remove(&peer);
-        self.links.insert(peer.clone(), LinkInfo { path, rtt });
+        self.links.insert(
+            peer.clone(),
+            LinkInfo {
+                path,
+                rtt,
+                observed,
+            },
+        );
         self.khef.link_up(peer, role, now);
         self.started = true;
         self.refresh_view();
@@ -239,7 +260,8 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         now: Timestamp,
     ) {
         if let Some(info) = self.links.get_mut(peer) {
-            *info = LinkInfo { path, rtt };
+            info.path = path;
+            info.rtt = rtt;
             self.refresh_view();
             self.service(now);
         }
@@ -334,6 +356,7 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
                     peer: peer.clone(),
                     path: info.path,
                     rtt: info.rtt,
+                    observed: info.observed.map(Redacted::new),
                 })
                 .collect(),
             unreachable: self.unreachable.iter().cloned().collect(),

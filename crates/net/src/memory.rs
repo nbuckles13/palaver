@@ -5,6 +5,10 @@
 //! order and say how they ended, a slow reader makes the writer wait, datagrams are dropped
 //! when their queue is full, and a close is seen by both ends.
 //!
+//! An endpoint can be put behind a NAT ([`MemoryNetwork::put_behind_nat`]): it is then
+//! reached only by those it has itself dialled, which is what a home router does and
+//! what two nodes dialling each other at once get past.
+//!
 //! What it does not do: delay, loss, or a path that goes quiet without closing. Those are
 //! the simulator's business; this is for running real nodes against each other in one
 //! process, in tests and for bots that share one.
@@ -15,11 +19,14 @@ use crate::transport::{
 };
 use bytes::Bytes;
 use palaver_proto::{PathKind, PublicKey};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, watch};
+use tokio::time::timeout;
 
+/// How long a dial to an endpoint behind a NAT waits for that endpoint to dial back.
+pub const NAT_PATIENCE: Duration = Duration::from_secs(10);
 /// Connections dialled to an endpoint and not yet accepted by it.
 const ACCEPT_QUEUE: usize = 16;
 /// Streams opened by one end and not yet accepted by the other.
@@ -90,11 +97,25 @@ impl Listener {
 #[derive(Clone, Default)]
 pub struct MemoryNetwork {
     listeners: Arc<Mutex<BTreeMap<PublicKey, Arc<Listener>>>>,
+    nat: Arc<Nat>,
+}
+
+/// Who is behind a NAT, and who has dialled whom: (from, to), kept for good.
+#[derive(Default)]
+struct Nat {
+    behind: Mutex<BTreeSet<PublicKey>>,
+    dialled: watch::Sender<BTreeSet<(PublicKey, PublicKey)>>,
 }
 
 impl MemoryNetwork {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Put the endpoint known by `key` behind a NAT, now or when it comes: a dial reaches
+    /// it only once it has dialled the dialler, and waits [`NAT_PATIENCE`] for that.
+    pub fn put_behind_nat(&self, key: PublicKey) {
+        lock(&self.nat.behind).insert(key);
     }
 
     /// An endpoint on this network known by `key`. `None` if an open endpoint already
@@ -141,12 +162,27 @@ impl Endpoint for MemoryEndpoint {
         self.key
     }
 
+    fn dials_by_address(&self) -> bool {
+        false
+    }
+
     async fn dial(&self, peer: &Peer) -> Result<MemoryConnection, DialError> {
         if *self.listener.closed.borrow() {
             return Err(DialError::EndpointClosed);
         }
         if peer.key == self.key {
             return Err(DialError::Unreachable);
+        }
+        // The dial opens the way back through this end's NAT, if it has one.
+        let nat = &self.network.nat;
+        nat.dialled
+            .send_if_modified(|dialled| dialled.insert((self.key, peer.key)));
+        if lock(&nat.behind).contains(&peer.key) {
+            let mut dialled = nat.dialled.subscribe();
+            let opened = dialled.wait_for(|dialled| dialled.contains(&(peer.key, self.key)));
+            if !matches!(timeout(NAT_PATIENCE, opened).await, Ok(Ok(_))) {
+                return Err(DialError::Unreachable);
+            }
         }
         let target = lock(&self.network.listeners).get(&peer.key).cloned();
         let Some(target) = target else {
@@ -297,6 +333,7 @@ impl Connection for MemoryConnection {
         Path {
             kind: PathKind::Direct,
             rtt: Duration::ZERO,
+            remote: None,
         }
     }
 
@@ -830,5 +867,37 @@ mod tests {
         // The endpoint still holds it, so it is open until the endpoint lets go.
         drop(b);
         assert_eq!(ours.closed().await.by, ClosedBy::Peer);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_endpoint_behind_a_nat_is_reached_only_by_those_it_has_dialled() {
+        let network = MemoryNetwork::new();
+        let open = network.endpoint(key(1)).unwrap();
+        let hidden = network.endpoint(key(2)).unwrap();
+        network.put_behind_nat(key(2));
+        assert_eq!(
+            open.dial(&Peer::by_key(key(2))).await.err(),
+            Some(DialError::Unreachable)
+        );
+        // It can dial out, and that opens the way back in.
+        assert!(hidden.dial(&Peer::by_key(key(1))).await.is_ok());
+        assert!(open.dial(&Peer::by_key(key(2))).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_endpoints_behind_nats_connect_when_both_dial() {
+        let network = MemoryNetwork::new();
+        let a = Arc::new(network.endpoint(key(1)).unwrap());
+        let b = network.endpoint(key(2)).unwrap();
+        network.put_behind_nat(key(1));
+        network.put_behind_nat(key(2));
+        let first = {
+            let a = Arc::clone(&a);
+            tokio::spawn(async move { a.dial(&Peer::by_key(key(2))).await.is_ok() })
+        };
+        // The first dial is still waiting when the second comes the other way.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(b.dial(&Peer::by_key(key(1))).await.is_ok());
+        assert!(first.await.unwrap());
     }
 }

@@ -104,6 +104,7 @@ fn once_connected_a_joiner_opens_a_session_and_stops_dialling() {
         Role::Client,
         PathKind::Direct,
         Duration::from_millis(4),
+        None,
         at(30),
     );
     let out = outputs(&mut n);
@@ -120,6 +121,7 @@ fn once_connected_a_joiner_opens_a_session_and_stops_dialling() {
         Role::Client,
         PathKind::Direct,
         Duration::ZERO,
+        None,
         at(31),
     );
     n.link_up(
@@ -127,6 +129,7 @@ fn once_connected_a_joiner_opens_a_session_and_stops_dialling() {
         Role::Client,
         PathKind::Direct,
         Duration::ZERO,
+        None,
         at(31),
     );
     assert_eq!(n.links().count(), 1);
@@ -141,6 +144,7 @@ fn a_joiner_whose_only_link_goes_silent_hangs_up_and_tries_the_next_entry_point(
         Role::Client,
         PathKind::Direct,
         Duration::from_millis(4),
+        None,
         at(0),
     );
     outputs(&mut n);
