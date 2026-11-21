@@ -19,7 +19,8 @@ use palaver_net::quic::{BindError, QuicEndpoint, QuicOptions};
 use palaver_net::reach::{self, Network, StunConfig};
 use palaver_net::transport::{Endpoint, Peer};
 use palaver_proto::{
-    EntryPoint, MediaTrack, Redacted, SECRET_BYTES, Secret, Signer, Source, Ticket,
+    EntryPoint, MAX_ENTRY_POINTS, MediaTrack, Redacted, SECRET_BYTES, Secret, Signer, Source,
+    Ticket,
 };
 use palaver_sdk::{Call, Engine, EngineConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -213,6 +214,23 @@ impl Bot {
                 addresses: self.address.addresses.clone(),
             }],
         }
+    }
+
+    /// The ticket to send back to whoever gave this bot `invitation`, when it could not
+    /// get in by it: the same meeting, with this bot first among the ways in. A member
+    /// who is given it can [`reach`](Self::reach) for this bot.
+    pub fn reply_to(&self, invitation: &Ticket) -> Ticket {
+        let mut reply = self.ticket(&invitation.secret);
+        reply
+            .entry_points
+            .extend(invitation.entry_points.iter().cloned());
+        reply.entry_points.truncate(MAX_ENTRY_POINTS);
+        reply
+    }
+
+    /// Dial everyone `ticket` names: for a ticket sent back by someone who cannot get in.
+    pub async fn reach(&self, ticket: &Ticket) {
+        self.call.engine().reach(entry_points(ticket)).await;
     }
 
     pub fn engine(&self) -> &Engine {

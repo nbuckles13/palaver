@@ -4,6 +4,10 @@
 //! palaver-bot [room] [bots] [seconds]     a room in this one process (6 bots, 10 seconds)
 //! palaver-bot create [options]            start a meeting on the network; prints a ticket
 //! palaver-bot join <ticket> [options]     join one
+//!
+//! A bot that cannot get in by its ticket prints `reply <ticket>`: a ticket with itself
+//! in it. Given to a bot in the meeting as a line on its standard input, that bot dials
+//! back, and with both ends dialling the two get through their routers.
 //! palaver-bot stun-server <address>       answer STUN questions there, for tests
 //!
 //! options:
@@ -13,10 +17,12 @@
 //!   --speaker <n>           which made-up voice it has (default 1)
 //!   --silent                only listen
 //!   --seconds <n>           how long to stay (default: until stopped)
-//!   --stun <address>        with create: a STUN server to ask for this node's public
-//!                           address; may be repeated (default: two public servers,
-//!                           asked only if the node has no public address of its own)
-//!   --no-stun               with create: ask no STUN server
+//!   --stun <address>        a STUN server to ask for this node's public address; may be
+//!                           repeated (default: two public servers). A node asks only
+//!                           if it has no public address of its own, and only when it
+//!                           makes a ticket: at create, or when it cannot get in
+//!   --no-stun               ask no STUN server
+//!   --dial-seconds <n>      how long one attempt to connect may take (default 10)
 //! ```
 //!
 //! A room runs over the in-memory transport and touches no network: the first bot only
@@ -35,7 +41,7 @@ use palaver_media::synthetic::{PITCHES, Rhythm};
 use palaver_net::memory::MemoryNetwork;
 use palaver_net::quic::{BindError, QuicOptions};
 use palaver_net::reach::{
-    DEFAULT_STUN_SERVERS, Network, STUN_PATIENCE, StunConfig, StunMode, resolve,
+    DEFAULT_STUN_SERVERS, Network, STUN_PATIENCE, StunConfig, StunMode, is_public, resolve,
 };
 use palaver_net::stun::{TransactionId, binding_response, is_stun};
 use palaver_proto::{Secret, Ticket};
@@ -110,6 +116,7 @@ struct Options {
     seconds: Option<u64>,
     stun: Vec<String>,
     no_stun: bool,
+    dial_seconds: Option<u64>,
 }
 
 fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
@@ -142,6 +149,11 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--silent" => options.silent = true,
             "--stun" => options.stun.push(value("an address")?),
             "--no-stun" => options.no_stun = true,
+            "--dial-seconds" => {
+                let text = value("a number")?;
+                options.dial_seconds =
+                    Some(text.parse().map_err(|_| format!("not a number: {text}"))?);
+            }
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -162,53 +174,72 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
     };
     let quic = QuicOptions {
         bind: options.bind.unwrap_or(QuicOptions::default().bind),
+        dial_timeout: options
+            .dial_seconds
+            .map_or(QuicOptions::default().dial_timeout, Duration::from_secs),
         ..QuicOptions::default()
     };
     let name = format!("bot {speaker}");
     let mut bot = Bot::on_quic(quic, options.advertise, &secret, &name, script)?;
+
+    // Whom to ask for this node's public address, when the time comes. Their names are
+    // looked up only then: a lookup can take seconds, and most runs never need one.
+    let names = if options.no_stun {
+        Vec::new()
+    } else if options.stun.is_empty() {
+        DEFAULT_STUN_SERVERS.map(String::from).to_vec()
+    } else {
+        options.stun
+    };
+
     match &ticket {
         Some(ticket) => bot.join(entry_points(ticket)).await,
         None => {
             // An invitation is about to be made: now is when the public address matters.
-            let names = if options.stun.is_empty() {
-                DEFAULT_STUN_SERVERS.map(String::from).to_vec()
-            } else {
-                options.stun
-            };
-            let like = bot.address().addresses.first().map(|a| *a.reveal());
-            let config = StunConfig {
-                mode: if options.no_stun {
-                    StunMode::Never
-                } else {
-                    StunMode::WhenNeeded
-                },
-                servers: match (options.no_stun, like) {
-                    (false, Some(like)) => resolve(&names, like).await,
-                    _ => Vec::new(),
-                },
-                patience: STUN_PATIENCE,
-            };
-            println!(
-                "network {}",
-                match bot.find_network(&config).await {
-                    Network::Open(_) => "open",
-                    Network::BehindRouter(_) => "behind a router",
-                    Network::PerDestination => "gives a port per destination",
-                    Network::Unknown => "unknown",
-                }
-            );
+            say_network(find_network(&mut bot, &names).await);
             bot.create_meeting().await;
             // The ticket holds the meeting secret; showing it is the point of this line.
             println!("ticket {}", bot.ticket(&secret).to_text().expose());
         }
     }
 
+    // Tickets sent back by those who could not get in arrive as lines on standard input.
+    let (paste, mut pasted) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            if paste.send(line).is_err() {
+                return;
+            }
+        }
+    });
+
     let mut beat = tokio::time::interval(FRAME);
     let frames = options.seconds.map(|seconds| seconds.saturating_mul(50));
     let mut frame = 0u64;
+    let mut replied = false;
     while frames.is_none_or(|frames| frame < frames) {
-        beat.tick().await;
+        tokio::select! {
+            _ = beat.tick() => {}
+            Some(line) = pasted.recv() => {
+                match Ticket::parse(line.trim()) {
+                    Ok(back) => {
+                        println!("reaching for whoever sent a ticket back");
+                        bot.reach(&back).await;
+                    }
+                    Err(error) => eprintln!("not a ticket: {error:?}"),
+                }
+                continue;
+            }
+        }
         bot.tick().map_err(BotError::Codec)?;
+        let nobody_answers = bot.engine().status().borrow().nobody_answers;
+        if let (true, false, Some(invitation)) = (nobody_answers, replied, &ticket) {
+            // It cannot get in on its own. Its public address is wanted now, for the
+            // ticket that goes back to whoever invited it.
+            replied = true;
+            say_network(find_network(&mut bot, &names).await);
+            println!("reply {}", bot.reply_to(invitation).to_text().expose());
+        }
         if frame % 50 == 49 {
             let (roster, links) = {
                 let status = bot.engine().status();
@@ -225,6 +256,37 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
     }
     bot.stop().await;
     Ok(())
+}
+
+/// Find what network `bot` is on, asking the STUN servers named if it needs to.
+async fn find_network(bot: &mut Bot, names: &[String]) -> Network {
+    let local = bot.address().addresses.first().map(|a| *a.reveal());
+    let servers = match local {
+        Some(local) if !is_public(local.ip()) => resolve(names, local).await,
+        _ => Vec::new(),
+    };
+    let config = StunConfig {
+        mode: if names.is_empty() {
+            StunMode::Never
+        } else {
+            StunMode::WhenNeeded
+        },
+        servers,
+        patience: STUN_PATIENCE,
+    };
+    bot.find_network(&config).await
+}
+
+fn say_network(network: Network) {
+    println!(
+        "network {}",
+        match network {
+            Network::Open(_) => "open",
+            Network::BehindRouter(_) => "behind a router",
+            Network::PerDestination => "gives a port per destination",
+            Network::Unknown => "unknown",
+        }
+    );
 }
 
 /// Answer every STUN question that arrives at `bind` with the address it came from.
