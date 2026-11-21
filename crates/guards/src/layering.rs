@@ -25,6 +25,8 @@ pub const BANNED_FOR_SANS_IO: &[&str] = &[
     "iroh",
     "palaver-net",
     "palaver-media",
+    "palaver-sound",
+    "cpal",
     "palaver-sdk",
 ];
 

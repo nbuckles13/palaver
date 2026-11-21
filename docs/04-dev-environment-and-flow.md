@@ -8,8 +8,19 @@ Draft for discussion, 2026-11-14.
 
 Everything is a standard cargo command, so a developer, an agent and CI run
 the same thing on Linux, Windows and macOS with no bash and no custom runner:
-(One thing beyond the Rust toolchain is needed: a C compiler and `cmake`, to build libopus
-from source.)
+Two things beyond the Rust toolchain are needed:
+
+- a C compiler and `cmake`, to build libopus from source;
+- on Linux, the ALSA headers, for the sound crate (`palaver-sound`).
+
+On Debian or Ubuntu (WSL2 included):
+
+```
+sudo apt install build-essential cmake libasound2-dev
+```
+
+Windows and macOS need nothing for sound beyond what the system has. To work without the
+ALSA headers, name the crates: `-p palaver-bot` builds no sound code.
 
 | Command | Covers |
 |---|---|
@@ -125,7 +136,8 @@ Notes:
 ### Machines
 
 - **Day to day: WSL2** (this machine: 32 cores, 15 GB; Rust 1.95, podman, gh, node present).
-  To install: `clang`, `cmake`, `cargo-nextest`, `cargo-deny`, audio/video dev headers. T0–T4 all
+  To install: `clang`, `cmake`, `cargo-nextest`, `cargo-deny`, and the audio headers
+  (`sudo apt install libasound2-dev`); video dev headers when video arrives. T0–T4 all
   run here. Real devices do not (WSLg audio latency is unusable for echo work; no camera by
   default), which is why synthetic sources are in the engine.
 - **Windows native**: build and run on the Windows host of this machine for T3 and T6. Cross-compiling
