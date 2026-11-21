@@ -303,6 +303,10 @@ impl<E: Endpoint> Endpoint for Admitted<E> {
         self.inner.key()
     }
 
+    fn dials_by_address(&self) -> bool {
+        self.inner.dials_by_address()
+    }
+
     /// [`DialError::Refused`] if the peer was reached and the handshake failed.
     async fn dial(&self, peer: &Peer) -> Result<E::Connection, DialError> {
         let connection = self.inner.dial(peer).await?;

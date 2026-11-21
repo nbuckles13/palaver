@@ -16,14 +16,15 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::time::timeout;
 
-const PATIENCE: Duration = Duration::from_secs(4);
+const PATIENCE: Duration = Duration::from_millis(1500);
 
 struct Member {
     engine: Engine,
     address: Peer,
 }
 
-fn member(name: &str) -> Member {
+/// A node on the loopback interface, which tells the meeting its address or does not.
+fn member(name: &str, advertise: bool) -> Member {
     let secret = Secret::new([7; 32]);
     let identity = Identity::generate().unwrap();
     let endpoint = QuicEndpoint::bind(
@@ -49,7 +50,7 @@ fn member(name: &str) -> Member {
             source: Source::Main,
             rendition: b"opus".to_vec(),
         }],
-        addresses: vec![at],
+        addresses: if advertise { vec![at] } else { Vec::new() },
         relay_url: None,
         link_watch: LinkWatchConfig::default(),
     };
@@ -63,9 +64,13 @@ fn member(name: &str) -> Member {
     }
 }
 
-#[tokio::test]
-async fn nodes_that_joined_through_one_find_each_other_by_their_reports() {
-    let members: Vec<Member> = ["a", "b", "c", "d"].into_iter().map(member).collect();
+/// Four nodes, the last three joining through the first and knowing only its address.
+/// Every node is given two peers at least, so each joiner must find another joiner.
+async fn joiners_find_each_other(advertise: bool) {
+    let members: Vec<Member> = ["a", "b", "c", "d"]
+        .into_iter()
+        .map(|name| member(name, advertise))
+        .collect();
     members[0].engine.create_meeting().await;
     // Each joiner knows only where the first is.
     for joiner in &members[1..] {
@@ -92,4 +97,14 @@ async fn nodes_that_joined_through_one_find_each_other_by_their_reports() {
             *member.engine.status().borrow()
         );
     }
+}
+
+#[tokio::test]
+async fn nodes_that_joined_through_one_find_each_other_by_their_reports() {
+    joiners_find_each_other(true).await;
+}
+
+#[tokio::test]
+async fn a_node_that_gives_no_address_is_found_where_its_neighbours_see_it() {
+    joiners_find_each_other(false).await;
 }

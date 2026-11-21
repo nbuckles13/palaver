@@ -236,6 +236,23 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         self.reports.get(participant).map(|heard| &heard.report)
     }
 
+    /// The addresses other nodes say they see `participant` at, each once, in the order
+    /// of the ids of those who say so.
+    pub fn observed_addresses_of(&self, participant: &ParticipantId) -> Vec<SocketAddr> {
+        let mut seen = Vec::new();
+        for heard in self.reports.values() {
+            for link in &heard.report.links {
+                if let Some(observed) = &link.observed
+                    && link.peer == *participant
+                    && !seen.contains(observed.reveal())
+                {
+                    seen.push(*observed.reveal());
+                }
+            }
+        }
+        seen
+    }
+
     /// Tell the node what its links and addresses are now. A change is reported at once.
     pub fn set_view(&mut self, view: LocalView) {
         if view != self.view {
@@ -758,6 +775,7 @@ mod tests {
                 peer: id_of(2),
                 path: PathKind::Direct,
                 rtt: Duration::from_millis(3),
+                observed: None,
             }],
             addresses: vec![Redacted::new("192.168.1.5:4433".parse().unwrap())],
             ..LocalView::default()
@@ -967,6 +985,7 @@ mod tests {
             peer: id_of(peer),
             path: PathKind::Direct,
             rtt: Duration::from_millis(2),
+            observed: None,
         }
     }
 
@@ -1157,6 +1176,7 @@ mod tests {
             j.set_view(LocalView {
                 links: vec![Link {
                     rtt: Duration::from_millis(round),
+                    observed: None,
                     ..direct(1)
                 }],
                 ..LocalView::default()

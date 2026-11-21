@@ -264,7 +264,7 @@ catalog track lists each participant's available tracks.
     names) from about 80 ms to about 220 ms after a join; audio wiring is not delayed.
   - Phase 1 sends whole plans, not deltas.
 - **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
-  RTT), unreachable peers, last plan applied, up to eight addresses, iroh-relay URL. Plan: term and generation, conductor, roster,
+  RTT, the address the peer is seen at), unreachable peers, last plan applied, up to eight addresses, iroh-relay URL. Plan: term and generation, conductor, roster,
   peerings, audio overlay tree and N, successor list, each member's tracks with their
   aliases, and the next free aliases. Report also: the media tracks the node can send. The rest of the lists above arrives as
   new field numbers.
@@ -315,8 +315,11 @@ otherwise closed once the planned peerings are up.
 - **Roster**: the conductor adds any admitted node whose report verifies once a chain of
   links, each reported by both its ends, joins the node to it; and drops a node 500 ms
   after that stops being so (see Liveness above). Host approval and meeting lock come later.
-- **Peerings**: on one network the node with the lower participant id dials. With NAT
-  traversal both dial at once and one connection is kept by the same tie-break.
+- **Peerings**: the node with the lower participant id dials. The other waits 200 ms and,
+  if no connection has come, dials too: through NATs the first dial's packets arrive only
+  once the other end has sent some, and on an open network the wait saves a second
+  connection. If both get through, one is kept by the same tie-break. The first dial alone
+  decides whether the peer is reported unreachable.
 - **First report**: a joiner's control logic starts when its entry link is up, so its first
   report names that link and the conductor wires it by a link that already works.
 - **Closing unplanned links**: a node closes a link the plan does not name only when both
@@ -607,7 +610,9 @@ A **profile** of MoQT, deliberately small:
     ends everything waiting on the connection; a writer waits when the reader is behind.
   - **The in-memory transport** (`net::memory`) keeps those promises with channels, for
     running real nodes against each other in one process. It has no delay or loss and no
-    path that goes quiet without closing; those are the simulator's.
+    path that goes quiet without closing; those are the simulator's. An endpoint can be
+    put behind a NAT: it is then reached only by those it has dialled, and a dial to it
+    waits 10 s for that, which is enough to test that two such nodes get connected.
 - **The node** (`palaver_node::Node`) owns the khef and the control logic, which do not know
   of each other. Control objects go up from the khef to be checked and come down to be
   flooded; an adopted plan is carried out (dial planned peers, tell the khef where audio
@@ -622,9 +627,11 @@ A **profile** of MoQT, deliberately small:
   handed to the player as slices of the same buffer.
   - **Two nodes that dial each other at once** keep the connection dialled by the lower
     participant id and close the other; both apply the same rule.
-  - **Where a peer is dialled**: at every address its latest report lists, and, if it is
-    an entry point, those of the ticket as well. A peer the plan names whose report has
-    not yet come is dialled when it comes.
+  - **Where a peer is dialled**: at every address its latest report lists, at those of
+    the ticket if it is an entry point, and at every address its neighbours report seeing
+    it at (each link in a report carries the address the peer's packets come from). A
+    peer the plan names is dialled once an address for it is known; after 10 s without
+    one the dial has failed.
 - **A call** (`sdk::Call`) puts a voice on an engine. Its owner keeps a 20 ms beat and on
   each one gives it the frame captured and asks for the frame to play. Speaking is level,
   Opus, and a datagram to the engine. Listening is one jitter buffer and decoder per voice
