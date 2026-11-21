@@ -167,6 +167,23 @@ level to its target within seconds.
   (its settings, or a first guess at the gain from the first seconds of speech), without
   bringing up the noise of a quiet room when nobody is talking.
 
+### Noise suppression: how much, and who decides
+
+What there is (`media::process`): WebRTC's suppressor as ported in `sonora`, at its
+default strength. It turns down steady noise (a fan, a hum, hiss: more than 10 dB in the
+tests) and does little for sudden sounds: a keyboard, a dog, someone else talking in the
+room. Tested on made-up hiss only, not on a real fan or a street.
+
+- **Settings for the user.** At the least: noise suppression on or off, and how strong;
+  echo cancelling and level control on or off. They belong with the microphone check,
+  where the effect can be heard at once. A musician, or someone whose system already
+  cleans the microphone, wants them off.
+- **Stronger suppression**, if the default proves too little once it can be heard in the
+  app: `sonora`'s higher levels (more noise gone, at some cost to the voice), or a neural
+  suppressor (RNNoise, DeepFilterNet) as a stage of its own, which is what goes after
+  the sudden sounds.
+- To measure first: real noise, and what each level costs the voice.
+
 ### Echo cancelling on real devices
 
 With headphones there is no echo, and the canceller should do nothing. Measured on a real
