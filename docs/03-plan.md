@@ -150,27 +150,35 @@ key that outlives one meeting, one ticket per contact so that one person can be 
 and a place in private mode, because being always on shows ticket holders when you are
 online.
 
-### Quiet microphones
+### Microphones the system has already processed
 
-Some microphones give very little even with the system's volume at its highest (measured:
-a USB headset whose speech peaked 41 dB below full scale, which the system's own meter
-showed as 6%). The level control lifts a voice at an ordinary level to its target within
-seconds, but a voice that faint by only 17 dB after thirty seconds, where 35 or more was
-wanted. Beyond the gain the user can set in the microphone check: find out whether the
-level control can be made to climb faster for a faint voice (its settings, or a first
-guess at the gain from the first seconds of speech), without bringing up the noise of a
-quiet room when nobody is talking.
+Windows can clean the microphone before an app gets it ("Voice Focus", "Voice Clarity").
+Measured on a USB headset (2026-11-21), in the loudest quarter second of speech as
+captured: -63 dB with both on, -44 dB with one off, -35 dB with both off. With either on,
+the quiet between words was exact digital silence, and coughs and whistles never arrived.
+Our own cleaning then works on top of someone else's: the level control lifted the
+faintest of these by only 17 dB in thirty seconds, where it brings a voice at an ordinary
+level to its target within seconds.
 
-### Echo cancelling with headphones
+- The microphone check should notice it (exact silence between sounds is the sign; so is
+  speech that stays very quiet) and say so, so that the user can turn one or the other
+  off, or raise the input gain.
+- To find out: whether the level control can be made to climb faster for a faint voice
+  (its settings, or a first guess at the gain from the first seconds of speech), without
+  bringing up the noise of a quiet room when nobody is talking.
+
+### Echo cancelling on real devices
 
 With headphones there is no echo, and the canceller should do nothing. Measured on a real
-headset (2026-11-21, one run, the microphone made 35 dB louder and clipping in places):
-nothing of the other voice came through, but the talker's own voice came out 3 to 20 dB
-quieter while the other voice was playing, for the first ten seconds or so, and within
-4 dB of untouched after fifteen. Talking alone was untouched throughout. To do: repeat
-with a microphone at a proper level and with speakers; then decide between tuning the
-canceller, turning it off when the output is headphones (where the system can say), and
-a switch for the user.
+headset with the system's own voice effects off (2026-11-21, twenty seconds against a
+made-up other voice): nothing of the other voice came through, and the talker came out
+as loud while the other voice played as alone, but for one dip of 8 dB three seconds
+in. An earlier run that showed the talker 3 to 20 dB down was through the system's
+effects and a clipping gain, and does not count.
+
+Not yet measured: speakers, where there is an echo to remove. Until it is, keep in mind
+the ways out if it disappoints: tuning the canceller, turning it off when the output is
+headphones (where the system can say), and a switch for the user.
 
 ### A sender whose clock runs fast
 
