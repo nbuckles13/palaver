@@ -135,6 +135,13 @@ K_auth  = HKDF(root, "auth")                 → never published; input to a PAK
      adds itself to the ticket and sends it back the way it came; a member pastes it and
      dials. Needed once per joiner (to reach one member; the rest follow by step 2).
      Members on one network (same public address) need only one entry between them.
+     How it runs: a joiner that nobody answers keeps trying everyone in its ticket, a
+     second apart, which also keeps the way back through its own router open. It asks
+     STUN for its public address and offers a ticket with itself first in it. A member
+     given that ticket dials the joiner; since the joiner has been sending to that
+     member's address, both routers have now seen a packet go out, and the connection
+     is made. The member must be one the joiner's ticket names (in practice, whoever
+     invited it): the joiner's router lets in only those the joiner has sent to.
   5. *Rendezvous* (phase 4) does step 4 without the pasting.
   - **Not covered**: a node behind a symmetric NAT can connect only to a node that is
     reachable without punching, and then talks to the others through it. If there is no
@@ -653,6 +660,10 @@ A **profile** of MoQT, deliberately small:
     one the dial has failed. An address learned while a dial is under way is tried as
     well: the neighbour's report that holds a peer's public address can come after the
     dial to its private one began.
+  - **Outside**: a node told to join that has no link and no plan says so
+    (`Status::nobody_answers`) once everyone in its ticket has failed to answer, and
+    goes on trying them all. `Engine::reach` dials nodes named in a ticket that came
+    back.
 - **A call** (`sdk::Call`) puts a voice on an engine. Its owner keeps a 20 ms beat and on
   each one gives it the frame captured and asks for the frame to play. Speaking is level,
   Opus, and a datagram to the engine. Listening is one jitter buffer and decoder per voice

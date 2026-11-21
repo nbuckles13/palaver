@@ -58,6 +58,10 @@ const CLOSE_HANGUP: u64 = 0x101;
 /// How long a dial waits to learn where its peer is before it is given up.
 const ADDRESS_PATIENCE: Duration = Duration::from_secs(10);
 const ANSWER_DELAY: Duration = Duration::from_millis(200);
+/// How long a node that nobody answered waits before it tries them all again. Short
+/// enough that a router along the way still remembers its last try when the other end
+/// starts to dial back.
+const KNOCK_PAUSE: Duration = Duration::from_secs(1);
 
 /// What the engine is told once, at start.
 #[derive(Debug, Clone)]
@@ -98,12 +102,17 @@ pub struct Status {
     pub links: Vec<ParticipantId>,
     /// Whose microphone each audio alias is, by the plan.
     pub microphones: Vec<(u64, ParticipantId)>,
+    /// The node was told to join and nobody it was sent to has answered. It keeps
+    /// trying. This is the moment to give the person who invited it a ticket with this
+    /// node in it, for them to [`Engine::reach`].
+    pub nobody_answers: bool,
 }
 
 enum Command {
     Create,
     Join(Vec<Peer>),
     Addresses(Vec<SocketAddr>),
+    Reach(Vec<Peer>),
     Audio {
         group: u64,
         level: u8,
@@ -174,6 +183,9 @@ impl Engine {
             endpoint,
             links: BTreeMap::new(),
             entry_points: BTreeMap::new(),
+            join_through: Vec::new(),
+            nobody_answers: false,
+            knock_pending: false,
             awaiting: BTreeMap::new(),
             dials: BTreeMap::new(),
             answering: BTreeSet::new(),
@@ -211,6 +223,13 @@ impl Engine {
     /// Join a meeting through one of `entry_points`, tried in order.
     pub async fn join(&self, entry_points: Vec<Peer>) {
         let _ = self.commands.send(Command::Join(entry_points)).await;
+    }
+
+    /// Dial nodes that are trying to join and cannot get through on their own: those in a
+    /// ticket one of them sent back. Through routers, a connection needs both ends to
+    /// send; the joiner has been sending since it began, and this is the other half.
+    pub async fn reach(&self, peers: Vec<Peer>) {
+        let _ = self.commands.send(Command::Reach(peers)).await;
     }
 
     /// Where this node can be reached has changed: it has learned its public address,
@@ -262,6 +281,8 @@ enum Input<C: Connection> {
     DialEnded {
         peer: ParticipantId,
     },
+    /// It is time to try again everyone this node was told to join through.
+    Knock,
     /// It is time to dial `peer`, which should have dialled this node, if it has not.
     Answer {
         peer: ParticipantId,
@@ -330,6 +351,12 @@ struct Run<E: Endpoint> {
     links: BTreeMap<ParticipantId, Link<E::Connection>>,
     /// Where to find the nodes the meeting was joined through.
     entry_points: BTreeMap<ParticipantId, Peer>,
+    /// The nodes this one was told to join through, in order.
+    join_through: Vec<ParticipantId>,
+    /// Nobody it was told to join through has answered yet.
+    nobody_answers: bool,
+    /// A [`Input::Knock`] is on its way.
+    knock_pending: bool,
     /// Nodes to dial once it is known where they are, and since when each has waited.
     awaiting: BTreeMap<ParticipantId, Timestamp>,
     /// Dials under way.
@@ -400,7 +427,19 @@ impl<E: Endpoint> Run<E> {
                     ids.push(id.clone());
                     self.entry_points.insert(id, peer);
                 }
+                self.join_through.clone_from(&ids);
+                self.nobody_answers = false;
                 self.node.join(ids, now);
+            }
+            Command::Reach(peers) => {
+                for target in peers {
+                    let peer = participant_id(&target.key);
+                    if peer != *self.node.me() && !self.links.contains_key(&peer) {
+                        // Remembered, so that a later dial the plan asks for knows where.
+                        self.entry_points.insert(peer.clone(), target.clone());
+                        self.attempt(peer, target, false);
+                    }
+                }
             }
             Command::Audio {
                 group,
@@ -428,6 +467,16 @@ impl<E: Endpoint> Run<E> {
             Input::Connected(connection) => self.connected(connection),
             Input::DialEnded { peer } => self.dial_ended(&peer),
             Input::Answer { peer } => self.answer(peer),
+            Input::Knock => {
+                self.knock_pending = false;
+                if self.outside() {
+                    for peer in self.join_through.clone() {
+                        if let Some(target) = self.whereabouts(&peer) {
+                            self.attempt(peer, target, false);
+                        }
+                    }
+                }
+            }
             Input::Opened {
                 peer,
                 number,
@@ -581,7 +630,9 @@ impl<E: Endpoint> Run<E> {
             }
         }
         self.answer_dials();
+        self.knock();
         let status = Status {
+            nobody_answers: self.nobody_answers,
             plan: self.node.plan().map(|plan| plan.stamp),
             conductor: self.node.is_conductor(),
             roster: self.node.plan().map_or_else(Vec::new, |plan| {
@@ -719,6 +770,33 @@ impl<E: Endpoint> Run<E> {
                 self.attempt(peer, target, false);
             }
         }
+    }
+
+    /// Told to join, and still with no link and no plan.
+    fn outside(&self) -> bool {
+        !self.join_through.is_empty() && self.links.is_empty() && self.node.plan().is_none()
+    }
+
+    /// A node that everyone it was sent to has failed to answer tries them all again,
+    /// after a pause, for as long as it is outside. Each try also keeps open the way
+    /// back through its own router, for a member who dials it from a ticket it sent.
+    fn knock(&mut self) {
+        if !self.outside() {
+            self.nobody_answers = false;
+            return;
+        }
+        // The node tries each in turn first; while any try is under way there is
+        // nothing to add.
+        if !self.dials.is_empty() || !self.awaiting.is_empty() || self.knock_pending {
+            return;
+        }
+        self.nobody_answers = true;
+        self.knock_pending = true;
+        let inputs = self.inputs.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(KNOCK_PAUSE).await;
+            let _ = inputs.send(Input::Knock).await;
+        });
     }
 
     /// Planned peers with a lower id dial this node. Through NATs their packets arrive

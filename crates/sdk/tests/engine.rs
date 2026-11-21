@@ -234,3 +234,30 @@ async fn nodes_behind_nats_reach_each_other_because_both_dial() {
         m.until("two links", |status| status.links.len() >= 2).await;
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_joiner_nobody_can_answer_gets_in_once_a_member_reaches_for_it() {
+    let network = MemoryNetwork::new();
+    let (member_, joiner) = (member(&network, "member"), member(&network, "joiner"));
+    // Each is behind a router: reached only by those it has itself dialled.
+    network.put_behind_nat(member_.address.key);
+    network.put_behind_nat(joiner.address.key);
+    member_.engine.create_meeting().await;
+    joiner.engine.join(vec![member_.address.clone()]).await;
+
+    // The joiner's dial goes unanswered, and it says so and keeps trying.
+    joiner
+        .until("nobody answers", |status| status.nobody_answers)
+        .await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert!(joiner.engine.status().borrow().links.is_empty());
+    assert!(joiner.engine.status().borrow().nobody_answers);
+
+    // The member is given the joiner's whereabouts (a ticket sent back) and dials: the
+    // joiner has been dialling it all along, so this time both ends have sent.
+    member_.engine.reach(vec![joiner.address.clone()]).await;
+    let both = [&member_, &joiner];
+    joiner.until_roster(&both).await;
+    member_.until_roster(&both).await;
+    assert!(!joiner.engine.status().borrow().nobody_answers);
+}

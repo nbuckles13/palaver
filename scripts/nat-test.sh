@@ -11,13 +11,18 @@
 # A meeting of three is wired each to each, so the two homes must connect to each other
 # through both routers: that is the hole punch.
 #
+# Then the open bot is gone, and home1 creates a meeting that home2 joins. Neither can
+# be reached from outside, so home2 cannot get in; it prints a ticket to send back, the
+# script hands that to home1, and home1 dials back.
+#
 #   cone       the routers keep a node's port whatever it sends to (most home routers).
 #              Expected: every bot has two links, and a bot behind a router finds from
-#              two STUN servers that it is "behind a router".
+#              two STUN servers that it is "behind a router". The ticket sent back
+#              gets home2 in.
 #   symmetric  the routers pick a new port per destination. Punching cannot work.
 #              Expected: the homes have one link each, and still hear each other
 #              through the open node; a bot behind a router finds that its network
-#              "gives a port per destination".
+#              "gives a port per destination". The ticket sent back does not help.
 #
 # Needs Linux with ip, nft and unshare, and either root or unprivileged user namespaces.
 # Build first: cargo build -p palaver-bot
@@ -168,5 +173,54 @@ else
     expect home1 "links 1"
     expect home2 "links 1"
 fi
+# --- The ticket comes back ---
+
+mkfifo "$out/paste"
+exec 9<>"$out/paste"
+# shellcheck disable=SC2086
+ip netns exec home1 "$bot" create $stun --speaker 1 --dial-seconds 3 --seconds 14 \
+    <"$out/paste" >"$out/back1" 2>&1 &
+bots="$!"
+for _ in $(seq 50); do
+    grep -q '^ticket ' "$out/back1" && break
+    sleep 0.1
+done
+ticket="$(sed -n 's/^ticket //p' "$out/back1")"
+[ -n "$ticket" ] || { echo "home1 gave no ticket" >&2; cat "$out/back1" >&2; exit 1; }
+# shellcheck disable=SC2086
+ip netns exec home2 "$bot" join "$ticket" $stun --speaker 2 --dial-seconds 3 --seconds 13 \
+    >"$out/back2" 2>&1 &
+bots="$bots $!"
+# home2 finds nobody answers, and says what to send back.
+for _ in $(seq 80); do
+    grep -q '^reply ' "$out/back2" && break
+    sleep 0.1
+done
+reply="$(sed -n 's/^reply //p' "$out/back2")"
+[ -n "$reply" ] || { echo "home2 gave no ticket to send back" >&2; cat "$out/back2" >&2; exit 1; }
+echo "home2, unable to get in: $(grep '^network ' "$out/back2")"
+echo "$reply" >&9
+# shellcheck disable=SC2086
+wait $bots
+exec 9>&-
+if [ -n "${PALAVER_NAT_VERBOSE:-}" ]; then tail -n +1 "$out"/back1 "$out"/back2 | grep -v '^ticket \|^reply '; fi
+
+settled() { grep "^second 11:" "$out/$1" || true; }
+echo "home1, after the ticket came back: $(settled back1)"
+echo "home2, after the ticket came back: $(settled back2)"
+back() {
+    case "$(settled "$1")" in
+        *"$2"*) ;;
+        *) echo "FAIL: $1 should say '$2'" >&2; fail=1 ;;
+    esac
+}
+if [ "$kind" = cone ]; then
+    back back1 "roster 2, links 1, hears [2]"
+    back back2 "roster 2, links 1, hears [1]"
+else
+    back back1 "roster 1, links 0, hears []"
+    back back2 "roster 0, links 0, hears []"
+fi
+
 [ "$fail" = 0 ] && echo "ok: $kind"
 exit "$fail"
