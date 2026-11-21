@@ -54,7 +54,8 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
 - Audio: capture → processing → Opus → datagram objects → khefs → jitter buffer → playout;
   top-N in its simplest form; synthetic sources.
 - Simulator tests from day one, including a three-node line with no A–C link.
-- Minimal egui app on the SDK.
+- Minimal egui app on the SDK. Playout in two channels, each voice heard where its picture
+  is (design section 14).
 
 **Demo 1:** a voice call between a few machines from a pasted link, with bots filling the room.
 
@@ -119,7 +120,8 @@ password, surviving khef and conductor churn.
 
 - Product UI shell (Flutter or Slint), installers, auto-update, accessibility.
 - Moderation: remote mute enforced at the publisher's edge khef and upstream, kick, lock.
-- Screen sharing, chat/data tracks, whiteboard.
+- Screen sharing, chat/data tracks, whiteboard. Shared computer sound and music as a track
+  of two channels, without voice processing.
 - SDK bindings (Python first); reference recorder and transcriber participants.
 - Thin web client, if wanted.
 

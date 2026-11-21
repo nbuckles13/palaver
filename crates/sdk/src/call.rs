@@ -10,13 +10,16 @@
 //!   (the loudest few voices, already chosen by the khefs), runs each voice through its
 //!   own jitter buffer and decoder, and mixes them.
 //!
+//! What is sent has the channels of the encoder's settings; what is played has the
+//! channels the call was made with, whatever each voice was sent in.
+//!
 //! The owner keeps the 20 ms beat. Nothing here waits or spawns.
 
 use crate::engine::Engine;
 use bytes::Bytes;
 use palaver_media::jitter::Config as JitterConfig;
 use palaver_media::voice::{Played, VoiceReceiver, VoiceSender};
-use palaver_media::{CodecError, EncoderConfig, FRAME_SAMPLES, mix};
+use palaver_media::{Channels, CodecError, EncoderConfig, mix};
 use palaver_proto::Timestamp;
 use std::collections::BTreeMap;
 use tokio::time::Instant;
@@ -36,6 +39,8 @@ pub struct Call {
     engine: Engine,
     sender: VoiceSender,
     jitter: JitterConfig,
+    /// What [`listen`](Call::listen) gives.
+    playout: Channels,
     /// Voices being played, by alias.
     voices: BTreeMap<u64, Voice>,
     started: Instant,
@@ -47,14 +52,16 @@ impl Call {
         engine: Engine,
         encoder: EncoderConfig,
         jitter: JitterConfig,
+        playout: Channels,
     ) -> Result<Self, CodecError> {
         Ok(Self {
             engine,
             sender: VoiceSender::new(encoder)?,
             jitter,
+            playout,
             voices: BTreeMap::new(),
             started: Instant::now(),
-            frame: vec![0.0; FRAME_SAMPLES],
+            frame: vec![0.0; playout.frame_len()],
         })
     }
 
@@ -73,7 +80,7 @@ impl Call {
         )
     }
 
-    /// Send the 20 ms just captured. `Ok(false)` if nothing was sent: the encoder found
+    /// Send the 20 ms just captured, in the channels of the encoder's settings. `Ok(false)` if nothing was sent: the encoder found
     /// silence, or the engine is behind.
     pub fn speak(&mut self, pcm: &[f32]) -> Result<bool, CodecError> {
         let Some(packet) = self.sender.encode(pcm)? else {
@@ -83,10 +90,10 @@ impl Call {
         Ok(self.engine.send_audio(packet.seq, packet.level, payload))
     }
 
-    /// Write the next 20 ms to play into `out`, which must hold [`FRAME_SAMPLES`]. Returns
-    /// how many voices are in it.
+    /// Write the next 20 ms to play into `out`, which must hold a frame of the channels
+    /// the call plays in ([`Channels::frame_len`]). Returns how many voices are in it.
     pub fn listen(&mut self, out: &mut [f32]) -> Result<usize, CodecError> {
-        if out.len() != FRAME_SAMPLES {
+        if out.len() != self.playout.frame_len() {
             return Err(CodecError::FrameLength);
         }
         let now = self.now();
@@ -94,7 +101,7 @@ impl Call {
             let voice = match self.voices.get_mut(&audio.alias) {
                 Some(voice) => voice,
                 None => {
-                    let receiver = VoiceReceiver::new(self.jitter)?;
+                    let receiver = VoiceReceiver::new(self.jitter, self.playout)?;
                     self.voices.entry(audio.alias).or_insert(Voice {
                         receiver,
                         silent_for: 0,
