@@ -18,7 +18,7 @@ use crate::transport::{
     SendStream, Side, StreamError,
 };
 use bytes::Bytes;
-use palaver_proto::{PathKind, PublicKey};
+use palaver_proto::PublicKey;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -331,7 +331,6 @@ impl Connection for MemoryConnection {
 
     fn path(&self) -> Path {
         Path {
-            kind: PathKind::Direct,
             rtt: Duration::ZERO,
             remote: None,
         }
@@ -607,7 +606,6 @@ mod tests {
         assert_eq!(ours.side(), Side::Dialled);
         assert_eq!(theirs.peer(), key(1));
         assert_eq!(theirs.side(), Side::Accepted);
-        assert_eq!(ours.path().kind, PathKind::Direct);
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ use crate::transport::{
     SendStream, Side, StreamError,
 };
 use bytes::Bytes;
-use palaver_proto::{PathKind, PublicKey, Signer};
+use palaver_proto::{PublicKey, Signer};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ConnectionError, ReadError, SendDatagramError, VarInt, WriteError};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -571,7 +571,6 @@ impl Connection for QuicConnection {
 
     fn path(&self) -> Path {
         Path {
-            kind: PathKind::Direct,
             rtt: self.connection.rtt(),
             remote: Some(self.connection.remote_address()),
         }

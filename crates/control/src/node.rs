@@ -65,7 +65,6 @@ pub struct LocalView {
     pub links: Vec<Link>,
     pub unreachable: Vec<ParticipantId>,
     pub addresses: Vec<Redacted<SocketAddr>>,
-    pub relay_url: Option<String>,
     /// Every media track this node can send, whether or not it is sending it now.
     pub tracks: Vec<MediaTrack>,
 }
@@ -112,17 +111,12 @@ struct Heard {
 }
 
 /// Whether two reports from one node would lead the conductor to the same plan: the same
-/// identity, the same tracks on offer, the same links by the same kind of path, the same
+/// identity, the same tracks on offer, the same links, the same
 /// unreachable nodes. Round-trip
 /// times are left out: they move all the time, and matter only when an edge is next chosen.
 fn same_for_planning(old: &Report, new: &Report) -> bool {
-    let paths = |report: &Report| -> Vec<_> {
-        report
-            .links
-            .iter()
-            .map(|link| (link.peer.clone(), link.path))
-            .collect()
-    };
+    let paths =
+        |report: &Report| -> Vec<_> { report.links.iter().map(|link| link.peer.clone()).collect() };
     old.key == new.key
         && old.name == new.name
         && old.tracks == new.tracks
@@ -424,7 +418,6 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             links.extend(theirs.iter().map(|link| ReportedLink {
                 from: from.clone(),
                 to: link.peer.clone(),
-                path: link.path,
                 rtt: link.rtt,
             }));
             unreachable.extend(cannot.iter().map(|peer| Edge(from.clone(), peer.clone())));
@@ -604,7 +597,6 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             links: self.view.links.clone(),
             unreachable: self.view.unreachable.clone(),
             addresses: self.view.addresses.clone(),
-            relay_url: self.view.relay_url.clone(),
             tracks: self.view.tracks.clone(),
         };
         let object = report.seal(&self.config.meeting, &self.signer);
@@ -676,7 +668,6 @@ impl<S: Signer, V: Verifier> Node<S, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use palaver_proto::PathKind;
     use palaver_proto::sign::fake::{FakeIdentity, FakeVerifier};
 
     /// A time, given in milliseconds.
@@ -773,7 +764,6 @@ mod tests {
         let view = LocalView {
             links: vec![Link {
                 peer: id_of(2),
-                path: PathKind::Direct,
                 rtt: Duration::from_millis(3),
                 observed: None,
             }],
@@ -983,7 +973,6 @@ mod tests {
     fn direct(peer: u8) -> Link {
         Link {
             peer: id_of(peer),
-            path: PathKind::Direct,
             rtt: Duration::from_millis(2),
             observed: None,
         }

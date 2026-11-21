@@ -6,10 +6,8 @@ kept in `archive/` (the original slot-based design and the MoQ-native alternativ
 Terms: a **node** is one running instance (app or headless). A node contains a **client**
 (capture, encode, decode, render) and a **khef** (a small MoQ relay of our own). Every khef is an
 **edge khef** for its own client; the conductor also uses some as **transit khefs** ("hubs").
-One node at a time holds the **conductor** role. An **iroh-relay** is the separate, optional
-connection helper from the iroh project (STUN/TURN-like, not MoQ); "relay" alone is not used
-for either. (iroh is no longer the transport, see section 12; where this document still
-speaks of an iroh-relay path it means a relayed path, should one ever be added.) MoQT = Media over QUIC Transport; facts about it
+One node at a time holds the **conductor** role. There is no relay server: "relay" alone
+is not used for a khef. MoQT = Media over QUIC Transport; facts about it
 are from draft-ietf-moq-transport-23 unless noted (see [archive/moq-evaluation.md](archive/moq-evaluation.md)).
 
 Scope: **25–50 participants**, single conductor.
@@ -86,11 +84,10 @@ K_topic = HKDF(root, "topic" ‖ time_epoch)   → rendezvous key; encrypts anno
 K_auth  = HKDF(root, "auth")                 → never published; input to a PAKE
 ```
 
-- **Ticket**: the meeting secret, the iroh-relay URL, and one or more entry points, each a
+- **Ticket**: the meeting secret and one or more entry points, each a
   public key with its addresses. It is a snapshot built from the current roster whenever someone
   copies an invite (the copying node plus one or two others), not something that updates after
-  it is shared. It keeps working while any entry point is reachable at a listed address or
-  through the iroh-relay by key.
+  it is shared. It keeps working while any entry point is reachable at a listed address.
   As text it is `palaver:` followed by base32 (case does not matter): a version byte, the
   fields in the same numbered encoding as reports, and a checksum, so a ticket cut short by
   a chat program is refused rather than half used. At most four entry points with eight
@@ -146,8 +143,8 @@ K_auth  = HKDF(root, "auth")                 → never published; input to a PAK
   - **Not covered**: a node behind a symmetric NAT can connect only to a node that is
     reachable without punching, and then talks to the others through it. If there is no
     such node, it cannot join. A headless Palaver node on a reachable machine is the
-    answer we offer; a public TURN service or an iroh-relay behind a build feature are
-    the alternatives if that proves too little.
+    answer we offer; a public TURN service behind a build feature is
+    the alternative if that proves too little.
 - **Private mode**: one switch that puts every setting that tells an outsider something
   at its most private value. The list so far: never ask a STUN server. Later entries:
   rendezvous announcements, always-on tickets.
@@ -190,8 +187,8 @@ catalog track lists each participant's available tracks.
 ### Reports in, plan out — as tracks
 
 - **Report** (per node, signed, sequenced): identity, name, capabilities, power/thermal/CPU
-  headroom, uplink estimate, metered flag, NAT class, candidate addresses, links held with path kind
-  (direct or iroh-relay) / RTT / loss / utilisation, peers it failed to reach, tracks it carries, last plan generation *applied*.
+  headroom, uplink estimate, metered flag, NAT class, candidate addresses, links held with
+  RTT / loss / utilisation, peers it failed to reach, tracks it carries, last plan generation *applied*.
 - **Plan** (conductor, signed, stamped (term, generation)): roster; khef peering graph; video
   routing tables; audio overlay and N; priority classes; budgets, caps and per-subscriber limits;
   entitlements; contingency next-hops; conductor successor list.
@@ -284,8 +281,8 @@ catalog track lists each participant's available tracks.
     where the gap does nothing. The gap delays tidying up (closing links the plan no longer
     names) from about 80 ms to about 220 ms after a join; audio wiring is not delayed.
   - Phase 1 sends whole plans, not deltas.
-- **Phase 1 fields**. Report: public key, name, sequence number, links held (peer, path kind,
-  RTT, the address the peer is seen at), unreachable peers, last plan applied, up to eight addresses, iroh-relay URL. Plan: term and generation, conductor, roster,
+- **Phase 1 fields**. Report: public key, name, sequence number, links held (peer,
+  RTT, the address the peer is seen at), unreachable peers, last plan applied, up to eight addresses. Plan: term and generation, conductor, roster,
   peerings, audio overlay tree and N, successor list, each member's tracks with their
   aliases, and the next free aliases. Report also: the media tracks the node can send. The rest of the lists above arrives as
   new field numbers.
@@ -377,18 +374,16 @@ otherwise closed once the planned peerings are up.
   / metered / thermally limited unless nothing better exists; scored on reachability, uplink,
   CPU headroom, RTT centrality and session age, with hysteresis.
 - **Link preference** for media: (1) a direct link, chosen among by RTT and loss; (2) through a
-  transit khef where both hops are direct; (3) an iroh-relay path, only when a node has no
-  direct link to any khef. Starting rule: 2 always beats 3; to be refined (latency, avoiding
-  hot spots on transit khefs). Control tracks run over any link. A link reported as iroh-relay
-  is treated as provisional for a second or two, since most upgrade to direct.
+  transit khef where both hops are direct. To be refined (latency, avoiding
+  hot spots on transit khefs). Control tracks run over any link.
 - **Shape**: every edge khef peers with **two or more** khefs where the graph allows. The
   transit graph is connected; a full mesh is preferred, not required. Two nodes may peer directly.
 - **Phase 1 rule** (`topology::wire`; scoring and capacity come later):
   - *Change as little as possible*: every edge of the plan in force stays while both ends are
     in the roster and neither reports the other unreachable. A join disturbs nobody else.
   - *Audio tree*: grown from the conductor one edge at a time. The edge chosen is the best by,
-    in order: a link already up and direct, then a pair not tried yet, then a link through an
-    iroh-relay; the attachment point nearest the conductor; lowest round-trip time; lowest
+    in order: a link already up, then a pair not tried yet;
+    the attachment point nearest the conductor; lowest round-trip time; lowest
     ids. At most 4 tree links per node unless a node can be reached no other way, which bounds
     a node's audio uplink to 4 × N tracks.
   - *Peerings*: every tree edge, plus, for each node, its nearest nodes until it has two, so
@@ -741,8 +736,7 @@ A **profile** of MoQT, deliberately small:
 - **Phase B**: frame encryption using MoQ's secure-objects draft (SFrame-derived; authenticates
   track name, group/object ids and immutable properties), with a meeting key the conductor
   generates, distributes on the control namespace and rotates on leave/kick. Needed before any
-  non-member MoQ relay (a public relay network) carries media. An iroh-relay only forwards
-  QUIC packets encrypted between khefs, so it does not need this. Sender signatures
+  non-member MoQ relay (a public relay network) carries media. Sender signatures
   for attribution are not part of secure-objects and would be our addition if wanted.
 
 ## 14. Media pipeline
@@ -877,9 +871,9 @@ queue, link and fault model, invariants checked as it runs); see `docs/spikes/05
 | Network edge | Conformant to the pinned draft for our profile |
 | Draft / codec | Draft 22; our own codec in `moq-wire` for our profile; `moqtap-codec` as the test oracle |
 | Transport | quinn; keys proven in the TLS handshake; members introduce; no relay server |
-| Link preference | Direct, then via a transit khef, then iroh-relay path (media only if nothing else) |
-| Naming | **khef** = the MoQ relay in each node; **iroh-relay** = iroh's connection helper |
-| Infrastructure | Public STUN-like services fine; iroh-relay as last resort; public MoQ relay network later |
+| Link preference | Direct, then via a transit khef |
+| Naming | **khef** = the MoQ relay in each node |
+| Infrastructure | Public STUN-like services fine; no relay server; public MoQ relay network later |
 | Identity / roles | User-provided names; host = creator, then longest-present |
 | Remote clients | Thin Palaver clients yes (same password); third-party MoQ URL is future |
 | Leave | Hard cap 3 s |

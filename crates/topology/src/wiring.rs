@@ -7,8 +7,8 @@
 //!   disturbed by someone else joining.
 //! - **Audio tree.** What is left of the previous tree is a set of pieces; the piece holding
 //!   the root (the conductor) is grown by one edge at a time until it holds everyone. The
-//!   edge chosen is the best by, in order: a link that is already up and direct, then one not
-//!   tried yet, then one through an iroh-relay; the attachment point nearest the root; the
+//!   edge chosen is the best by, in order: a link that is already up, then one not
+//!   tried yet; the attachment point nearest the root; the
 //!   lowest round-trip time; the lowest ids. No node gets more than [`MAX_AUDIO_DEGREE`] tree
 //!   links unless that is the only way to reach someone.
 //! - **Peerings.** Every tree edge is a peering. Each node is then given peerings to its
@@ -18,7 +18,7 @@
 //!
 //! A pure function of its input: the same input gives the same wiring on every node.
 
-use palaver_proto::{Edge, ParticipantId, PathKind};
+use palaver_proto::{Edge, ParticipantId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -37,7 +37,6 @@ pub const BUSY_PEERINGS: usize = 6;
 pub struct ReportedLink {
     pub from: ParticipantId,
     pub to: ParticipantId,
-    pub path: PathKind,
     pub rtt: Duration,
 }
 
@@ -71,12 +70,10 @@ pub struct Wiring {
 /// How good a pair is to wire, best first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Class {
-    /// Connected now, peer to peer.
-    UpDirect,
+    /// Connected now.
+    Up,
     /// Not connected, and nobody says it cannot be.
     Untried,
-    /// Connected now, through an iroh-relay.
-    UpRelay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,10 +113,7 @@ impl Graph {
         let mut up: BTreeMap<Pair, Cost> = BTreeMap::new();
         for link in input.links.iter().filter(|l| both(&l.from, &l.to)) {
             let cost = Cost {
-                class: match link.path {
-                    PathKind::Direct => Class::UpDirect,
-                    PathKind::IrohRelay => Class::UpRelay,
-                },
+                class: Class::Up,
                 rtt: link.rtt,
             };
             // Where the two ends disagree, believe the worse account.
@@ -335,17 +329,12 @@ mod tests {
         Edge(id(a), id(b))
     }
 
-    fn link(from: u8, to: u8, path: PathKind, rtt_ms: u64) -> ReportedLink {
+    fn direct(from: u8, to: u8, rtt_ms: u64) -> ReportedLink {
         ReportedLink {
             from: id(from),
             to: id(to),
-            path,
             rtt: Duration::from_millis(rtt_ms),
         }
-    }
-
-    fn direct(from: u8, to: u8, rtt_ms: u64) -> ReportedLink {
-        link(from, to, PathKind::Direct, rtt_ms)
     }
 
     /// The wiring that follows `previous` when the rest of the input is `input`.
@@ -521,8 +510,8 @@ mod tests {
     }
 
     #[test]
-    fn an_up_direct_link_beats_an_untried_pair_which_beats_a_relayed_link() {
-        // 3 can attach to 1 (untried, nearer the root) or to 2 (up and direct).
+    fn a_link_that_is_up_beats_an_untried_pair() {
+        // 3 can attach to 1 (untried, nearer the root) or to 2 (up).
         let base = Input {
             members: ids(1..=3),
             root: Some(id(1)),
@@ -534,19 +523,9 @@ mod tests {
             ..base.clone()
         });
         assert_eq!(w.audio_overlay, [edge(1, 2), edge(2, 3)]);
-        // With only a relayed link to 2, the untried pair with 1 is preferred.
-        let w = wire(&Input {
-            links: vec![link(2, 3, PathKind::IrohRelay, 5)],
-            ..base.clone()
-        });
+        // With no link up, the untried pair nearer the root is preferred.
+        let w = wire(&base);
         assert_eq!(w.audio_overlay, [edge(1, 2), edge(1, 3)]);
-        // If 1 is known to be unreachable from 3, the relayed link is used.
-        let w = wire(&Input {
-            links: vec![link(2, 3, PathKind::IrohRelay, 5)],
-            unreachable: vec![edge(3, 1)],
-            ..base
-        });
-        assert_eq!(w.audio_overlay, [edge(1, 2), edge(2, 3)]);
     }
 
     #[test]
@@ -564,15 +543,21 @@ mod tests {
 
     #[test]
     fn where_the_two_ends_disagree_the_worse_account_is_believed() {
-        // 2 says its link to 3 is direct; 3 says it is relayed. 1-3 is untried, so it wins.
+        // 4 has links to 2 and 3. 2 says theirs takes 5 ms and 4 says 50; both ends of the
+        // other say 20. The slower account of the first is believed, so the second wins.
         let w = wire(&Input {
-            members: ids(1..=3),
+            members: ids(1..=4),
             root: Some(id(1)),
-            links: vec![direct(2, 3, 5), link(3, 2, PathKind::IrohRelay, 5)],
-            previous_audio_overlay: vec![edge(1, 2)],
+            links: vec![
+                direct(2, 4, 5),
+                direct(4, 2, 50),
+                direct(3, 4, 20),
+                direct(4, 3, 20),
+            ],
+            previous_audio_overlay: vec![edge(1, 2), edge(1, 3)],
             ..Input::default()
         });
-        assert_eq!(w.audio_overlay, [edge(1, 2), edge(1, 3)]);
+        assert!(w.audio_overlay.contains(&edge(3, 4)), "{w:?}");
     }
 
     #[test]

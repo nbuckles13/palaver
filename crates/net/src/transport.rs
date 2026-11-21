@@ -20,7 +20,7 @@
 //! - **Writing waits when the reader is slow.** Nothing is buffered without limit.
 
 use bytes::Bytes;
-use palaver_proto::{PathKind, PublicKey, Redacted};
+use palaver_proto::{PublicKey, Redacted};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -31,8 +31,6 @@ pub struct Peer {
     pub key: PublicKey,
     /// Where it may be found. Hints only; all are tried.
     pub addresses: Vec<Redacted<SocketAddr>>,
-    /// The iroh-relay it may be reached through.
-    pub relay_url: Option<String>,
 }
 
 impl Peer {
@@ -41,7 +39,6 @@ impl Peer {
         Self {
             key,
             addresses: Vec::new(),
-            relay_url: None,
         }
     }
 }
@@ -58,7 +55,6 @@ pub enum Side {
 /// How a connection reaches its peer at the moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Path {
-    pub kind: PathKind,
     /// The round-trip time the transport measures.
     pub rtt: Duration,
     /// The address the peer's packets come from, where the transport has addresses.

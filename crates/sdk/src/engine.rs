@@ -73,7 +73,6 @@ pub struct EngineConfig {
     pub tracks: Vec<MediaTrack>,
     /// Where the node can be reached.
     pub addresses: Vec<SocketAddr>,
-    pub relay_url: Option<String>,
     pub link_watch: LinkWatchConfig,
 }
 
@@ -162,7 +161,6 @@ impl Engine {
                 link_watch: config.link_watch,
                 tracks: config.tracks,
                 addresses: config.addresses.into_iter().map(Redacted::new).collect(),
-                relay_url: config.relay_url,
             },
             identity,
             Ed25519,
@@ -582,7 +580,6 @@ impl<E: Endpoint> Run<E> {
                 self.node.link_up(
                     peer,
                     role_of(connection.side()),
-                    connection.path().kind,
                     connection.path().rtt,
                     connection.path().remote,
                     now,
@@ -609,8 +606,7 @@ impl<E: Endpoint> Run<E> {
                 theirs: BTreeMap::new(),
             },
         );
-        self.node
-            .link_up(peer, role, path.kind, path.rtt, path.remote, now);
+        self.node.link_up(peer, role, path.rtt, path.remote, now);
     }
 
     /// Do everything the node has asked for, then say what it now knows.

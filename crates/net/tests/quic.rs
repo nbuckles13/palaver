@@ -12,7 +12,7 @@ use palaver_net::transport::{
     ClosedBy, Connection, DatagramError, DialError, Endpoint, Peer, RecvStream, SendStream, Side,
     StreamError,
 };
-use palaver_proto::{PathKind, Redacted, Secret, Signer};
+use palaver_proto::{Redacted, Secret, Signer};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -45,7 +45,6 @@ impl Node {
         Peer {
             key: self.identity.public_key(),
             addresses: vec![Redacted::new(self.endpoint.local_address().unwrap())],
-            relay_url: None,
         }
     }
 }
@@ -80,7 +79,6 @@ async fn each_end_learns_the_others_key_from_the_handshake() {
         (ours.side(), theirs.side()),
         (Side::Dialled, Side::Accepted)
     );
-    assert_eq!(ours.path().kind, PathKind::Direct);
     assert_eq!(a.endpoint.key(), a.identity.public_key());
 }
 
