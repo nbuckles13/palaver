@@ -7,7 +7,7 @@ use palaver_khef_core::{
 };
 use palaver_moq_wire::Setup;
 use palaver_proto::{
-    Link, MediaTrack, MeetingTag, ParticipantId, PathKind, Plan, Redacted, Signer, Source,
+    Link, MediaTrack, MeetingTag, ParticipantId, PathKind, Plan, Redacted, Report, Signer, Source,
     Timestamp, Track, TrackName, Verifier,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -158,6 +158,11 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
 
     pub fn is_conductor(&self) -> bool {
         self.control.is_conductor()
+    }
+
+    /// The latest report heard from another node.
+    pub fn report_of(&self, participant: &ParticipantId) -> Option<&Report> {
+        self.control.report_of(participant)
     }
 
     pub fn counters(&self) -> Counters {

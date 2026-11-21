@@ -1,0 +1,95 @@
+//! Engines over the QUIC transport on the loopback interface: real sockets and real time.
+//! The one thing checked here is what the in-memory transport cannot show: that a node
+//! finds the others at the addresses their reports give, knowing at first only the one it
+//! joined through.
+
+#![allow(clippy::unwrap_used, clippy::panic)]
+
+use palaver_khef_core::LinkWatchConfig;
+use palaver_net::admission::{AdmissionKey, Admitted};
+use palaver_net::identity::{Identity, meeting_tag};
+use palaver_net::quic::{QuicEndpoint, QuicOptions};
+use palaver_net::transport::Peer;
+use palaver_proto::{MediaTrack, ParticipantId, Redacted, Secret, Signer, Source};
+use palaver_sdk::{Engine, EngineConfig};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
+use tokio::time::timeout;
+
+const PATIENCE: Duration = Duration::from_secs(4);
+
+struct Member {
+    engine: Engine,
+    address: Peer,
+}
+
+fn member(name: &str) -> Member {
+    let secret = Secret::new([7; 32]);
+    let identity = Identity::generate().unwrap();
+    let endpoint = QuicEndpoint::bind(
+        &identity,
+        QuicOptions {
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            dial_timeout: Duration::from_millis(500),
+            ..QuicOptions::default()
+        },
+    )
+    .unwrap();
+    let at = endpoint.local_address().unwrap();
+    let address = Peer {
+        key: identity.public_key(),
+        addresses: vec![Redacted::new(at)],
+        relay_url: None,
+    };
+    let config = EngineConfig {
+        meeting: meeting_tag(&secret).unwrap(),
+        name: name.into(),
+        tracks: vec![MediaTrack {
+            audio: true,
+            source: Source::Main,
+            rendition: b"opus".to_vec(),
+        }],
+        addresses: vec![at],
+        relay_url: None,
+        link_watch: LinkWatchConfig::default(),
+    };
+    let admitted = Admitted::new(
+        endpoint,
+        AdmissionKey::from_meeting_secret(&secret).unwrap(),
+    );
+    Member {
+        engine: Engine::start(admitted, identity, config),
+        address,
+    }
+}
+
+#[tokio::test]
+async fn nodes_that_joined_through_one_find_each_other_by_their_reports() {
+    let members: Vec<Member> = ["a", "b", "c", "d"].into_iter().map(member).collect();
+    members[0].engine.create_meeting().await;
+    // Each joiner knows only where the first is.
+    for joiner in &members[1..] {
+        joiner.engine.join(vec![members[0].address.clone()]).await;
+    }
+    let mut everyone: Vec<ParticipantId> = members.iter().map(|m| m.engine.me().clone()).collect();
+    everyone.sort();
+    for member in &members {
+        let mut status = member.engine.status();
+        let seen = timeout(
+            PATIENCE,
+            status.wait_for(|s| {
+                let mut roster = s.roster.clone();
+                roster.sort();
+                // Every node is given two peers at least, and a joiner met only the
+                // first through the ticket: its second it found by a report.
+                roster == everyone && s.links.len() >= 2
+            }),
+        )
+        .await;
+        assert!(
+            matches!(seen, Ok(Ok(_))),
+            "last: {:?}",
+            *member.engine.status().borrow()
+        );
+    }
+}

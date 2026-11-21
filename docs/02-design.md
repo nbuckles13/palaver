@@ -622,6 +622,9 @@ A **profile** of MoQT, deliberately small:
   handed to the player as slices of the same buffer.
   - **Two nodes that dial each other at once** keep the connection dialled by the lower
     participant id and close the other; both apply the same rule.
+  - **Where a peer is dialled**: at every address its latest report lists, and, if it is
+    an entry point, those of the ticket as well. A peer the plan names whose report has
+    not yet come is dialled when it comes.
 - **A call** (`sdk::Call`) puts a voice on an engine. Its owner keeps a 20 ms beat and on
   each one gives it the frame captured and asks for the frame to play. Speaking is level,
   Opus, and a datagram to the engine. Listening is one jitter buffer and decoder per voice
