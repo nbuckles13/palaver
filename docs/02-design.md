@@ -800,8 +800,22 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
   syllable rhythm, which Opus treats as speech. Each voice has its own pitch (eight within
   one octave), so a listener can tell whose voice is in what it plays after encoding, loss
   and mixing, by measuring that one frequency.
-- **Audio I/O**: `cpal` (WASAPI, ALSA or PulseAudio, CoreAudio). Devices differ in rate and
-  sample format, so the pipeline resamples to 48 kHz float.
+- **Audio I/O**: `cpal` (WASAPI, ALSA or PulseAudio, CoreAudio), in `palaver-sound`, the
+  one crate that touches a sound device. Only the app depends on it: bots and tests build
+  without it.
+  - `Microphone` gives frames and `Speaker` takes them: the system's default devices, in
+    the format the system suggests. Devices differ in rate, channels and sample type
+    (16-bit at 44.1 kHz is common), so everything is converted to 48 kHz float.
+  - The device is asked to work in pieces of 10 ms, and opened with what it prefers if it
+    refuses. Left alone, PulseAudio buffered about four seconds of playback (measured
+    through WSLg), which is four seconds of delay.
+  - At most 200 ms may wait for the speaker; beyond that the oldest is dropped, so what
+    is heard cannot fall ever further behind.
+  - The device calls back on its own thread. That thread and the owner's meet at a lock
+    held only while samples are copied. To revisit if it shows up as glitches: a
+    lock-free queue.
+  - To hear it: `cargo run -p palaver-sound --example loopback` plays the microphone
+    through Opus and a jitter buffer to the speaker.
 - **Jitter buffer**: our own. Adaptive playout delay and time-stretching, with concealment handed
   to Opus (FEC, DRED, neural concealment). The `neteq` crate is reference material.
   - It decides, once per frame interval, what the decoder plays: the frame; the frame

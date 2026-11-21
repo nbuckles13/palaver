@@ -33,6 +33,7 @@ pub const SHIPPING: &[&str] = &[
     "palaver-sdk",
     "palaver-net",
     "palaver-media",
+    "palaver-sound",
     "palaver-bot",
     "palaver-harness",
 ];

@@ -1,0 +1,22 @@
+[package]
+name = "palaver-sound"
+description = "The microphone and the speaker: sound devices behind the pipeline's frames."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+palaver-media = { workspace = true }
+# WASAPI, CoreAudio, ALSA. On Linux the ALSA headers are needed to build
+# (`libasound2-dev`); PulseAudio is spoken to directly, with no C library, and preferred
+# where it runs.
+cpal = { version = "0.18", features = ["pulseaudio"] }
+
+[dev-dependencies]
+palaver-proto = { workspace = true }
+
+[lints]
+workspace = true

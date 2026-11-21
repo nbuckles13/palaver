@@ -33,3 +33,16 @@ Media over QUIC evaluation that led to the current design.
 - **Media**: Opus 1.6 with DRED, WebRTC audio processing via a Rust port (`sonora`), H.264 with
   hardware encoders where available; no libwebrtc.
 - **UI**: egui harness for development; product shell (Flutter or Slint) deferred.
+
+## Building
+
+Rust (the version in `rust-toolchain.toml`), a C compiler and `cmake`; on Linux also the
+ALSA headers:
+
+```
+sudo apt install build-essential cmake libasound2-dev
+cargo build
+```
+
+[Development environment and flow](docs/04-dev-environment-and-flow.md) has the commands
+for linting and testing.

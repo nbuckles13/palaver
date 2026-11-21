@@ -42,6 +42,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      # The sound crate builds against ALSA's headers on Linux.
+      - if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The guards on the dependency graph (crates/guards/tests/workspace.rs) run on Linux
       # only: `cargo metadata` gives the same answer on every platform, and it is the one
