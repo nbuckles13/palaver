@@ -1,7 +1,7 @@
 //! Hear yourself: the microphone, through the whole voice path, to the speaker.
 //!
 //! ```text
-//! cargo run -p palaver-sound --example loopback [seconds] [stereo] [raw] [echo] [save] [other]
+//! cargo run -p palaver-sound --example loopback [seconds] [stereo] [raw] [echo] [save] [other] [gain=N]
 //! ```
 //!
 //! What the microphone gives is cut into frames, cleaned of noise and brought to a level,
@@ -21,6 +21,9 @@
 //!   cleaning is on, and the three files are saved. Talk over it, and between its bursts.
 //!   `loopback-cleaned.wav` is what the others in a call would hear of you: it should
 //!   hold your voice and none of the other's. Try it with headphones, then with speakers.
+//!
+//! - `gain=N`: make the microphone N decibels louder before anything else is done with
+//!   it, for a microphone that gives very little. What is saved as captured has the gain.
 //!
 //! Each second it prints:
 //!
@@ -61,6 +64,8 @@ struct Options {
     save: bool,
     /// Play a made-up other voice in place of the microphone's own.
     other: bool,
+    /// What the microphone's samples are multiplied by.
+    gain: f32,
 }
 
 /// Someone else's voice, made up: broadband sound in syllables, two seconds in every three.
@@ -194,6 +199,9 @@ fn run(options: Options) -> Result<(), String> {
         // The microphone's clock is not this loop's: take whatever has gathered.
         while microphone.pop(&mut captured) {
             frames = frames.saturating_add(1);
+            for sample in &mut captured {
+                *sample = (*sample * options.gain).clamp(-1.0, 1.0);
+            }
             second.captured = second.captured.max(audio_level(&captured));
             if options.save {
                 all_captured.extend_from_slice(&captured);
@@ -262,6 +270,12 @@ fn run(options: Options) -> Result<(), String> {
     Ok(())
 }
 
+/// The decibels in `gain=N`, between 0 and 60.
+fn decibels_of(arg: &str) -> Option<f32> {
+    let db: f32 = arg.strip_prefix("gain=")?.parse().ok()?;
+    (0.0..=60.0).contains(&db).then_some(db)
+}
+
 fn main() -> ExitCode {
     let mut options = Options {
         seconds: 10,
@@ -272,6 +286,7 @@ fn main() -> ExitCode {
         }),
         save: false,
         other: false,
+        gain: 1.0,
     };
     for arg in std::env::args().skip(1) {
         match (arg.as_str(), arg.parse()) {
@@ -285,8 +300,13 @@ fn main() -> ExitCode {
             }
             ("save", _) => options.save = true,
             (_, Ok(number)) => options.seconds = number,
+            (text, _) if decibels_of(text).is_some() => {
+                options.gain = decibels_of(text).map_or(1.0, |db| 10f32.powf(db / 20.0));
+            }
             _ => {
-                eprintln!("usage: loopback [seconds] [stereo] [raw] [echo] [save] [other]");
+                eprintln!(
+                    "usage: loopback [seconds] [stereo] [raw] [echo] [save] [other] [gain=N]"
+                );
                 return ExitCode::FAILURE;
             }
         }
