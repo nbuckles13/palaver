@@ -4,6 +4,7 @@
 //! palaver-bot [room] [bots] [seconds]     a room in this one process (6 bots, 10 seconds)
 //! palaver-bot create [options]            start a meeting on the network; prints a ticket
 //! palaver-bot join <ticket> [options]     join one
+//! palaver-bot stun-server <address>       answer STUN questions there, for tests
 //!
 //! options:
 //!   --bind <address>        where to listen (default 0.0.0.0:0)
@@ -12,6 +13,10 @@
 //!   --speaker <n>           which made-up voice it has (default 1)
 //!   --silent                only listen
 //!   --seconds <n>           how long to stay (default: until stopped)
+//!   --stun <address>        with create: a STUN server to ask for this node's public
+//!                           address; may be repeated (default: two public servers,
+//!                           asked only if the node has no public address of its own)
+//!   --no-stun               with create: ask no STUN server
 //! ```
 //!
 //! A room runs over the in-memory transport and touches no network: the first bot only
@@ -20,6 +25,7 @@
 //! whose voices it hears:
 //!
 //! ```text
+//! network behind a router
 //! ticket palaver:...
 //! second 1: roster 2, links 1, hears [2]
 //! ```
@@ -27,7 +33,11 @@
 use palaver_bot::{Bot, BotError, FRAME, Script, entry_points};
 use palaver_media::synthetic::{PITCHES, Rhythm};
 use palaver_net::memory::MemoryNetwork;
-use palaver_net::quic::QuicOptions;
+use palaver_net::quic::{BindError, QuicOptions};
+use palaver_net::reach::{
+    DEFAULT_STUN_SERVERS, Network, STUN_PATIENCE, StunConfig, StunMode, resolve,
+};
+use palaver_net::stun::{TransactionId, binding_response, is_stun};
 use palaver_proto::{Secret, Ticket};
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -98,6 +108,8 @@ struct Options {
     speaker: Option<u32>,
     silent: bool,
     seconds: Option<u64>,
+    stun: Vec<String>,
+    no_stun: bool,
 }
 
 fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
@@ -128,6 +140,8 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
                 options.seconds = Some(text.parse().map_err(|_| format!("not a number: {text}"))?);
             }
             "--silent" => options.silent = true,
+            "--stun" => options.stun.push(value("an address")?),
+            "--no-stun" => options.no_stun = true,
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -155,6 +169,34 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
     match &ticket {
         Some(ticket) => bot.join(entry_points(ticket)).await,
         None => {
+            // An invitation is about to be made: now is when the public address matters.
+            let names = if options.stun.is_empty() {
+                DEFAULT_STUN_SERVERS.map(String::from).to_vec()
+            } else {
+                options.stun
+            };
+            let like = bot.address().addresses.first().map(|a| *a.reveal());
+            let config = StunConfig {
+                mode: if options.no_stun {
+                    StunMode::Never
+                } else {
+                    StunMode::WhenNeeded
+                },
+                servers: match (options.no_stun, like) {
+                    (false, Some(like)) => resolve(&names, like).await,
+                    _ => Vec::new(),
+                },
+                patience: STUN_PATIENCE,
+            };
+            println!(
+                "network {}",
+                match bot.find_network(&config).await {
+                    Network::Open(_) => "open",
+                    Network::BehindRouter(_) => "behind a router",
+                    Network::PerDestination => "gives a port per destination",
+                    Network::Unknown => "unknown",
+                }
+            );
             bot.create_meeting().await;
             // The ticket holds the meeting secret; showing it is the point of this line.
             println!("ticket {}", bot.ticket(&secret).to_text().expose());
@@ -185,8 +227,30 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
     Ok(())
 }
 
+/// Answer every STUN question that arrives at `bind` with the address it came from.
+async fn stun_server(bind: SocketAddr) -> Result<(), BotError> {
+    let socket = tokio::net::UdpSocket::bind(bind)
+        .await
+        .map_err(|error| BotError::Bind(BindError::Socket(error.to_string())))?;
+    let mut packet = [0u8; 1500];
+    loop {
+        let Ok((len, from)) = socket.recv_from(&mut packet).await else {
+            continue;
+        };
+        let question = packet.get(..len).unwrap_or_default();
+        if let Some(id) = question
+            .get(8..20)
+            .and_then(|id| TransactionId::try_from(id).ok())
+            && is_stun(question)
+        {
+            let _ = socket.send_to(&binding_response(&id, from), from).await;
+        }
+    }
+}
+
 /// What the command line asks for.
 enum Task {
+    StunServer(SocketAddr),
     Room {
         count: u32,
         seconds: u64,
@@ -200,6 +264,13 @@ enum Task {
 fn task(mut args: impl Iterator<Item = String>) -> Result<Task, String> {
     let first = args.next();
     match first.as_deref() {
+        Some("stun-server") => {
+            let text = args.next().ok_or("stun-server needs an address")?;
+            let bind = text
+                .parse()
+                .map_err(|_| format!("not an address: {text}"))?;
+            Ok(Task::StunServer(bind))
+        }
         Some("create") => Ok(Task::Networked {
             ticket: None,
             options: options(args)?,
@@ -256,6 +327,7 @@ fn main() -> ExitCode {
     };
     let done = runtime.block_on(async {
         match task {
+            Task::StunServer(bind) => stun_server(bind).await,
             Task::Room { count, seconds } => room(count, seconds).await,
             Task::Networked { ticket, options } => networked(ticket, options).await,
         }

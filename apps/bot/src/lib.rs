@@ -16,12 +16,14 @@ use palaver_net::admission::{AdmissionKey, Admitted};
 use palaver_net::identity::{Identity, meeting_tag};
 use palaver_net::memory::MemoryNetwork;
 use palaver_net::quic::{BindError, QuicEndpoint, QuicOptions};
+use palaver_net::reach::{self, Network, StunConfig};
 use palaver_net::transport::{Endpoint, Peer};
 use palaver_proto::{
     EntryPoint, MediaTrack, Redacted, SECRET_BYTES, Secret, Signer, Source, Ticket,
 };
 use palaver_sdk::{Call, Engine, EngineConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The length of one frame of audio.
@@ -82,6 +84,8 @@ pub struct Bot {
     voice: Voice,
     /// Where others can find this bot.
     address: Peer,
+    /// The QUIC endpoint the bot runs on, if it is on the network.
+    quic: Option<Arc<QuicEndpoint>>,
     /// Frames made so far.
     frames: u64,
     /// What it has been given to play, most recent last, up to [`Bot::EARS`].
@@ -106,7 +110,7 @@ impl Bot {
         let endpoint = network
             .endpoint(identity.public_key())
             .ok_or(BotError::KeyInUse)?;
-        Self::start(endpoint, identity, secret, name, script, Vec::new())
+        Self::start(endpoint, identity, secret, name, script, Vec::new(), None)
     }
 
     /// A bot on the network, over QUIC, for a meeting with this secret. It tells the
@@ -121,7 +125,7 @@ impl Bot {
         script: Script,
     ) -> Result<Self, BotError> {
         let identity = Identity::generate().map_err(|_| BotError::NoRandomness)?;
-        let endpoint = QuicEndpoint::bind(&identity, options).map_err(BotError::Bind)?;
+        let endpoint = Arc::new(QuicEndpoint::bind(&identity, options).map_err(BotError::Bind)?);
         let advertise = if advertise.is_empty() {
             endpoint
                 .local_address()
@@ -131,7 +135,26 @@ impl Bot {
         } else {
             advertise
         };
-        Self::start(endpoint, identity, secret, name, script, advertise)
+        let quic = Some(Arc::clone(&endpoint));
+        Self::start(endpoint, identity, secret, name, script, advertise, quic)
+    }
+
+    /// Find out what kind of network the bot is on, asking STUN servers if `config` says
+    /// to. A public address that is learned is added to those the bot gives the meeting
+    /// and puts in its tickets. A bot not on the network learns nothing.
+    pub async fn find_network(&mut self, config: &StunConfig) -> Network {
+        let (Some(quic), Some(local)) = (&self.quic, self.address.addresses.first()) else {
+            return Network::Unknown;
+        };
+        let network = reach::find(quic, *local.reveal(), config).await;
+        if let Some(public) = network.public_address().map(Redacted::new)
+            && !self.address.addresses.contains(&public)
+        {
+            self.address.addresses.push(public);
+            let all = self.address.addresses.iter().map(|a| *a.reveal()).collect();
+            self.call.engine().set_addresses(all).await;
+        }
+        network
     }
 
     fn start<E: Endpoint>(
@@ -141,6 +164,7 @@ impl Bot {
         name: &str,
         script: Script,
         addresses: Vec<SocketAddr>,
+        quic: Option<Arc<QuicEndpoint>>,
     ) -> Result<Self, BotError> {
         let key = AdmissionKey::from_meeting_secret(secret).ok_or(BotError::Derivation)?;
         let address = Peer {
@@ -168,6 +192,7 @@ impl Bot {
             script,
             voice: Voice::new(pitch_of(script.speaker), script.loudness),
             address,
+            quic,
             frames: 0,
             played: Vec::new(),
             frame: vec![0.0; FRAME_SAMPLES],

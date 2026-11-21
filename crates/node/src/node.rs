@@ -218,6 +218,15 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         self.service(now);
     }
 
+    /// Where this node can be reached has changed. Its next report says so.
+    pub fn set_addresses(&mut self, addresses: Vec<Redacted<SocketAddr>>, now: Timestamp) {
+        if self.addresses != addresses {
+            self.addresses = addresses;
+            self.refresh_view();
+            self.service(now);
+        }
+    }
+
     // --- What the connections report ---
 
     /// A connection to `peer` is up. `role` says which side dialled.

@@ -5,6 +5,8 @@
 
 use palaver_bot::{Bot, FRAME, Script, entry_points};
 use palaver_net::quic::QuicOptions;
+use palaver_net::reach::{Network, StunConfig, StunMode};
+use palaver_net::stun::binding_response;
 use palaver_proto::{Secret, Ticket};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -43,4 +45,82 @@ async fn a_bot_given_only_a_ticket_joins_and_hears_the_one_who_talks() {
     assert!(bots[0].hears(1), "strength {}", bots[0].strength_of(1));
     assert!(!bots[0].hears(2));
     assert!(!bots[1].hears(1), "a bot does not hear itself");
+}
+
+/// A STUN server on the loopback interface that says a question came from `shift` ports
+/// above where it did, as it would look through a router.
+async fn stun_server(shift: u16) -> SocketAddr {
+    let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut packet = [0u8; 1500];
+        while let Ok((len, from)) = socket.recv_from(&mut packet).await {
+            if len < 20 {
+                continue;
+            }
+            let id = <[u8; 12]>::try_from(&packet[8..20]).unwrap();
+            let seen = SocketAddr::new(from.ip(), from.port().wrapping_add(shift));
+            let _ = socket.send_to(&binding_response(&id, seen), from).await;
+        }
+    });
+    address
+}
+
+fn asking(servers: Vec<SocketAddr>, mode: StunMode) -> StunConfig {
+    StunConfig {
+        mode,
+        servers,
+        patience: Duration::from_secs(2),
+    }
+}
+
+#[tokio::test]
+async fn a_bot_finds_what_network_it_is_on_and_its_ticket_gains_its_public_address() {
+    let secret = Secret::new([7; 32]);
+    let (plain, shifted, other) = (
+        stun_server(0).await,
+        stun_server(5).await,
+        stun_server(9).await,
+    );
+
+    // Seen where it is: nothing stands between.
+    let mut open = bot(&secret, Script::silent(0));
+    let own = *open.address().addresses[0].reveal();
+    let found = open
+        .find_network(&asking(vec![plain], StunMode::WhenNeeded))
+        .await;
+    assert_eq!(found, Network::Open(own));
+    assert_eq!(open.ticket(&secret).entry_points[0].addresses.len(), 1);
+
+    // Seen elsewhere, the same by all who are asked: a router, and the ticket says where.
+    let mut behind = bot(&secret, Script::silent(0));
+    let own = *behind.address().addresses[0].reveal();
+    let public = SocketAddr::new(own.ip(), own.port().wrapping_add(5));
+    let found = behind
+        .find_network(&asking(vec![shifted], StunMode::WhenNeeded))
+        .await;
+    assert_eq!(found, Network::BehindRouter(public));
+    let listed: Vec<SocketAddr> = behind.ticket(&secret).entry_points[0]
+        .addresses
+        .iter()
+        .map(|a| *a.reveal())
+        .collect();
+    assert_eq!(listed, [own, public]);
+
+    // Seen differently by each: no address to hand out.
+    let mut symmetric = bot(&secret, Script::silent(0));
+    let found = symmetric
+        .find_network(&asking(vec![shifted, other], StunMode::WhenNeeded))
+        .await;
+    assert_eq!(found, Network::PerDestination);
+    assert_eq!(symmetric.ticket(&secret).entry_points[0].addresses.len(), 1);
+
+    // Told never to ask, it does not, and knows nothing.
+    let mut private = bot(&secret, Script::silent(0));
+    let found = private
+        .find_network(&asking(vec![shifted], StunMode::Never))
+        .await;
+    assert_eq!(found, Network::Unknown);
 }

@@ -11,6 +11,7 @@
 //! - [`admission`]: the handshake that lets only holders of the meeting secret connect.
 //! - [`quic`]: the real transport, QUIC by quinn, with each end's key proven in the TLS
 //!   handshake.
+//! - [`reach`]: what kind of network the node is on, and when to ask STUN servers.
 //! - [`stun`]: asking a STUN server what this node's public address is, from the QUIC
 //!   socket.
 
@@ -18,5 +19,6 @@ pub mod admission;
 pub mod identity;
 pub mod memory;
 pub mod quic;
+pub mod reach;
 pub mod stun;
 pub mod transport;
