@@ -56,6 +56,11 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
 - Simulator tests from day one, including a three-node line with no A–C link.
 - Minimal egui app on the SDK. Playout in two channels, each voice heard where its picture
   is (design section 14).
+  - Playout is driven by the speaker: the device asks for sound and the frames are made
+    then. A timer beside the device is a second clock, and two clocks drift apart.
+  - A check of the microphone (and later the camera) before joining, and again from
+    inside a meeting: a meter, hearing yourself back, an input gain to set, and a hint
+    when the microphone is very quiet.
 
 **Demo 1:** a voice call between a few machines from a pasted link, with bots filling the room.
 
@@ -144,6 +149,25 @@ a meeting: a way to find a node whose address has changed since the ticket was m
 key that outlives one meeting, one ticket per contact so that one person can be cut off,
 and a place in private mode, because being always on shows ticket holders when you are
 online.
+
+### Quiet microphones
+
+Some microphones give very little even with the system's volume at its highest (measured:
+a USB headset whose speech peaked 41 dB below full scale, which the system's own meter
+showed as 6%). The level control lifts a voice at an ordinary level to its target within
+seconds, but a voice that faint by only 17 dB after thirty seconds, where 35 or more was
+wanted. Beyond the gain the user can set in the microphone check: find out whether the
+level control can be made to climb faster for a faint voice (its settings, or a first
+guess at the gain from the first seconds of speech), without bringing up the noise of a
+quiet room when nobody is talking.
+
+### A sender whose clock runs fast
+
+The jitter buffer takes a steady surplus of frames for network jitter: its target delay
+climbs (to its 500 ms ceiling, seen with a microphone delivering 8% too much through
+WSLg) and it sheds the surplus only once the delay is 200 ms over the target. Real
+devices differ by hundredths of a percent, where none of this shows. To do: keep the
+target where it was when the lateness is a trend and not a scatter, and shed sooner.
 
 ### Bots that say words
 
