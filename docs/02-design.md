@@ -613,6 +613,11 @@ A **profile** of MoQT, deliberately small:
     path that goes quiet without closing; those are the simulator's. An endpoint can be
     put behind a NAT: it is then reached only by those it has dialled, and a dial to it
     waits 10 s for that, which is enough to test that two such nodes get connected.
+  - **Real NATs** (`scripts/nat-test.sh`): bots in Linux network namespaces, two of them
+    each behind a router that the kernel makes a NAT, one in the open. With routers that
+    keep a node's port (most home routers) the two behind them must end up connected to
+    each other; with routers that pick a port per destination they cannot, and must still
+    hear each other through the third. It runs as its own CI job.
 - **The node** (`palaver_node::Node`) owns the khef and the control logic, which do not know
   of each other. Control objects go up from the khef to be checked and come down to be
   flooded; an adopted plan is carried out (dial planned peers, tell the khef where audio
@@ -631,7 +636,9 @@ A **profile** of MoQT, deliberately small:
     the ticket if it is an entry point, and at every address its neighbours report seeing
     it at (each link in a report carries the address the peer's packets come from). A
     peer the plan names is dialled once an address for it is known; after 10 s without
-    one the dial has failed.
+    one the dial has failed. An address learned while a dial is under way is tried as
+    well: the neighbour's report that holds a peer's public address can come after the
+    dial to its private one began.
 - **A call** (`sdk::Call`) puts a voice on an engine. Its owner keeps a 20 ms beat and on
   each one gives it the frame captured and asks for the frame to play. Speaking is level,
   Opus, and a datagram to the engine. Listening is one jitter buffer and decoder per voice
