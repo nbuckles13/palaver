@@ -647,7 +647,9 @@ A **profile** of MoQT, deliberately small:
 - **A bot** (`apps/bot`) is a whole participant with a made-up voice and ears: the same
   node, encoder, decoders and `Call` as an application with a sound card. It can say
   whose pitch is in what it was given to play, so a room of bots checks the product end to
-  end by what a listener would notice.
+  end by what a listener would notice. `palaver-bot create` starts a meeting over QUIC
+  and prints a ticket; `palaver-bot join <ticket>` joins it from another process or
+  machine; each says every second who is in the meeting and whose voices it hears.
 - **The khef** (`khef_core::Khef`) holds a session and a link watch per neighbour and ties
   them to the flood and to top-N:
   - *Control*: an object that arrives is handed up to the node's control logic, which

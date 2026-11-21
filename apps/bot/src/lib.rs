@@ -15,9 +15,13 @@ use palaver_media::{CodecError, EncoderConfig, FRAME_SAMPLES, SAMPLE_RATE};
 use palaver_net::admission::{AdmissionKey, Admitted};
 use palaver_net::identity::{Identity, meeting_tag};
 use palaver_net::memory::MemoryNetwork;
-use palaver_net::transport::Peer;
-use palaver_proto::{MediaTrack, SECRET_BYTES, Secret, Signer, Source};
+use palaver_net::quic::{BindError, QuicEndpoint, QuicOptions};
+use palaver_net::transport::{Endpoint, Peer};
+use palaver_proto::{
+    EntryPoint, MediaTrack, Redacted, SECRET_BYTES, Secret, Signer, Source, Ticket,
+};
 use palaver_sdk::{Call, Engine, EngineConfig};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
 /// The length of one frame of audio.
@@ -67,6 +71,8 @@ pub enum BotError {
     /// The meeting secret could not be turned into keys.
     Derivation,
     Codec(CodecError),
+    /// The QUIC endpoint could not be opened.
+    Bind(BindError),
 }
 
 /// One headless participant.
@@ -97,11 +103,51 @@ impl Bot {
         script: Script,
     ) -> Result<Self, BotError> {
         let identity = Identity::generate().map_err(|_| BotError::NoRandomness)?;
-        let key = AdmissionKey::from_meeting_secret(secret).ok_or(BotError::Derivation)?;
         let endpoint = network
             .endpoint(identity.public_key())
             .ok_or(BotError::KeyInUse)?;
-        let address = Peer::by_key(identity.public_key());
+        Self::start(endpoint, identity, secret, name, script, Vec::new())
+    }
+
+    /// A bot on the network, over QUIC, for a meeting with this secret. It tells the
+    /// meeting it can be reached at `advertise`; if that is empty, at the address it is
+    /// bound to, with the machine's outward address in place of "every interface".
+    /// Must be called inside a tokio runtime.
+    pub fn on_quic(
+        options: QuicOptions,
+        advertise: Vec<SocketAddr>,
+        secret: &Secret<[u8; SECRET_BYTES]>,
+        name: &str,
+        script: Script,
+    ) -> Result<Self, BotError> {
+        let identity = Identity::generate().map_err(|_| BotError::NoRandomness)?;
+        let endpoint = QuicEndpoint::bind(&identity, options).map_err(BotError::Bind)?;
+        let advertise = if advertise.is_empty() {
+            endpoint
+                .local_address()
+                .and_then(reachable_form)
+                .into_iter()
+                .collect()
+        } else {
+            advertise
+        };
+        Self::start(endpoint, identity, secret, name, script, advertise)
+    }
+
+    fn start<E: Endpoint>(
+        endpoint: E,
+        identity: Identity,
+        secret: &Secret<[u8; SECRET_BYTES]>,
+        name: &str,
+        script: Script,
+        addresses: Vec<SocketAddr>,
+    ) -> Result<Self, BotError> {
+        let key = AdmissionKey::from_meeting_secret(secret).ok_or(BotError::Derivation)?;
+        let address = Peer {
+            key: identity.public_key(),
+            addresses: addresses.iter().copied().map(Redacted::new).collect(),
+            relay_url: None,
+        };
         let config = EngineConfig {
             meeting: meeting_tag(secret).ok_or(BotError::Derivation)?,
             name: name.into(),
@@ -110,7 +156,7 @@ impl Bot {
                 source: Source::Main,
                 rendition: b"opus".to_vec(),
             }],
-            addresses: Vec::new(),
+            addresses,
             relay_url: None,
             link_watch: LinkWatchConfig::default(),
         };
@@ -130,6 +176,18 @@ impl Bot {
 
     pub fn address(&self) -> &Peer {
         &self.address
+    }
+
+    /// An invitation to the meeting with `secret`, with this bot as the way in.
+    pub fn ticket(&self, secret: &Secret<[u8; SECRET_BYTES]>) -> Ticket {
+        Ticket {
+            secret: Secret::new(*secret.expose()),
+            relay_url: None,
+            entry_points: vec![EntryPoint {
+                key: self.address.key,
+                addresses: self.address.addresses.clone(),
+            }],
+        }
     }
 
     pub fn engine(&self) -> &Engine {
@@ -190,4 +248,30 @@ impl Bot {
     pub async fn stop(self) {
         self.call.stop().await;
     }
+}
+
+/// `bound` as others can dial it: an address bound to every interface becomes the
+/// address this machine sends from towards the internet. `None` if it has no such route.
+fn reachable_form(bound: SocketAddr) -> Option<SocketAddr> {
+    if !bound.ip().is_unspecified() {
+        return Some(bound);
+    }
+    // Connecting a UDP socket sends nothing; it only makes the system choose a route.
+    let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    probe.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    let ip: IpAddr = probe.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then(|| SocketAddr::new(ip, bound.port()))
+}
+
+/// The members a ticket says to connect to first.
+pub fn entry_points(ticket: &Ticket) -> Vec<Peer> {
+    ticket
+        .entry_points
+        .iter()
+        .map(|entry| Peer {
+            key: entry.key,
+            addresses: entry.addresses.clone(),
+            relay_url: None,
+        })
+        .collect()
 }
