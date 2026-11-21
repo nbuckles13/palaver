@@ -11,6 +11,8 @@ repository.workspace = true
 [dependencies]
 palaver-proto = { workspace = true }
 palaver-opus = { workspace = true }
+# WebRTC's echo canceller, noise suppression and gain control, in Rust.
+sonora = { workspace = true }
 
 [lints]
 workspace = true

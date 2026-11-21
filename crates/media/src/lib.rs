@@ -17,6 +17,7 @@ pub mod jitter;
 pub mod level;
 pub mod mix;
 pub mod pcm;
+pub mod process;
 pub mod resample;
 pub mod synthetic;
 pub mod voice;

@@ -745,6 +745,24 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
 
 - **Audio processing**: `sonora`, a pure-Rust port of WebRTC's echo canceller, noise suppression
   and gain control. Platform voice-processing units on Apple/Android where better.
+  - `media::process::Processor` is shown every frame on its way to the speaker and cleans
+    every frame from the microphone; each of echo, noise and level can be turned off. It
+    is for a voice at a microphone: a track of music or shared sound goes without it.
+  - Measured in a made-up room (the speaker heard at the microphone 30 ms later at half
+    the level): 40 dB of the echo taken out after two seconds, with one channel of
+    playout or two; steady hiss down by more than 10 dB; a quiet voice up by 14 dB.
+  - An echo canceller learns the room from what is played, and learns almost nothing
+    from a steady pitch: 3 dB taken out of the bots' made-up voices. So the bots' voices
+    are no test of it, and it is tested on broadband sound in syllables.
+  - *Headphones.* With no echo to find, the canceller must notice and stand aside, or it
+    takes whoever talks at the microphone for an echo of the others. Its default way of
+    noticing took eight seconds of the others talking, and until then let through a
+    millionth of the talker (measured). **Decided: the other way it offers** (a
+    two-state model, `TransparentModeType::Hmm`), which stands aside at once when the
+    others have talked alone first, with the same 40 dB taken out in the room. Still
+    lost: about two seconds of a talker who starts at the same moment as the others, at
+    the start of a call.
+  - Not tested: a real room, and drift between the speaker's clock and the microphone's.
 - **Audio codec**: libopus 1.6 (C, built from source) with DTX and in-band FEC; DRED when
   loss calls for it.
   - Wrapped by `palaver-opus`, the one crate allowed `unsafe`: speech at 48 kHz in
@@ -791,7 +809,6 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
     its place; the mixer applies it.
   - Measured with libopus 1.6.1: FEC, DRED and concealment all fill a lost frame of two
     channels as they do one.
-  - Not yet checked: echo cancellation against two channels of playout (`sonora`).
 - **Between a device and the frames** (`media::pcm`, `media::resample`): a device has its
   own rate, channels and block sizes. `Capture` and `Playback` convert both ways, each
   channel through its own rate change. A device with one channel gets two averaged; a
