@@ -747,8 +747,8 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
   and gain control. Platform voice-processing units on Apple/Android where better.
 - **Audio codec**: libopus 1.6 (C, built from source) with DTX and in-band FEC; DRED when
   loss calls for it.
-  - Wrapped by `palaver-opus`, the one crate allowed `unsafe`: mono speech at 48 kHz in
-    20 ms frames; decode, decode from the next packet's FEC, decode from a later packet's
+  - Wrapped by `palaver-opus`, the one crate allowed `unsafe`: speech at 48 kHz in
+    20 ms frames, in one channel or two; decode, decode from the next packet's FEC, decode from a later packet's
     DRED, conceal.
   - **FEC and DRED are paid for out of the bitrate, and at 32 kbit/s there is not room for
     both.** How far back a packet's DRED history reached, measured with libopus 1.6.1 on a
@@ -775,6 +775,27 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
   frame interval: the frame, a lost frame rebuilt from the next packet, or the decoder's
   guess. Voices are summed and passed through a limiter that leaves ordinary levels
   untouched and squeezes what would clip (`media::mix`).
+- **Channels** (decided 2026-11-21). Samples of two channels are interleaved; a frame
+  says how many it has by its length.
+  - *A microphone is sent in one channel.* One voice at one microphone has no left and
+    right; two channels would cost bitrate and make echo cancellation harder for nothing
+    a listener hears.
+  - *A source that has two is sent in two, when its owner asks*: shared computer sound,
+    music, a stereo interface. Voice processing is off for such a track. The encoder's
+    settings say which (`EncoderConfig::channels`); nothing on the wire needs to, because
+    an Opus packet says what it holds and a decoder gives either from either.
+  - *What is played has two channels wherever the device has.* Each voice is decoded on
+    its own (the khefs forward, they do not mix), so the listener's node decides where
+    each is heard. **Planned: a voice is heard where its picture is** on the screen, left
+    to right; a track sent in two channels is played as sent. The app gives each voice
+    its place; the mixer applies it.
+  - Measured with libopus 1.6.1: FEC, DRED and concealment all fill a lost frame of two
+    channels as they do one.
+  - Not yet checked: echo cancellation against two channels of playout (`sonora`).
+- **Between a device and the frames** (`media::pcm`, `media::resample`): a device has its
+  own rate, channels and block sizes. `Capture` and `Playback` convert both ways, each
+  channel through its own rate change. A device with one channel gets two averaged; a
+  device with more than two uses its first two.
 - **Made-up voices** (`media::synthetic`) for bots and tests: a pitch with harmonics and a
   syllable rhythm, which Opus treats as speech. Each voice has its own pitch (eight within
   one octave), so a listener can tell whose voice is in what it plays after encoding, loss
