@@ -33,7 +33,7 @@ use palaver_net::transport::{
 };
 use palaver_node::{Config as NodeConfig, Node, Output};
 use palaver_proto::{MediaTrack, MeetingTag, ParticipantId, PlanStamp, Redacted, Timestamp};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -167,6 +167,7 @@ impl Engine {
             endpoint,
             links: BTreeMap::new(),
             entry_points: BTreeMap::new(),
+            awaiting_report: BTreeSet::new(),
             next_number: 0,
             inputs,
             started: Instant::now(),
@@ -297,6 +298,8 @@ struct Run<E: Endpoint> {
     links: BTreeMap<ParticipantId, Link<E::Connection>>,
     /// Where to find the nodes the meeting was joined through.
     entry_points: BTreeMap<ParticipantId, Peer>,
+    /// Nodes to dial once their report says where they are.
+    awaiting_report: BTreeSet<ParticipantId>,
     next_number: u64,
     inputs: mpsc::Sender<Input<E::Connection>>,
     started: Instant,
@@ -517,6 +520,7 @@ impl<E: Endpoint> Run<E> {
 
     /// Do everything the node has asked for, then say what it now knows.
     fn carry_out(&mut self) {
+        self.dial_the_awaited();
         while let Some(output) = self.node.poll_output() {
             match output {
                 Output::Dial { peer } => self.dial(peer),
@@ -565,15 +569,34 @@ impl<E: Endpoint> Run<E> {
         });
     }
 
+    /// Where to find `peer`: its key, and every address known for it. An entry point is
+    /// known from the ticket; any other node from its report, which names its key and
+    /// lists its addresses. `None` until one of the two is known.
+    fn whereabouts(&self, peer: &ParticipantId) -> Option<Peer> {
+        let entry = self.entry_points.get(peer);
+        let report = self.node.report_of(peer);
+        let mut target = match (entry, report) {
+            (Some(entry), _) => entry.clone(),
+            (None, Some(report)) => Peer::by_key(report.key),
+            (None, None) => return None,
+        };
+        if let Some(report) = report {
+            // The report is the newer word, so its addresses are tried first in a tie.
+            let mut addresses = report.addresses.clone();
+            for address in target.addresses {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+            target.addresses = addresses;
+        }
+        Some(target)
+    }
+
     fn dial(&mut self, peer: ParticipantId) {
-        // Where to find it: it is an entry point, or the plan names its key.
-        let target = self.entry_points.get(&peer).cloned().or_else(|| {
-            let plan = self.node.plan()?;
-            Some(Peer::by_key(plan.member(&peer, &Ed25519)?.key))
-        });
-        let Some(target) = target else {
-            let now = self.now();
-            self.node.dial_failed(&peer, now);
+        let Some(target) = self.whereabouts(&peer) else {
+            // The plan names it, so its report is on its way here.
+            self.awaiting_report.insert(peer);
             return;
         };
         let (endpoint, inputs) = (Arc::clone(&self.endpoint), self.inputs.clone());
@@ -586,6 +609,30 @@ impl<E: Endpoint> Run<E> {
             };
             let _ = inputs.send(input).await;
         });
+    }
+
+    /// Dial those whose report has come, and give up on those the plan has dropped or a
+    /// connection has reached first.
+    fn dial_the_awaited(&mut self) {
+        if self.awaiting_report.is_empty() {
+            return;
+        }
+        let now = self.now();
+        for peer in std::mem::take(&mut self.awaiting_report) {
+            let planned = self
+                .node
+                .plan()
+                .is_some_and(|plan| plan.member(&peer, &Ed25519).is_some());
+            if self.links.contains_key(&peer) {
+                // It dialled us meanwhile; the node already knows.
+            } else if !planned {
+                self.node.dial_failed(&peer, now);
+            } else if self.node.report_of(&peer).is_some() {
+                self.dial(peer);
+            } else {
+                self.awaiting_report.insert(peer);
+            }
+        }
     }
 
     fn stream(&mut self, peer: ParticipantId, action: Action) {
