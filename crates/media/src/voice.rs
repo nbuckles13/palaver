@@ -37,6 +37,11 @@ pub struct VoiceSender {
 }
 
 impl VoiceSender {
+    /// A sender that encodes as `config` says.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Encoder::new`]: libopus could not make the encoder.
     pub fn new(config: EncoderConfig) -> Result<Self, Error> {
         Ok(Self {
             encoder: Encoder::new(config)?,
@@ -46,12 +51,18 @@ impl VoiceSender {
     }
 
     /// The counter the next frame will carry.
-    pub fn next_seq(&self) -> u64 {
+    #[must_use]
+    pub const fn next_seq(&self) -> u64 {
         self.next_seq
     }
 
     /// Encode the next 20 ms: a frame of the channels the sender was made for. `None` if the encoder found nothing worth sending (silence,
     /// with discontinuous transmission on); the counter advances all the same.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::FrameLength`] if `pcm` is not a frame of the sender's channels, and
+    /// [`Error::Opus`] if libopus refuses to encode it. The counter does not advance.
     pub fn encode(&mut self, pcm: &[f32]) -> Result<Option<Encoded<'_>>, Error> {
         let level = audio_level(pcm);
         let length = self.encoder.encode(pcm, &mut self.packet)?;
@@ -90,6 +101,10 @@ pub struct VoiceReceiver<P> {
 impl<P: AsRef<[u8]> + Clone> VoiceReceiver<P> {
     /// A receiver that gives `channels`: a voice sent in one is given on both sides, a
     /// voice sent in two is averaged into one.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Decoder::new`]: libopus could not make the decoder.
     pub fn new(config: jitter::Config, channels: Channels) -> Result<Self, Error> {
         Ok(Self {
             jitter: JitterBuffer::new(config),
@@ -111,6 +126,11 @@ impl<P: AsRef<[u8]> + Clone> VoiceReceiver<P> {
 
     /// The next 20 ms to play, written to `pcm` (which must hold a frame of the receiver's
     /// channels: [`Channels::frame_len`]). Call once per frame interval.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::FrameLength`] if `pcm` is not that long, before anything is taken from
+    /// the buffer. [`Error::Opus`] if the decoder refuses the packet it was given.
     pub fn pull(&mut self, now: Timestamp, pcm: &mut [f32]) -> Result<Played, Error> {
         if pcm.len() != self.decoder.channels().frame_len() {
             return Err(Error::FrameLength);
@@ -146,12 +166,14 @@ impl<P: AsRef<[u8]> + Clone> VoiceReceiver<P> {
         }
     }
 
-    pub fn stats(&self) -> jitter::Stats {
+    #[must_use]
+    pub const fn stats(&self) -> jitter::Stats {
         self.jitter.stats()
     }
 
     /// The playout delay the buffer is aiming for.
-    pub fn target_delay(&self) -> std::time::Duration {
+    #[must_use]
+    pub const fn target_delay(&self) -> std::time::Duration {
         self.jitter.target_delay()
     }
 }

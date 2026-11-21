@@ -1,7 +1,7 @@
 //! Whether the khef at the other end of a link is alive, judged from what it sends.
 //!
 //! Anything a khef sends on a link shows that its forwarding loop is running: forwarded
-//! audio and video, control objects. When it has nothing to send it sends a filler (a MoQ
+//! audio and video, control objects. When it has nothing to send it sends a filler (a `MoQ`
 //! padding datagram, which the other end discards), so that silence on a link always means
 //! something is wrong. No node floods a heartbeat to the meeting: each watches its own
 //! links, and reports a link that dies as a change (design section 5).
@@ -44,7 +44,8 @@ pub struct LinkWatch {
 
 impl LinkWatch {
     /// The link came up at `now`.
-    pub fn new(config: LinkWatchConfig, now: Timestamp) -> Self {
+    #[must_use]
+    pub const fn new(config: LinkWatchConfig, now: Timestamp) -> Self {
         Self {
             config,
             last_sent: now,
@@ -65,16 +66,19 @@ impl LinkWatch {
 
     /// Whether a filler should be sent now. The caller sends one and calls
     /// [`LinkWatch::sent`].
+    #[must_use]
     pub fn filler_due(&self, now: Timestamp) -> bool {
         now.saturating_since(self.last_sent) >= self.config.filler_after
     }
 
     /// Whether the other end has been silent for too long.
+    #[must_use]
     pub fn is_dead(&self, now: Timestamp) -> bool {
         now.saturating_since(self.last_heard) >= self.config.dead_after
     }
 
     /// When to look at this link next if nothing is sent or heard meanwhile.
+    #[must_use]
     pub fn next_wake(&self) -> Timestamp {
         let filler = self.last_sent.saturating_add(self.config.filler_after);
         let dead = self.last_heard.saturating_add(self.config.dead_after);

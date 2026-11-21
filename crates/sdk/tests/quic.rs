@@ -3,7 +3,7 @@
 //! finds the others at the addresses their reports give, knowing at first only the one it
 //! joined through.
 
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use palaver_khef_core::LinkWatchConfig;
 use palaver_net::admission::{AdmissionKey, Admitted};
@@ -88,12 +88,9 @@ async fn joiners_find_each_other(advertise: bool) {
                 roster == everyone && s.links.len() >= 2
             }),
         )
-        .await;
-        assert!(
-            matches!(seen, Ok(Ok(_))),
-            "last: {:?}",
-            *member.engine.status().borrow()
-        );
+        .await
+        .is_ok_and(|waited| waited.is_ok());
+        assert!(seen, "last: {:?}", *member.engine.status().borrow());
     }
 }
 

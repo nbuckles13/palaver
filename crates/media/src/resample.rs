@@ -15,6 +15,7 @@
 use std::f64::consts::PI;
 
 /// How many input samples go into each output sample when the rate goes up or stays.
+///
 /// Going down, it is this times the ratio (rounded up), so that the filter is as sharp
 /// measured against the new rate as it is against the old.
 pub const TAPS: usize = 32;
@@ -56,6 +57,15 @@ fn sinc(x: f64) -> f64 {
 
 impl Resampler {
     /// From `from` samples a second to `to`. `None` if either is zero.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "tap and phase counts are at most a few hundred, exact as f64"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the weights are worked out in f64 and kept as f32, which is what the samples are"
+    )]
     pub fn new(from: u32, to: u32) -> Option<Self> {
         if from == 0 || to == 0 {
             return None;
@@ -97,12 +107,17 @@ impl Resampler {
     }
 
     /// How far the output lags the input, in input samples.
-    pub fn delay(&self) -> usize {
+    #[must_use]
+    pub const fn delay(&self) -> usize {
         self.taps / 2
     }
 
     /// Take `input` and append to `out` every output sample that can now be made.
     /// Over time, `to / from` samples come out for each one that goes in.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a blend between two rows of weights: 24 bits is finer than the table"
+    )]
     pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
         let skipped = self.skip.min(input.len());
         self.skip = self.skip.saturating_sub(skipped);
@@ -140,6 +155,11 @@ impl Resampler {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "test signals: sample counts and rates far below 2^24, measured to a few decimal places"
+)]
 mod tests {
     use super::*;
     use std::f32::consts::TAU;

@@ -108,6 +108,7 @@ struct Nat {
 }
 
 impl MemoryNetwork {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -120,6 +121,7 @@ impl MemoryNetwork {
 
     /// An endpoint on this network known by `key`. `None` if an open endpoint already
     /// has that key.
+    #[must_use]
     pub fn endpoint(&self, key: PublicKey) -> Option<MemoryEndpoint> {
         let (incoming, accepted) = mpsc::channel(ACCEPT_QUEUE);
         let listener = Arc::new(Listener {
@@ -132,6 +134,7 @@ impl MemoryNetwork {
             return None;
         }
         listeners.insert(key, Arc::clone(&listener));
+        drop(listeners);
         Some(MemoryEndpoint {
             key,
             network: self.clone(),
@@ -200,6 +203,10 @@ impl Endpoint for MemoryEndpoint {
         Ok(ours)
     }
 
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the queue stays locked for the whole wait, so that one caller at a time takes from it"
+    )]
     async fn accept(&self) -> Option<MemoryConnection> {
         let mut closed = self.listener.closed.subscribe();
         let mut accepted = self.accepted.lock().await;
@@ -343,7 +350,7 @@ impl Connection for MemoryConnection {
         tokio::select! {
             biased;
             closed = wait_closed(&mut end, self.0.side) => Err(closed),
-            sent = self.0.uni_out.send(recv) => match sent {
+            outcome = self.0.uni_out.send(recv) => match outcome {
                 Ok(()) => Ok(send),
                 Err(_) => Err(self.closed().await),
             },
@@ -358,13 +365,17 @@ impl Connection for MemoryConnection {
         tokio::select! {
             biased;
             closed = wait_closed(&mut end, self.0.side) => Err(closed),
-            sent = self.0.bidi_out.send((their_send, their_recv)) => match sent {
+            outcome = self.0.bidi_out.send((their_send, their_recv)) => match outcome {
                 Ok(()) => Ok((send, recv)),
                 Err(_) => Err(self.closed().await),
             },
         }
     }
 
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the queue stays locked for the whole wait, so that one caller at a time takes from it"
+    )]
     async fn accept_uni(&self) -> Result<MemoryRecv, Closed> {
         let mut end = self.0.end.subscribe();
         let mut incoming = self.0.uni_in.lock().await;
@@ -378,6 +389,10 @@ impl Connection for MemoryConnection {
         }
     }
 
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the queue stays locked for the whole wait, so that one caller at a time takes from it"
+    )]
     async fn accept_bidi(&self) -> Result<(MemorySend, MemoryRecv), Closed> {
         let mut end = self.0.end.subscribe();
         let mut incoming = self.0.bidi_in.lock().await;
@@ -401,6 +416,10 @@ impl Connection for MemoryConnection {
         Ok(())
     }
 
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the queue stays locked for the whole wait, so that one caller at a time takes from it"
+    )]
     async fn read_datagram(&self) -> Result<Bytes, Closed> {
         let mut end = self.0.end.subscribe();
         let mut incoming = self.0.datagrams_in.lock().await;
@@ -522,6 +541,13 @@ pub struct MemoryRecv {
     stopped: bool,
 }
 
+impl MemoryRecv {
+    /// How the sender has ended the stream, so far.
+    fn how(&self) -> Ending {
+        *self.how.borrow()
+    }
+}
+
 impl RecvStream for MemoryRecv {
     async fn read(&mut self) -> Result<Option<Bytes>, StreamError> {
         if self.stopped {
@@ -534,7 +560,7 @@ impl RecvStream for MemoryRecv {
             return Err(StreamError::Closed(closed));
         }
         // A reset overtakes what was written before it.
-        if let Ending::Reset(code) = *self.how.borrow() {
+        if let Ending::Reset(code) = self.how() {
             return Err(StreamError::Reset(code));
         }
         let side = self.side;
@@ -543,7 +569,7 @@ impl RecvStream for MemoryRecv {
             closed = wait_closed(&mut self.connection, side) => Err(StreamError::Closed(closed)),
             chunk = self.bytes.recv() => match chunk {
                 Some(chunk) => Ok(Some(chunk)),
-                None => match *self.how.borrow() {
+                None => match self.how() {
                     Ending::Finished => {
                         self.ended = true;
                         Ok(None)

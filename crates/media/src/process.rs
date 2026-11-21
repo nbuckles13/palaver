@@ -97,9 +97,9 @@ impl Planar {
         let done = match self.channels {
             Channels::Mono => process(&[&self.samples], &mut [&mut self.out]),
             Channels::Stereo => {
-                let (left, right) = self.samples.split_at(CHUNK);
-                let (out_left, out_right) = self.out.split_at_mut(CHUNK);
-                process(&[left, right], &mut [out_left, out_right])
+                let from: [&[f32]; 2] = self.samples.split_at(CHUNK).into();
+                let mut to: [&mut [f32]; 2] = self.out.split_at_mut(CHUNK).into();
+                process(&from, &mut to)
             }
         };
         // The pieces are made to the lengths the processor was told of.
@@ -143,7 +143,12 @@ impl Processor {
             }),
             ..Config::default()
         };
-        let stream = |channels: Channels| StreamConfig::new(SAMPLE_RATE, channels.count() as u16);
+        let stream = |channels: Channels| {
+            StreamConfig::new(
+                SAMPLE_RATE,
+                u16::try_from(channels.count()).unwrap_or(u16::MAX),
+            )
+        };
         Self {
             apm: AudioProcessing::builder()
                 .config(config)
@@ -156,6 +161,10 @@ impl Processor {
     }
 
     /// A frame is on its way to the speaker: remember it, to know its echo.
+    ///
+    /// # Errors
+    ///
+    /// [`WrongLength`] if `frame` is not a frame of the speaker's channels.
     pub fn played(&mut self, frame: &[f32]) -> Result<(), WrongLength> {
         if frame.len() != self.played.channels.frame_len() {
             return Err(WrongLength);
@@ -171,6 +180,10 @@ impl Processor {
     }
 
     /// Clean a frame from the microphone, in place.
+    ///
+    /// # Errors
+    ///
+    /// [`WrongLength`] if `frame` is not a frame of the microphone's channels.
     pub fn captured(&mut self, frame: &mut [f32]) -> Result<(), WrongLength> {
         if frame.len() != self.captured.channels.frame_len() {
             return Err(WrongLength);

@@ -57,6 +57,11 @@ pub struct Manifests {
 }
 
 /// Read the manifests out of `cargo metadata` JSON.
+///
+/// # Errors
+///
+/// Fails if `json` is not JSON, or a package lacks the name, features or dependencies that
+/// `cargo metadata` writes.
 pub fn manifests_from_metadata(json: &str) -> Result<Manifests, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let strings = |value: &serde_json::Value| -> Vec<String> {
@@ -109,6 +114,7 @@ fn reachable(graph: &Graph, from: &str) -> BTreeSet<String> {
 }
 
 /// Violations of the rules above. `graph` holds normal dependencies only.
+#[must_use]
 pub fn violations(rules: &[TestOnlyFeature], manifests: &Manifests, graph: &Graph) -> Vec<String> {
     let mut out = vec![];
     for rule in rules {

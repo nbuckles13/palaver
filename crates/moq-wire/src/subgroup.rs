@@ -31,13 +31,18 @@ pub const PADDING_DATAGRAM: u64 = 0x132b_3e29;
 
 /// Whether a datagram is padding, to be discarded. Check this before decoding a datagram as an
 /// object.
+#[must_use]
 pub fn is_padding_datagram(datagram: &[u8]) -> bool {
     Reader::new(datagram).vi64() == Ok(PADDING_DATAGRAM)
 }
 
-/// Classify a unidirectional stream by its first integer. Fetch streams are not in this
-/// profile; they and unknown types close the session.
-pub fn uni_stream(first: u64) -> Result<UniStream> {
+/// Classify a unidirectional stream by its first integer.
+///
+/// # Errors
+///
+/// Fails with [`Error::Violation`] on fetch streams, which are not in this profile, and on
+/// unknown types; both close the session.
+pub const fn uni_stream(first: u64) -> Result<UniStream> {
     if first == SETUP {
         Ok(UniStream::Control)
     } else if first < 0x80 && first & ALWAYS_SET != 0 {
@@ -107,8 +112,13 @@ impl SubgroupHeader {
         }
     }
 
-    /// Read a header from the start of a stream. [`Error::NeedMore`], consuming nothing, until
-    /// all of it has arrived.
+    /// Read a header from the start of a stream.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NeedMore`], consuming nothing, until all of it has arrived.
+    /// [`Error::Violation`] if the stream type is not a subgroup header or its subgroup id
+    /// mode is reserved.
     pub fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let mut probe = r.clone();
         let flags = probe.vi64()?;
@@ -162,7 +172,8 @@ pub struct SubgroupWriter {
 }
 
 impl SubgroupWriter {
-    pub fn new(header: &SubgroupHeader) -> Self {
+    #[must_use]
+    pub const fn new(header: &SubgroupHeader) -> Self {
         Self {
             has_properties: header.has_properties,
             previous: None,
@@ -171,6 +182,12 @@ impl SubgroupWriter {
 
     /// Append everything except the payload bytes. For an object with no payload this is the
     /// whole object. Lets a khef forward a large payload without copying it into `out`.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`], appending nothing, if the object id does not increase,
+    /// the object has properties the header said objects do not carry, or a status other than
+    /// normal has properties.
     pub fn write_prefix(&mut self, object: &SubgroupObject<'_>, out: &mut Vec<u8>) -> Result<()> {
         let delta = match self.previous {
             None => object.object,
@@ -215,6 +232,10 @@ impl SubgroupWriter {
     }
 
     /// Append the whole object.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`SubgroupWriter::write_prefix`] does.
     pub fn write(&mut self, object: &SubgroupObject<'_>, out: &mut Vec<u8>) -> Result<()> {
         self.write_prefix(object, out)?;
         if let ObjectBody::Payload(payload) = object.body {
@@ -232,7 +253,8 @@ pub struct SubgroupReader {
 }
 
 impl SubgroupReader {
-    pub fn new(header: &SubgroupHeader) -> Self {
+    #[must_use]
+    pub const fn new(header: &SubgroupHeader) -> Self {
         Self {
             has_properties: header.has_properties,
             previous: None,
@@ -275,9 +297,14 @@ impl SubgroupReader {
         })
     }
 
-    /// Read the next object whole. [`Error::NeedMore`], consuming nothing and changing
-    /// nothing, until all of it has arrived. Simple, and right for small objects such as
-    /// control messages.
+    /// Read the next object whole. Simple, and right for small objects such as control
+    /// messages.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NeedMore`], consuming nothing and changing nothing, until all of it has
+    /// arrived. [`Error::Violation`] if the object id overflows, the properties are malformed,
+    /// the status is unknown, or a status other than normal has properties.
     pub fn read<'a>(&mut self, r: &mut Reader<'a>) -> Result<SubgroupObject<'a>> {
         let mut probe = r.clone();
         let prefix = self.parse_prefix(&mut probe)?;
@@ -300,9 +327,13 @@ impl SubgroupReader {
     /// its bytes arrive instead of after the whole object has. This is how a khef forwards a
     /// video frame without waiting for all of it.
     ///
+    /// After a prefix with a payload, the caller must take exactly that many bytes from the
+    /// stream before reading the next object.
+    ///
+    /// # Errors
+    ///
     /// [`Error::NeedMore`], consuming nothing and changing nothing, until the prefix has
-    /// arrived. After a prefix with a payload, the caller must take exactly that many bytes
-    /// from the stream before reading the next object.
+    /// arrived. [`Error::Violation`] on the conditions of [`SubgroupReader::read`].
     pub fn read_prefix<'a>(&mut self, r: &mut Reader<'a>) -> Result<ObjectPrefix<'a>> {
         let mut probe = r.clone();
         let prefix = self.parse_prefix(&mut probe)?;
@@ -552,6 +583,9 @@ mod tests {
 
     #[test]
     fn invalid_streams_are_violations() {
+        fn read(bytes: &[u8]) -> Result<SubgroupObject<'_>> {
+            SubgroupReader::new(&header()).read(&mut Reader::new(bytes))
+        }
         // header: bit 4 clear; two-byte type; reserved subgroup id mode
         for bytes in [&[0x01u8, 1, 1][..], &[0x80, 0x90, 1, 1], &[0x16, 1, 1]] {
             assert!(
@@ -561,9 +595,6 @@ mod tests {
                 ),
                 "{bytes:x?}"
             );
-        }
-        fn read(bytes: &[u8]) -> Result<SubgroupObject<'_>> {
-            SubgroupReader::new(&header()).read(&mut Reader::new(bytes))
         }
         // unknown status; properties on a non-normal status; malformed properties
         assert_eq!(
@@ -699,8 +730,8 @@ mod tests {
                 // payload, since only its length is written.
                 let body = match prefix.body {
                     PrefixBody::Payload { len } => {
-                        payload_left = len as usize;
-                        ObjectBody::Payload(&frame[..len as usize])
+                        payload_left = usize::try_from(len).unwrap();
+                        ObjectBody::Payload(&frame[..payload_left])
                     }
                     PrefixBody::Status(status) => ObjectBody::Status(status),
                 };

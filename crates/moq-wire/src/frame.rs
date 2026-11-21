@@ -14,8 +14,11 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    /// Read one whole message. Returns [`Error::NeedMore`], consuming nothing, until the full
-    /// body has arrived.
+    /// Read one whole message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NeedMore`], consuming nothing, until the full body has arrived.
     pub fn decode(r: &mut Reader<'a>) -> Result<Self> {
         let mut probe = r.clone();
         let ty = probe.vi64()?;
@@ -30,7 +33,11 @@ impl<'a> Frame<'a> {
     }
 
     /// Call after decoding a body: bytes left over mean the length did not match the message.
-    pub fn finish(self) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`] if any of the body is unread.
+    pub const fn finish(self) -> Result<()> {
         if self.body.is_empty() {
             Ok(())
         } else {
@@ -40,6 +47,11 @@ impl<'a> Frame<'a> {
 }
 
 /// Append a framed message.
+///
+/// # Errors
+///
+/// Fails with [`Error::Violation`], appending nothing, if `body` is longer than
+/// [`MAX_BODY_BYTES`].
 pub fn encode_frame(ty: u64, body: &[u8], out: &mut Vec<u8>) -> Result<()> {
     let len = u16::try_from(body.len())
         .map_err(|_| Error::Violation("message body exceeds 65535 bytes"))?;

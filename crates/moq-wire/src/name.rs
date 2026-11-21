@@ -20,6 +20,11 @@ impl Location {
         put_vi64(out, self.object);
     }
 
+    /// Read a group id and an object id.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `r` runs out.
     pub fn decode(r: &mut Reader<'_>) -> Result<Self> {
         Ok(Self {
             group: r.vi64()?,
@@ -35,6 +40,12 @@ impl Location {
 pub struct Namespace(Vec<Vec<u8>>);
 
 impl Namespace {
+    /// A namespace made of `fields`.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`] if there are more than 32 fields, a field is empty, or
+    /// the fields total more than 4096 bytes.
     pub fn new(fields: Vec<Vec<u8>>) -> Result<Self> {
         if fields.len() > MAX_NAMESPACE_FIELDS {
             return Err(Error::Violation("track namespace has more than 32 fields"));
@@ -48,6 +59,7 @@ impl Namespace {
         Ok(Self(fields))
     }
 
+    #[must_use]
     pub fn fields(&self) -> &[Vec<u8>] {
         &self.0
     }
@@ -58,7 +70,8 @@ impl Namespace {
     }
 
     /// Whether every field of `self` equals the corresponding leading field of `other`.
-    pub fn is_prefix_of(&self, other: &Namespace) -> bool {
+    #[must_use]
+    pub fn is_prefix_of(&self, other: &Self) -> bool {
         other
             .0
             .get(..self.0.len())
@@ -73,12 +86,18 @@ impl Namespace {
         }
     }
 
+    /// Read a field count and that many length-prefixed fields.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `r` runs out, or with [`Error::Violation`] on the conditions of
+    /// [`Namespace::new`].
     pub fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let count = r.vi64()?;
         if count > MAX_NAMESPACE_FIELDS as u64 {
             return Err(Error::Violation("track namespace has more than 32 fields"));
         }
-        let mut fields = Vec::with_capacity(count as usize);
+        let mut fields = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
         let mut total = 0usize;
         for _ in 0..count {
             let len = r.vi64()?;
@@ -89,7 +108,7 @@ impl Namespace {
             if total > MAX_NAME_BYTES {
                 return Err(Error::Violation("track namespace exceeds 4096 bytes"));
             }
-            fields.push(r.take(len as usize)?.to_vec());
+            fields.push(r.take(usize::try_from(len).unwrap_or(usize::MAX))?.to_vec());
         }
         Ok(Self(fields))
     }
@@ -103,6 +122,11 @@ pub struct FullTrackName {
 }
 
 impl FullTrackName {
+    /// A track `name` within `namespace`.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`] if the namespace and name total more than 4096 bytes.
     pub fn new(namespace: Namespace, name: Vec<u8>) -> Result<Self> {
         if namespace.byte_len() + name.len() > MAX_NAME_BYTES {
             return Err(Error::Violation("full track name exceeds 4096 bytes"));
@@ -110,10 +134,12 @@ impl FullTrackName {
         Ok(Self { namespace, name })
     }
 
-    pub fn namespace(&self) -> &Namespace {
+    #[must_use]
+    pub const fn namespace(&self) -> &Namespace {
         &self.namespace
     }
 
+    #[must_use]
     pub fn name(&self) -> &[u8] {
         &self.name
     }
@@ -124,13 +150,19 @@ impl FullTrackName {
         out.extend_from_slice(&self.name);
     }
 
+    /// Read a namespace, then a length-prefixed track name.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `r` runs out, the namespace is invalid (see [`Namespace::decode`]), or the
+    /// namespace and name total more than 4096 bytes.
     pub fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let namespace = Namespace::decode(r)?;
         let len = r.vi64()?;
         if len > (MAX_NAME_BYTES - namespace.byte_len()) as u64 {
             return Err(Error::Violation("full track name exceeds 4096 bytes"));
         }
-        let name = r.take(len as usize)?.to_vec();
+        let name = r.take(usize::try_from(len).unwrap_or(usize::MAX))?.to_vec();
         Ok(Self { namespace, name })
     }
 }

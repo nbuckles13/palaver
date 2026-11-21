@@ -11,7 +11,7 @@ use crate::{Error, Location, Reader, Result, put_vi64};
 use core::time::Duration;
 
 /// Whole milliseconds in `span`, as the wire carries them. A part of a millisecond is dropped.
-pub(crate) fn millis(span: Duration) -> u64 {
+pub fn millis(span: Duration) -> u64 {
     u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
@@ -40,7 +40,7 @@ pub const SUBSCRIBE_PARAMS: &[u64] = &[
     NEW_GROUP_REQUEST,
     INCLUDE_PROPERTIES,
 ];
-/// Parameters that may appear in SUBSCRIBE_OK and REQUEST_OK.
+/// Parameters that may appear in `SUBSCRIBE_OK` and `REQUEST_OK`.
 pub const OK_PARAMS: &[u64] = &[EXPIRES, LARGEST_OBJECT];
 /// Parameters that may appear in PUBLISH.
 pub const PUBLISH_PARAMS: &[u64] = &[
@@ -53,9 +53,9 @@ pub const PUBLISH_PARAMS: &[u64] = &[
     LOCATION_FILTER,
     GROUP_ORDER,
 ];
-/// Parameters that may appear in SUBSCRIBE_TRACKS.
+/// Parameters that may appear in `SUBSCRIBE_TRACKS`.
 pub const SUBSCRIBE_TRACKS_PARAMS: &[u64] = &[FORWARD, GROUP_ORDER, INCLUDE_PROPERTIES];
-/// Parameters that may appear in REQUEST_UPDATE. Which of them apply depends on the request
+/// Parameters that may appear in `REQUEST_UPDATE`. Which of them apply depends on the request
 /// being updated, which the codec does not know; the khef checks that.
 pub const REQUEST_UPDATE_PARAMS: &[u64] = &[
     OBJECT_DELIVERY_TIMEOUT,
@@ -119,7 +119,7 @@ pub struct Params {
     pub include_properties: Option<bool>,
 }
 
-fn flag(byte: u8) -> Result<bool> {
+const fn flag(byte: u8) -> Result<bool> {
     match byte {
         0 => Ok(false),
         1 => Ok(true),
@@ -246,8 +246,12 @@ impl Params {
         list
     }
 
-    /// Append the count and the parameters. Fails if a parameter is set that `allowed` (the
-    /// message's list) does not include.
+    /// Append the count and the parameters.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`], appending nothing, if a parameter is set that `allowed`
+    /// (the message's list) does not include.
     pub fn encode(&self, allowed: &[u64], out: &mut Vec<u8>) -> Result<()> {
         let list = self.encoded();
         if list.iter().any(|(ty, _)| !allowed.contains(ty)) {
@@ -265,6 +269,11 @@ impl Params {
 
     /// Read the count and the parameters of a message whose list of permitted types is
     /// `allowed`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if `r` runs out, or with [`Error::Violation`] if a parameter is repeated, unknown,
+    /// unsupported by this profile, not in `allowed`, or has an invalid value.
     pub fn decode(r: &mut Reader<'_>, allowed: &[u64]) -> Result<Self> {
         let mut p = Self::default();
         let count = r.vi64()?;
@@ -288,10 +297,10 @@ impl Params {
             }
             match ty {
                 OBJECT_DELIVERY_TIMEOUT => {
-                    p.object_delivery_timeout = Some(Duration::from_millis(r.vi64()?))
+                    p.object_delivery_timeout = Some(Duration::from_millis(r.vi64()?));
                 }
                 SUBGROUP_DELIVERY_TIMEOUT => {
-                    p.subgroup_delivery_timeout = Some(Duration::from_millis(r.vi64()?))
+                    p.subgroup_delivery_timeout = Some(Duration::from_millis(r.vi64()?));
                 }
                 EXPIRES => p.expires = Some(Duration::from_millis(r.vi64()?)),
                 LARGEST_OBJECT => p.largest_object = Some(Location::decode(r)?),
@@ -323,8 +332,8 @@ mod tests {
     fn everything() -> Params {
         Params {
             object_delivery_timeout: Some(Duration::from_millis(500)),
-            subgroup_delivery_timeout: Some(Duration::from_millis(2000)),
-            expires: Some(Duration::from_millis(60_000)),
+            subgroup_delivery_timeout: Some(Duration::from_secs(2)),
+            expires: Some(Duration::from_mins(1)),
             largest_object: Some(Location {
                 group: 9,
                 object: 3,

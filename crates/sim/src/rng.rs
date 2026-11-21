@@ -1,23 +1,25 @@
 //! Seeded random source. Streams are derived per purpose so that adding a node or link does
 //! not shift the draws seen by the others.
 
-/// A small deterministic generator (SplitMix64). Not for cryptography.
+/// A small deterministic generator (`SplitMix64`). Not for cryptography.
 #[derive(Clone, Debug)]
 pub struct Rng(u64);
 
 impl Rng {
-    pub fn new(seed: u64) -> Self {
+    #[must_use]
+    pub const fn new(seed: u64) -> Self {
         Self(seed)
     }
 
     /// An independent stream for `label` (for example a node or link index).
-    pub fn derive(&self, label: u64) -> Self {
+    #[must_use]
+    pub const fn derive(&self, label: u64) -> Self {
         let mut r = Self(self.0 ^ label.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         r.next_u64();
         r
     }
 
-    pub fn next_u64(&mut self) -> u64 {
+    pub const fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -26,7 +28,7 @@ impl Rng {
     }
 
     /// Uniform in `0..n`; returns 0 when `n` is 0.
-    pub fn below(&mut self, n: u64) -> u64 {
+    pub const fn below(&mut self, n: u64) -> u64 {
         if n == 0 { 0 } else { self.next_u64() % n }
     }
 
@@ -49,8 +51,8 @@ mod tests {
     #[test]
     fn derived_streams_differ_from_each_other_and_the_parent() {
         let root = Rng::new(7);
-        let (mut a, mut b, mut p) = (root.derive(1), root.derive(2), root.clone());
-        let (x, y, z) = (a.next_u64(), b.next_u64(), p.next_u64());
-        assert!(x != y && x != z && y != z);
+        let (mut one, mut two, mut parent) = (root.derive(1), root.derive(2), root);
+        let (first, second, own) = (one.next_u64(), two.next_u64(), parent.next_u64());
+        assert!(first != second && first != own && second != own);
     }
 }

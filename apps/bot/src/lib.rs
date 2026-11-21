@@ -42,7 +42,8 @@ pub struct Script {
 
 impl Script {
     /// A bot that only listens.
-    pub fn silent(speaker: u32) -> Self {
+    #[must_use]
+    pub const fn silent(speaker: u32) -> Self {
         Self {
             speaker,
             loudness: 0.0,
@@ -55,7 +56,8 @@ impl Script {
     }
 
     /// A bot that talks all the time.
-    pub fn talking(speaker: u32, loudness: f32) -> Self {
+    #[must_use]
+    pub const fn talking(speaker: u32, loudness: f32) -> Self {
         Self {
             speaker,
             loudness,
@@ -101,6 +103,12 @@ impl Bot {
     /// A bot on an in-memory network, for a meeting with this secret. It does nothing
     /// until told to [`create_meeting`](Self::create_meeting) or [`join`](Self::join).
     /// Must be called inside a tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// When the operating system gives no random bytes for a key, the network already
+    /// has an endpoint with that key, the secret cannot be turned into keys, or the
+    /// codec cannot be set up.
     pub fn on_memory(
         network: &MemoryNetwork,
         secret: &Secret<[u8; SECRET_BYTES]>,
@@ -118,6 +126,12 @@ impl Bot {
     /// meeting it can be reached at `advertise`; if that is empty, at the address it is
     /// bound to, with the machine's outward address in place of "every interface".
     /// Must be called inside a tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// When the operating system gives no random bytes for a key, the QUIC endpoint
+    /// cannot be opened, the secret cannot be turned into keys, or the codec cannot be
+    /// set up.
     pub fn on_quic(
         options: QuicOptions,
         advertise: Vec<SocketAddr>,
@@ -203,11 +217,13 @@ impl Bot {
         })
     }
 
-    pub fn address(&self) -> &Peer {
+    #[must_use]
+    pub const fn address(&self) -> &Peer {
         &self.address
     }
 
     /// An invitation to the meeting with `secret`, with this bot as the way in.
+    #[must_use]
     pub fn ticket(&self, secret: &Secret<[u8; SECRET_BYTES]>) -> Ticket {
         Ticket {
             secret: Secret::new(*secret.expose()),
@@ -221,6 +237,7 @@ impl Bot {
     /// The ticket to send back to whoever gave this bot `invitation`, when it could not
     /// get in by it: the same meeting, with this bot first among the ways in. A member
     /// who is given it can [`reach`](Self::reach) for this bot.
+    #[must_use]
     pub fn reply_to(&self, invitation: &Ticket) -> Ticket {
         let mut reply = self.ticket(&invitation.secret);
         reply
@@ -231,27 +248,45 @@ impl Bot {
     }
 
     /// Dial everyone `ticket` names: for a ticket sent back by someone who cannot get in.
+    #[expect(
+        clippy::future_not_send,
+        reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
+    )]
     pub async fn reach(&self, ticket: &Ticket) {
         self.call.engine().reach(entry_points(ticket)).await;
     }
 
-    pub fn engine(&self) -> &Engine {
+    #[must_use]
+    pub const fn engine(&self) -> &Engine {
         self.call.engine()
     }
 
-    pub fn script(&self) -> Script {
+    #[must_use]
+    pub const fn script(&self) -> Script {
         self.script
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
+    )]
     pub async fn create_meeting(&self) {
         self.call.engine().create_meeting().await;
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
+    )]
     pub async fn join(&self, entry_points: Vec<Peer>) {
         self.call.engine().join(entry_points).await;
     }
 
     /// One 20 ms step: say the next frame of its script, and play what it is given.
+    ///
+    /// # Errors
+    ///
+    /// When the encoder or a decoder fails.
     pub fn tick(&mut self) -> Result<(), CodecError> {
         let elapsed = FRAME.saturating_mul(u32::try_from(self.frames).unwrap_or(u32::MAX));
         self.frames = self.frames.saturating_add(1);
@@ -276,11 +311,13 @@ impl Bot {
     }
 
     /// Whether `speaker`'s voice is in what this bot played over the last second.
+    #[must_use]
     pub fn hears(&self, speaker: u32) -> bool {
         hears(self.last_second(), pitch_of(speaker))
     }
 
     /// How strongly `speaker`'s pitch is in what this bot played over the last second.
+    #[must_use]
     pub fn strength_of(&self, speaker: u32) -> f32 {
         strength(self.last_second(), pitch_of(speaker))
     }
@@ -309,6 +346,7 @@ fn reachable_form(bound: SocketAddr) -> Option<SocketAddr> {
 }
 
 /// The members a ticket says to connect to first.
+#[must_use]
 pub fn entry_points(ticket: &Ticket) -> Vec<Peer> {
     ticket
         .entry_points

@@ -5,7 +5,7 @@
 //!   signing and verifying through traits and do no cryptography themselves; this is where
 //!   those traits are filled in.
 //! - [`transport`]: the boundary every transport is written to. A connection offers
-//!   one-way streams, two-way streams and datagrams, which is what MoQ asks of QUIC.
+//!   one-way streams, two-way streams and datagrams, which is what `MoQ` asks of QUIC.
 //! - [`memory`]: a transport that never leaves the process, for tests and for bots that
 //!   share one.
 //! - [`admission`]: the handshake that lets only holders of the meeting secret connect.

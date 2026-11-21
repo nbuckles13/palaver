@@ -2,7 +2,7 @@
 //! each side decodes the other's output.
 
 // Helpers in an integration test file are test code, but clippy only exempts `#[test]` functions.
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use bytes::BytesMut;
 use core::time::Duration;
@@ -52,6 +52,10 @@ fn tap_namespace() -> TrackNamespace {
 }
 
 /// Identical bytes, and each side decodes the other's output to the expected value.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "every caller builds both messages in the call; by value keeps the calls plain"
+)]
 fn assert_same(ours: Message, theirs: ControlMessage) {
     let mut our_bytes = vec![];
     ours.encode(&mut our_bytes).unwrap();
@@ -75,7 +79,7 @@ fn subscribe_matches_the_oracle_with_every_parameter_it_allows() {
         track: our_track(),
         params: Params {
             object_delivery_timeout: Some(Duration::from_millis(500)),
-            subgroup_delivery_timeout: Some(Duration::from_millis(2000)),
+            subgroup_delivery_timeout: Some(Duration::from_secs(2)),
             forward: Some(false),
             subscriber_priority: Some(200),
             location_filter: Some(LocationFilter::AbsoluteRange {
@@ -178,7 +182,7 @@ fn subscribe_ok_and_request_ok_match_the_oracle() {
         },
     ];
     let params = Params {
-        expires: Some(Duration::from_millis(60_000)),
+        expires: Some(Duration::from_mins(1)),
         largest_object: Some(Location {
             group: 9,
             object: 2,
@@ -226,7 +230,7 @@ fn request_error_matches_the_oracle_with_and_without_a_redirect() {
     assert_same(
         Message::RequestError(RequestError {
             code: 0x10,
-            retry_after: Some(Duration::from_millis(5000)),
+            retry_after: Some(Duration::from_secs(5)),
             reason: String::from("no such track"),
             redirect: None,
         }),
@@ -278,8 +282,8 @@ fn publish_matches_the_oracle_with_every_parameter_it_allows() {
             track_alias: 17,
             params: Params {
                 object_delivery_timeout: Some(Duration::from_millis(500)),
-                subgroup_delivery_timeout: Some(Duration::from_millis(2000)),
-                expires: Some(Duration::from_millis(60_000)),
+                subgroup_delivery_timeout: Some(Duration::from_secs(2)),
+                expires: Some(Duration::from_mins(1)),
                 largest_object: Some(Location {
                     group: 300,
                     object: 0,
@@ -360,7 +364,7 @@ fn request_update_matches_the_oracle_with_every_parameter_it_allows() {
             request_id: 6,
             params: Params {
                 object_delivery_timeout: Some(Duration::from_millis(250)),
-                subgroup_delivery_timeout: Some(Duration::from_millis(1000)),
+                subgroup_delivery_timeout: Some(Duration::from_secs(1)),
                 forward: Some(false),
                 subscriber_priority: Some(9),
                 location_filter: Some(LocationFilter::AbsoluteStart(Location {

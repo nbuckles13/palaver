@@ -40,6 +40,11 @@ fn is_root(path: &str) -> bool {
 
 /// Rust files that nothing declares, so they are never compiled. `files` maps a path (forward
 /// slashes) to its content.
+#[must_use]
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "rustc only reads module files named `.rs` in lower case"
+)]
 pub fn orphans(files: &BTreeMap<String, String>) -> Vec<String> {
     let mut out = vec![];
     for path in files.keys().filter(|p| p.ends_with(".rs") && !is_root(p)) {
@@ -81,6 +86,7 @@ pub fn orphans(files: &BTreeMap<String, String>) -> Vec<String> {
 }
 
 /// Lines that disable a test without a reason, as `path:line`.
+#[must_use]
 pub fn bare_ignores(files: &BTreeMap<String, String>) -> Vec<String> {
     let mut out = vec![];
     for (path, text) in files {
@@ -95,6 +101,7 @@ pub fn bare_ignores(files: &BTreeMap<String, String>) -> Vec<String> {
 }
 
 /// How many test functions the files contain; used so the guard cannot pass on an empty scan.
+#[must_use]
 pub fn test_count(files: &BTreeMap<String, String>) -> usize {
     files
         .values()

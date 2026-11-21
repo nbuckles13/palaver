@@ -1,6 +1,6 @@
 //! What a node does that needs no bytes to cross a link. Whole meetings of nodes, joined by
 //! simulated links, are in `palaver-sim`.
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use palaver_khef_core::{LinkWatchConfig, Role};
 use palaver_moq_wire::Setup;
@@ -11,7 +11,7 @@ use palaver_proto::{
 };
 use std::time::Duration;
 
-fn at(ms: u64) -> Timestamp {
+const fn at(ms: u64) -> Timestamp {
     Timestamp::from_millis(ms)
 }
 

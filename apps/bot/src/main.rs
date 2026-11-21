@@ -49,12 +49,20 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
 
+#[expect(
+    clippy::future_not_send,
+    reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
+)]
 async fn room(count: u32, seconds: u64) -> Result<(), BotError> {
     let network = MemoryNetwork::new();
     let secret = fresh_secret()?;
 
     let mut bots: Vec<Bot> = Vec::new();
     for n in 0..count {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a bot's number, exact up to 2^24, and it only sets a loudness"
+        )]
         let script = if n == 0 {
             Script::silent(0)
         } else {
@@ -122,7 +130,7 @@ struct Options {
 fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut options = Options::default();
     while let Some(arg) = args.next() {
-        let mut value = |what: &str| args.next().ok_or(format!("{arg} needs {what}"));
+        let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what}"));
         match arg.as_str() {
             "--bind" => {
                 let text = value("an address")?;
@@ -161,6 +169,10 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
 }
 
 /// One bot on the network: it creates a meeting, or joins the one `ticket` is for.
+#[expect(
+    clippy::future_not_send,
+    reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
+)]
 async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotError> {
     let speaker = options.speaker.unwrap_or(1);
     let script = if options.silent {
@@ -173,10 +185,10 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
         None => fresh_secret()?,
     };
     let quic = QuicOptions {
-        bind: options.bind.unwrap_or(QuicOptions::default().bind),
+        bind: options.bind.unwrap_or_else(|| QuicOptions::default().bind),
         dial_timeout: options
             .dial_seconds
-            .map_or(QuicOptions::default().dial_timeout, Duration::from_secs),
+            .map_or_else(|| QuicOptions::default().dial_timeout, Duration::from_secs),
         ..QuicOptions::default()
     };
     let name = format!("bot {speaker}");
@@ -192,15 +204,14 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
         options.stun
     };
 
-    match &ticket {
-        Some(ticket) => bot.join(entry_points(ticket)).await,
-        None => {
-            // An invitation is about to be made: now is when the public address matters.
-            say_network(find_network(&mut bot, &names).await);
-            bot.create_meeting().await;
-            // The ticket holds the meeting secret; showing it is the point of this line.
-            println!("ticket {}", bot.ticket(&secret).to_text().expose());
-        }
+    if let Some(ticket) = &ticket {
+        bot.join(entry_points(ticket)).await;
+    } else {
+        // An invitation is about to be made: now is when the public address matters.
+        say_network(find_network(&mut bot, &names).await);
+        bot.create_meeting().await;
+        // The ticket holds the meeting secret; showing it is the point of this line.
+        println!("ticket {}", bot.ticket(&secret).to_text().expose());
     }
 
     // Tickets sent back by those who could not get in arrive as lines on standard input.

@@ -51,7 +51,7 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    fn label(self) -> &'static [u8] {
+    const fn label(self) -> &'static [u8] {
         match self {
             Self::Report => b"palaver-report-v1",
             Self::Plan => b"palaver-plan-v1",
@@ -134,12 +134,14 @@ impl<'a> Sealed<'a> {
     }
 }
 
-/// A stand-in for real signatures, for tests and the simulator. NOT cryptography: the "public
-/// key" is all it takes to sign. Compiled only for this crate's tests and under the
-/// `fake-crypto` feature, which the guards crate keeps out of anything that ships.
+/// A stand-in for real signatures, for tests and the simulator.
+///
+/// NOT cryptography: the "public key" is all it takes to sign. Compiled only for this crate's
+/// tests and under the `fake-crypto` feature, which the guards crate keeps out of anything
+/// that ships.
 #[cfg(any(test, feature = "fake-crypto"))]
 pub mod fake {
-    use super::*;
+    use super::{ParticipantId, PublicKey, SIGNATURE_BYTES, Signature, Signer, Verifier};
 
     fn mix(key: &PublicKey, message: &[u8]) -> [u8; SIGNATURE_BYTES] {
         // One pass over the input, then stretched to the length of a signature.
@@ -150,7 +152,12 @@ pub mod fake {
         let mut out = [0u8; SIGNATURE_BYTES];
         for (i, slot) in out.iter_mut().enumerate() {
             state = (state ^ i as u64).wrapping_mul(0x0000_0100_0000_01b3);
-            *slot = (state >> 24) as u8;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "takes one byte of the state; dropping the rest is the point"
+            )]
+            let byte = (state >> 24) as u8;
+            *slot = byte;
         }
         out
     }

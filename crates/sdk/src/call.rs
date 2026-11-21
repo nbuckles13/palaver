@@ -48,6 +48,11 @@ pub struct Call {
 }
 
 impl Call {
+    /// A call on `engine`, sending as `encoder` says and playing in `playout` channels.
+    ///
+    /// # Errors
+    ///
+    /// When the codec does not take the encoder's settings.
     pub fn new(
         engine: Engine,
         encoder: EncoderConfig,
@@ -65,7 +70,8 @@ impl Call {
         })
     }
 
-    pub fn engine(&self) -> &Engine {
+    #[must_use]
+    pub const fn engine(&self) -> &Engine {
         &self.engine
     }
 
@@ -82,6 +88,10 @@ impl Call {
 
     /// Send the 20 ms just captured, in the channels of the encoder's settings. `Ok(false)` if nothing was sent: the encoder found
     /// silence, or the engine is behind.
+    ///
+    /// # Errors
+    ///
+    /// When `pcm` is not one frame of those channels, or the encoder fails.
     pub fn speak(&mut self, pcm: &[f32]) -> Result<bool, CodecError> {
         let Some(packet) = self.sender.encode(pcm)? else {
             return Ok(false);
@@ -92,21 +102,24 @@ impl Call {
 
     /// Write the next 20 ms to play into `out`, which must hold a frame of the channels
     /// the call plays in ([`Channels::frame_len`]). Returns how many voices are in it.
+    ///
+    /// # Errors
+    ///
+    /// When `out` is not one frame of those channels, or a decoder cannot be made or fails.
     pub fn listen(&mut self, out: &mut [f32]) -> Result<usize, CodecError> {
         if out.len() != self.playout.frame_len() {
             return Err(CodecError::FrameLength);
         }
         let now = self.now();
         while let Some(audio) = self.engine.try_next_audio() {
-            let voice = match self.voices.get_mut(&audio.alias) {
-                Some(voice) => voice,
-                None => {
-                    let receiver = VoiceReceiver::new(self.jitter, self.playout)?;
-                    self.voices.entry(audio.alias).or_insert(Voice {
-                        receiver,
-                        silent_for: 0,
-                    })
-                }
+            let voice = if let Some(voice) = self.voices.get_mut(&audio.alias) {
+                voice
+            } else {
+                let receiver = VoiceReceiver::new(self.jitter, self.playout)?;
+                self.voices.entry(audio.alias).or_insert(Voice {
+                    receiver,
+                    silent_for: 0,
+                })
             };
             voice
                 .receiver

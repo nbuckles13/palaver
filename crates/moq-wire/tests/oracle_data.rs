@@ -2,7 +2,7 @@
 //! side decodes the other's output.
 
 // Helpers in an integration test file are test code, but clippy only exempts `#[test]` functions.
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use bytes::BytesMut;
 use moqtap_codec::draft22::data_stream::DatagramHeader;
@@ -28,7 +28,7 @@ fn properties() -> Vec<u8> {
     out
 }
 
-fn tap_status(status: ObjectStatus) -> TapStatus {
+const fn tap_status(status: ObjectStatus) -> TapStatus {
     match status {
         ObjectStatus::Normal => TapStatus::Normal,
         ObjectStatus::EndOfGroup => TapStatus::EndOfGroup,
@@ -318,10 +318,10 @@ fn subgroup_objects_match_the_oracle_with_and_without_properties() {
         }
         assert!(r.is_empty());
         // They read ours.
-        let mut tap_reader = TapStream::new(&tap_header);
+        let mut tap_decoder = TapStream::new(&tap_header);
         let mut buf = &ours[..];
         for o in &objects {
-            let got = tap_reader.read_object(&mut buf).unwrap();
+            let got = tap_decoder.read_object(&mut buf).unwrap();
             let want = tap_object(o);
             assert_eq!(got.object_id, want.object_id);
             assert_eq!(got.extension_headers, want.extension_headers);

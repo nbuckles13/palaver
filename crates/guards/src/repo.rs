@@ -4,12 +4,17 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The workspace root (two levels above this crate).
+#[must_use]
 pub fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 /// Every file with one of `extensions` under `crates/` and `apps/`, keyed by path relative to
 /// the workspace root with forward slashes. Build output is skipped.
+///
+/// # Errors
+///
+/// Fails if a directory or file cannot be read; the message names it.
 pub fn files(extensions: &[&str]) -> Result<BTreeMap<String, String>, String> {
     let root = root();
     let mut out = BTreeMap::new();
@@ -64,6 +69,10 @@ fn walk(
 /// - cargo's own messages as they happen, not collected at the end: that is where
 ///   "Blocking waiting for file lock on package cache" appears if another cargo holds it;
 /// - cargo's verbose output, which says when it updates an index or downloads anything.
+///
+/// # Errors
+///
+/// Fails if cargo cannot be started, exits with an error, or writes output that is not UTF-8.
 pub fn cargo_metadata() -> Result<String, String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| String::from("cargo"));
     let started = std::time::Instant::now();

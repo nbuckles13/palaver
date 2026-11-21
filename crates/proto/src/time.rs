@@ -22,25 +22,30 @@ impl Timestamp {
     /// The clock's origin.
     pub const ZERO: Self = Self(0);
 
+    #[must_use]
     pub const fn from_micros(micros: u64) -> Self {
         Self(micros)
     }
 
+    #[must_use]
     pub const fn from_millis(millis: u64) -> Self {
         Self(millis.saturating_mul(1000))
     }
 
+    #[must_use]
     pub const fn as_micros(self) -> u64 {
         self.0
     }
 
     /// How long after `earlier` this is; zero if it is not after it.
-    pub fn saturating_since(self, earlier: Timestamp) -> Duration {
+    #[must_use]
+    pub const fn saturating_since(self, earlier: Self) -> Duration {
         Duration::from_micros(self.0.saturating_sub(earlier.0))
     }
 
     /// This time moved later by `span`, stopping at the largest representable time.
-    pub fn saturating_add(self, span: Duration) -> Timestamp {
+    #[must_use]
+    pub fn saturating_add(self, span: Duration) -> Self {
         Self(
             self.0
                 .saturating_add(u64::try_from(span.as_micros()).unwrap_or(u64::MAX)),
@@ -49,9 +54,9 @@ impl Timestamp {
 }
 
 impl Add<Duration> for Timestamp {
-    type Output = Timestamp;
+    type Output = Self;
 
-    fn add(self, span: Duration) -> Timestamp {
+    fn add(self, span: Duration) -> Self {
         self.saturating_add(span)
     }
 }
@@ -59,7 +64,7 @@ impl Add<Duration> for Timestamp {
 impl Sub for Timestamp {
     type Output = Duration;
 
-    fn sub(self, earlier: Timestamp) -> Duration {
+    fn sub(self, earlier: Self) -> Duration {
         self.saturating_since(earlier)
     }
 }

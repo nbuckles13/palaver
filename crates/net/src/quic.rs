@@ -48,7 +48,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 
 /// The name of the khef-to-khef protocol, with its version. Distinct from the standard
-/// MoQ name, which is kept for a future standard client edge.
+/// `MoQ` name, which is kept for a future standard client edge.
 pub const ALPN: &[u8] = b"palaver/1";
 /// How long a dial may take, by default, before the peer counts as unreachable.
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,7 +81,7 @@ fn key_of(presented: &[u8]) -> Option<PublicKey> {
     Some(PublicKey(key.try_into().ok()?))
 }
 
-fn not_the_key() -> rustls::Error {
+const fn not_the_key() -> rustls::Error {
     rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)
 }
 
@@ -230,6 +230,10 @@ pub enum BindError {
     Socket(String),
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "passed to `map_err`, which hands the error over by value"
+)]
 fn tls(error: impl ToString) -> BindError {
     BindError::Tls(error.to_string())
 }
@@ -248,7 +252,7 @@ pub enum Reflexive {
 }
 
 impl Reflexive {
-    fn from_answers(seen: Vec<SocketAddr>) -> Self {
+    fn from_answers(seen: &[SocketAddr]) -> Self {
         match seen.split_first() {
             None => Self::Unknown,
             Some((first, rest)) if rest.iter().all(|other| other == first) => Self::Stable(*first),
@@ -272,6 +276,11 @@ pub struct QuicEndpoint {
 
 impl QuicEndpoint {
     /// Open an endpoint known by `identity`'s key. Must be called inside a tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// When the TLS library does not take the key or the settings, or the socket cannot
+    /// be opened.
     pub fn bind(identity: &Identity, options: QuicOptions) -> Result<Self, BindError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let key = identity.public_key();
@@ -377,7 +386,7 @@ impl QuicEndpoint {
                 seen.push(address);
             }
         }
-        Reflexive::from_answers(seen)
+        Reflexive::from_answers(&seen)
     }
 
     /// The settings for dialling `peer`: present our key, accept only theirs.
@@ -446,9 +455,11 @@ impl Endpoint for QuicEndpoint {
                     Ok(Ok(connection)) => return Some(connection),
                     // Something answered, and the handshake failed: not the key we
                     // asked for, or not our protocol.
-                    Ok(Err(ConnectionError::TransportError(_)))
-                    | Ok(Err(ConnectionError::ConnectionClosed(_)))
-                    | Ok(Err(ConnectionError::ApplicationClosed(_))) => refused = true,
+                    Ok(Err(
+                        ConnectionError::TransportError(_)
+                        | ConnectionError::ConnectionClosed(_)
+                        | ConnectionError::ApplicationClosed(_),
+                    )) => refused = true,
                     _ => {}
                 }
             }
@@ -735,7 +746,7 @@ mod tests {
         let mut long = spki.clone();
         long.push(0);
         assert_eq!(key_of(&long), None);
-        let mut other = spki.clone();
+        let mut other = spki;
         other[8] = 0x71;
         assert_eq!(key_of(&other), None);
         assert_eq!(key_of(&[]), None);

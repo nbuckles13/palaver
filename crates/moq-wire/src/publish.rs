@@ -1,4 +1,4 @@
-//! PUBLISH, PUBLISH_DONE, SUBSCRIBE_TRACKS, REQUEST_UPDATE and GOAWAY (sections 9.2, 9.5, 9.8,
+//! PUBLISH, `PUBLISH_DONE`, `SUBSCRIBE_TRACKS`, `REQUEST_UPDATE` and GOAWAY (sections 9.2, 9.5, 9.8,
 //! 9.9, 9.18).
 
 use crate::params::millis;
@@ -25,7 +25,7 @@ pub struct RequestUpdate {
 }
 
 /// A publisher starts a subscription for a track it has, without being asked for it by name.
-/// This is how tracks under a SUBSCRIBE_TRACKS prefix arrive.
+/// This is how tracks under a `SUBSCRIBE_TRACKS` prefix arrive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Publish {
     pub request_id: u64,
@@ -148,7 +148,9 @@ impl GoAway {
             return Err(Error::Violation("new session URI exceeds 8192 bytes"));
         }
         Ok(Self {
-            new_session_uri: body.take(len as usize)?.to_vec(),
+            new_session_uri: body
+                .take(usize::try_from(len).unwrap_or(usize::MAX))?
+                .to_vec(),
             timeout: Duration::from_millis(body.vi64()?),
         })
     }
@@ -218,7 +220,7 @@ mod tests {
             }),
             Message::GoAway(GoAway {
                 new_session_uri: vec![],
-                timeout: Duration::from_millis(3000),
+                timeout: Duration::from_secs(3),
             }),
             Message::GoAway(GoAway {
                 new_session_uri: b"moqt://khef.example/m".to_vec(),

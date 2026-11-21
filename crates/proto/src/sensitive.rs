@@ -14,12 +14,12 @@ use core::fmt;
 pub struct Secret<T>(T);
 
 impl<T> Secret<T> {
-    pub fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self {
         Self(value)
     }
 
     /// The inner value. Call sites are the audit surface for secret handling.
-    pub fn expose(&self) -> &T {
+    pub const fn expose(&self) -> &T {
         &self.0
     }
 }
@@ -35,12 +35,12 @@ impl<T> fmt::Debug for Secret<T> {
 pub struct Redacted<T>(T);
 
 impl<T> Redacted<T> {
-    pub fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self {
         Self(value)
     }
 
     /// The inner value, for showing to the user or putting on the wire.
-    pub fn reveal(&self) -> &T {
+    pub const fn reveal(&self) -> &T {
         &self.0
     }
 }

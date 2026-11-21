@@ -84,7 +84,8 @@ pub struct TopN<K> {
 }
 
 impl<K: Ord + Clone> TopN<K> {
-    pub fn new(config: TopNConfig) -> Self {
+    #[must_use]
+    pub const fn new(config: TopNConfig) -> Self {
         Self {
             config,
             selected: Vec::new(),
@@ -196,7 +197,8 @@ impl<K: Ord + Clone> TopN<K> {
     }
 
     /// How many times a newcomer has replaced a selected track.
-    pub fn switches(&self) -> u64 {
+    #[must_use]
+    pub const fn switches(&self) -> u64 {
         self.switches
     }
 }

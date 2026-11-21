@@ -6,7 +6,6 @@
 //! CI runs this binary on Linux only (`.github/workflows/ci.yml`): `cargo metadata` resolves
 //! dependencies for every platform wherever it runs, so the answer is the same on all of
 //! them. Locally it runs wherever the tests are run.
-#![allow(clippy::unwrap_used)]
 
 use palaver_guards::test_only::TEST_ONLY_FEATURES;
 use palaver_guards::{layering, repo, test_only};

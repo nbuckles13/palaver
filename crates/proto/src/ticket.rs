@@ -105,6 +105,10 @@ fn base32_decode(text: &str) -> Option<Vec<u8>> {
         count += 5;
         if count >= 8 {
             count -= 8;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "takes the next whole byte; the bits above it were pushed earlier"
+            )]
             out.push((bits >> count) as u8);
         }
     }
@@ -188,6 +192,14 @@ impl Ticket {
 
     /// Read a ticket from text a person pasted. Space around it and the case of its letters
     /// do not matter.
+    ///
+    /// # Errors
+    ///
+    /// [`TicketError::NotATicket`] if the text does not start with `palaver:`,
+    /// [`TicketError::Damaged`] if it does not decode or its checksum is wrong,
+    /// [`TicketError::UnsupportedVersion`] for a version other than ours, and
+    /// [`TicketError::Invalid`] if it is too long, lacks a secret or an entry point, or holds
+    /// a value that is not allowed.
     pub fn parse(text: &str) -> Result<Self, TicketError> {
         let text = text.trim();
         if text.len() > MAX_TEXT_CHARS {
@@ -444,6 +456,10 @@ mod tests {
     #[test]
     fn base32_round_trips_every_length_and_refuses_what_no_encoder_writes() {
         for len in 0..40usize {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "any bytes will do; wrapping gives a varied pattern"
+            )]
             let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
             assert_eq!(base32_decode(&base32_encode(&bytes)), Some(bytes));
         }

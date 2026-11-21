@@ -31,7 +31,8 @@ pub struct KvpIter<'a> {
 }
 
 impl<'a> KvpIter<'a> {
-    pub fn new(r: Reader<'a>) -> Self {
+    #[must_use]
+    pub const fn new(r: Reader<'a>) -> Self {
         Self { r, ty: 0 }
     }
 
@@ -48,7 +49,7 @@ impl<'a> KvpIter<'a> {
             if len > MAX_VALUE_BYTES {
                 return Err(Error::Violation("key-value length exceeds 65535"));
             }
-            Value::Bytes(r.take(len as usize)?)
+            Value::Bytes(r.take(usize::try_from(len).unwrap_or(usize::MAX))?)
         };
         Ok(Kvp { ty: self.ty, value })
     }
@@ -70,6 +71,11 @@ impl<'a> Iterator for KvpIter<'a> {
 }
 
 /// Decode pairs until `r` is empty; see [`KvpIter`] for what `r` must cover.
+///
+/// # Errors
+///
+/// Fails if a pair is cut short, a type passes 2^64 - 1, or a byte value is longer than 65535
+/// bytes. `r` is left empty either way.
 pub fn decode_kvps<'a>(r: &mut Reader<'a>) -> Result<Vec<Kvp<'a>>> {
     let pairs = KvpIter::new(r.clone()).collect();
     r.rest();
@@ -77,6 +83,12 @@ pub fn decode_kvps<'a>(r: &mut Reader<'a>) -> Result<Vec<Kvp<'a>>> {
 }
 
 /// Encode pairs, which must be sorted by type (equal types may repeat).
+///
+/// # Errors
+///
+/// Fails if the pairs are not sorted, a byte value is longer than 65535 bytes, or a value is
+/// the wrong kind for its type (even types carry an integer, odd types carry bytes). `out` may
+/// then hold the pairs before the bad one.
 pub fn encode_kvps(pairs: &[Kvp<'_>], out: &mut Vec<u8>) -> Result<()> {
     let mut prev = 0u64;
     for pair in pairs {

@@ -159,19 +159,14 @@ pub struct Microphone {
 
 impl Microphone {
     /// Open the system's default microphone and start it; its frames have `channels`.
+    ///
+    /// # Errors
+    ///
+    /// [`SoundError::NoDevice`] if the system has no default microphone,
+    /// [`SoundError::NoFormat`] if it gives no usable format,
+    /// [`SoundError::SampleType`] if its samples are of a type not handled, and
+    /// [`SoundError::Stream`] if no stream could be made and started.
     pub fn open(channels: Channels) -> Result<Self, SoundError> {
-        let device = cpal::default_host()
-            .default_input_device()
-            .ok_or(SoundError::NoDevice)?;
-        let config = device
-            .default_input_config()
-            .map_err(|error| SoundError::NoFormat(error.to_string()))?;
-        let described = describe(&device, &config);
-        let capture = Capture::new(described.format, channels)
-            .ok_or_else(|| SoundError::NoFormat(String::from("no channels or no rate")))?;
-        let capture = Arc::new(Mutex::new(capture));
-        let errors = Arc::new(AtomicU64::new(0));
-
         fn build<T>(
             device: &cpal::Device,
             config: cpal::StreamConfig,
@@ -190,6 +185,18 @@ impl Microphone {
                 None,
             )
         }
+
+        let device = cpal::default_host()
+            .default_input_device()
+            .ok_or(SoundError::NoDevice)?;
+        let config = device
+            .default_input_config()
+            .map_err(|error| SoundError::NoFormat(error.to_string()))?;
+        let described = describe(&device, &config);
+        let capture = Capture::new(described.format, channels)
+            .ok_or_else(|| SoundError::NoFormat(String::from("no channels or no rate")))?;
+        let capture = Arc::new(Mutex::new(capture));
+        let errors = Arc::new(AtomicU64::new(0));
         let format = config.sample_format();
         if !matches!(
             format,
@@ -214,7 +221,8 @@ impl Microphone {
         })
     }
 
-    pub fn device(&self) -> &Device {
+    #[must_use]
+    pub const fn device(&self) -> &Device {
         &self.device
     }
 
@@ -227,6 +235,7 @@ impl Microphone {
     }
 
     /// How many errors the device has reported since it was opened.
+    #[must_use]
     pub fn errors(&self) -> u64 {
         self.errors.load(Ordering::Relaxed)
     }
@@ -243,19 +252,14 @@ pub struct Speaker {
 impl Speaker {
     /// Open the system's default speaker and start it; the frames it is given have
     /// `channels`.
+    ///
+    /// # Errors
+    ///
+    /// [`SoundError::NoDevice`] if the system has no default speaker,
+    /// [`SoundError::NoFormat`] if it gives no usable format,
+    /// [`SoundError::SampleType`] if its samples are of a type not handled, and
+    /// [`SoundError::Stream`] if no stream could be made and started.
     pub fn open(channels: Channels) -> Result<Self, SoundError> {
-        let device = cpal::default_host()
-            .default_output_device()
-            .ok_or(SoundError::NoDevice)?;
-        let config = device
-            .default_output_config()
-            .map_err(|error| SoundError::NoFormat(error.to_string()))?;
-        let described = describe(&device, &config);
-        let playback = Playback::new(described.format, channels, SPEAKER_LIMIT_MS)
-            .ok_or_else(|| SoundError::NoFormat(String::from("no channels or no rate")))?;
-        let playback = Arc::new(Mutex::new(playback));
-        let errors = Arc::new(AtomicU64::new(0));
-
         fn build<T>(
             device: &cpal::Device,
             config: cpal::StreamConfig,
@@ -269,12 +273,24 @@ impl Speaker {
             device.build_output_stream(
                 config,
                 move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                    give(data, &mut scratch, &playback)
+                    give(data, &mut scratch, &playback);
                 },
                 counter(errors),
                 None,
             )
         }
+
+        let device = cpal::default_host()
+            .default_output_device()
+            .ok_or(SoundError::NoDevice)?;
+        let config = device
+            .default_output_config()
+            .map_err(|error| SoundError::NoFormat(error.to_string()))?;
+        let described = describe(&device, &config);
+        let playback = Playback::new(described.format, channels, SPEAKER_LIMIT_MS)
+            .ok_or_else(|| SoundError::NoFormat(String::from("no channels or no rate")))?;
+        let playback = Arc::new(Mutex::new(playback));
+        let errors = Arc::new(AtomicU64::new(0));
         let format = config.sample_format();
         if !matches!(
             format,
@@ -299,7 +315,8 @@ impl Speaker {
         })
     }
 
-    pub fn device(&self) -> &Device {
+    #[must_use]
+    pub const fn device(&self) -> &Device {
         &self.device
     }
 
@@ -312,6 +329,7 @@ impl Speaker {
 
     /// Samples (per channel) the device asked for when there were none, and samples
     /// dropped because it was not asking fast enough.
+    #[must_use]
     pub fn starved_and_dropped(&self) -> (u64, u64) {
         self.playback
             .lock()
@@ -320,12 +338,17 @@ impl Speaker {
     }
 
     /// How many errors the device has reported since it was opened.
+    #[must_use]
     pub fn errors(&self) -> u64 {
         self.errors.load(Ordering::Relaxed)
     }
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::float_cmp,
+    reason = "samples handed over as floats must come through bit for bit"
+)]
 mod tests {
     use super::*;
     use palaver_media::FRAME_SAMPLES;

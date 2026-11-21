@@ -11,6 +11,16 @@
 pub const MAX_LEVEL: u8 = 127;
 
 /// The level of `pcm`, whose samples are in the range -1 to 1.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a frame's sample count is far below 2^52"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the level is rounded and clamped to 0..=127 before the cast"
+)]
 pub fn audio_level(pcm: &[f32]) -> u8 {
     if pcm.is_empty() {
         return 0;
@@ -27,6 +37,7 @@ pub fn audio_level(pcm: &[f32]) -> u8 {
 }
 
 #[cfg(test)]
+#[expect(clippy::cast_precision_loss, reason = "sample indexes below 960")]
 mod tests {
     use super::*;
 

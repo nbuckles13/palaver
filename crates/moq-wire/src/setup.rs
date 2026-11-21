@@ -29,7 +29,7 @@ pub struct PalaverExtensions {
 }
 
 impl PalaverExtensions {
-    fn encode(&self) -> Vec<u8> {
+    fn encode(self) -> Vec<u8> {
         let mut out = vec![];
         put_vi64(&mut out, self.version);
         out
@@ -51,7 +51,7 @@ pub struct Setup {
     pub implementation: Option<String>,
     /// How many filter ranges the sender accepts per request; 0 when absent.
     pub max_filter_ranges: u64,
-    /// How many unanswered REQUEST_UPDATEs the sender accepts per request stream; 0 (no limit)
+    /// How many unanswered `REQUEST_UPDATEs` the sender accepts per request stream; 0 (no limit)
     /// when absent.
     pub max_request_updates: u64,
     /// Present when the sender is a Palaver endpoint.
@@ -60,8 +60,13 @@ pub struct Setup {
 
 impl Setup {
     /// Append the whole message, framing included.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`] if the implementation name is longer than 65535 bytes
+    /// or the options do not fit in one message body.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
-        let palaver = self.palaver.map(|p| p.encode());
+        let palaver = self.palaver.map(PalaverExtensions::encode);
         let mut pairs = vec![];
         if self.max_filter_ranges != 0 {
             pairs.push(Kvp {
@@ -93,6 +98,12 @@ impl Setup {
     }
 
     /// Decode the body of a frame whose type is [`SETUP`].
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`] if the frame is not a SETUP, the options are malformed,
+    /// or an option we read is repeated; with [`Error::KeyValueFormatting`] if an option we
+    /// read has the wrong kind of value.
     pub fn decode(mut frame: Frame<'_>) -> Result<Self> {
         if frame.ty != SETUP {
             return Err(Error::Violation("not a SETUP message"));
@@ -120,7 +131,7 @@ impl Setup {
                     setup.implementation = Some(String::from_utf8_lossy(b).into_owned());
                 }
                 (PALAVER_EXTENSIONS, Value::Bytes(b)) => {
-                    setup.palaver = Some(PalaverExtensions::decode(b)?)
+                    setup.palaver = Some(PalaverExtensions::decode(b)?);
                 }
                 _ => {
                     return Err(Error::KeyValueFormatting(
@@ -134,9 +145,11 @@ impl Setup {
     }
 }
 
-/// The extension version both sides can use, if both declared our extensions: the lower of
-/// the two. `None` means the peer is a plain draft 22 endpoint and none of our request
-/// parameters may be sent to it.
+/// The extension version both sides can use, if both declared our extensions.
+///
+/// It is the lower of the two. `None` means the peer is a plain draft 22 endpoint and none of
+/// our request parameters may be sent to it.
+#[must_use]
 pub fn negotiated_palaver_version(ours: &Setup, theirs: &Setup) -> Option<u64> {
     Some(ours.palaver?.version.min(theirs.palaver?.version))
 }

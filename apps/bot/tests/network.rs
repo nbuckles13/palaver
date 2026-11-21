@@ -1,7 +1,7 @@
 //! Bots over QUIC on the loopback interface, in real time: a ticket as text is all a
 //! joiner is given, and a listener hears the talker.
 
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use palaver_bot::{Bot, FRAME, Script, entry_points};
 use palaver_net::quic::QuicOptions;
@@ -68,7 +68,7 @@ async fn stun_server(shift: u16) -> SocketAddr {
     address
 }
 
-fn asking(servers: Vec<SocketAddr>, mode: StunMode) -> StunConfig {
+const fn asking(servers: Vec<SocketAddr>, mode: StunMode) -> StunConfig {
     StunConfig {
         mode,
         servers,
