@@ -171,7 +171,6 @@ impl Bot {
         let address = Peer {
             key: identity.public_key(),
             addresses: addresses.iter().copied().map(Redacted::new).collect(),
-            relay_url: None,
         };
         let config = EngineConfig {
             meeting: meeting_tag(secret).ok_or(BotError::Derivation)?,
@@ -182,7 +181,6 @@ impl Bot {
                 rendition: b"opus".to_vec(),
             }],
             addresses,
-            relay_url: None,
             link_watch: LinkWatchConfig::default(),
         };
         let engine = Engine::start(Admitted::new(endpoint, key), identity, config);
@@ -208,7 +206,6 @@ impl Bot {
     pub fn ticket(&self, secret: &Secret<[u8; SECRET_BYTES]>) -> Ticket {
         Ticket {
             secret: Secret::new(*secret.expose()),
-            relay_url: None,
             entry_points: vec![EntryPoint {
                 key: self.address.key,
                 addresses: self.address.addresses.clone(),
@@ -314,7 +311,6 @@ pub fn entry_points(ticket: &Ticket) -> Vec<Peer> {
         .map(|entry| Peer {
             key: entry.key,
             addresses: entry.addresses.clone(),
-            relay_url: None,
         })
         .collect()
 }

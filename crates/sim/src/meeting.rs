@@ -22,8 +22,7 @@ use palaver_moq_wire::{PalaverExtensions, Setup};
 use palaver_node::{Config, Counters, Node, Output};
 use palaver_proto::sign::fake::{FakeIdentity, FakeVerifier};
 use palaver_proto::{
-    MediaTrack, MeetingTag, ParticipantId, PathKind, Plan, Redacted, Signer, Source, Timestamp,
-    Verifier,
+    MediaTrack, MeetingTag, ParticipantId, Plan, Redacted, Signer, Source, Timestamp, Verifier,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -217,7 +216,6 @@ impl Meeting {
             link_watch: self.link_watch,
             tracks: vec![Self::microphone()],
             addresses: Vec::new(),
-            relay_url: None,
         };
         self.by_id.insert(Self::id_of(node), node);
         self.nodes.insert(
@@ -457,9 +455,7 @@ impl Meeting {
                         self.stats.links_made = self.stats.links_made.saturating_add(1);
                     }
                     let role = if dialled { Role::Client } else { Role::Server };
-                    member
-                        .node
-                        .link_up(Self::id_of(peer), role, PathKind::Direct, rtt, None, now);
+                    member.node.link_up(Self::id_of(peer), role, rtt, None, now);
                 }
             }
             Event::LinkDown { peer, connection } => {

@@ -35,7 +35,6 @@ fn config(name: &str, secret: u8) -> EngineConfig {
             rendition: b"opus".to_vec(),
         }],
         addresses: Vec::new(),
-        relay_url: None,
         link_watch: LinkWatchConfig::default(),
     }
 }

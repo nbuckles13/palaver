@@ -40,7 +40,6 @@ fn member(name: &str, advertise: bool) -> Member {
     let address = Peer {
         key: identity.public_key(),
         addresses: vec![Redacted::new(at)],
-        relay_url: None,
     };
     let config = EngineConfig {
         meeting: meeting_tag(&secret).unwrap(),
@@ -51,7 +50,6 @@ fn member(name: &str, advertise: bool) -> Member {
             rendition: b"opus".to_vec(),
         }],
         addresses: if advertise { vec![at] } else { Vec::new() },
-        relay_url: None,
         link_watch: LinkWatchConfig::default(),
     };
     let admitted = Admitted::new(

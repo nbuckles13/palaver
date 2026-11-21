@@ -1,6 +1,6 @@
 //! The invite ticket: what a person pastes to join a meeting (design section 4).
 //!
-//! It holds the meeting secret, the iroh-relay to use, and one or more entry points: members
+//! It holds the meeting secret and one or more entry points: members
 //! to connect to first, each a public key with the addresses it was last seen at. It is a
 //! snapshot made when someone copies an invite; it keeps working while any entry point can
 //! be reached.
@@ -13,7 +13,7 @@
 //! a [`Secret`] so that it is not logged by accident.
 
 use crate::fields::{Writer, fields};
-use crate::report::{MAX_ADDRESSES, MAX_RELAY_URL_BYTES, decode_address, encode_address};
+use crate::report::{MAX_ADDRESSES, decode_address, encode_address};
 use crate::sign::PublicKey;
 use crate::{Redacted, Secret};
 use palaver_moq_wire::Value;
@@ -30,9 +30,9 @@ const PREFIX: &str = "palaver:";
 const VERSION: u8 = 1;
 const CHECKSUM_BYTES: usize = 4;
 
-// Field numbers. Even numbers carry integers, odd ones bytes. Never reuse a number.
+// Field numbers. Even numbers carry integers, odd ones bytes. Never reuse a number: 3 was
+// a relay's URL, when a relay server was part of the design.
 const SECRET: u64 = 1;
-const RELAY_URL: u64 = 3;
 const ENTRY_POINT: u64 = 5;
 
 const ENTRY_KEY: u64 = 1;
@@ -42,16 +42,13 @@ const ENTRY_ADDRESS: u64 = 3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPoint {
     pub key: PublicKey,
-    /// Where it was last seen; hints only. May be empty if it can be reached through the
-    /// iroh-relay by its key.
+    /// Where it was last seen; hints only.
     pub addresses: Vec<Redacted<SocketAddr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ticket {
     pub secret: Secret<[u8; SECRET_BYTES]>,
-    /// The iroh-relay through which entry points can be reached by key, if one is used.
-    pub relay_url: Option<String>,
     pub entry_points: Vec<EntryPoint>,
 }
 
@@ -179,9 +176,6 @@ impl Ticket {
             .collect();
         let mut w = Writer::default();
         w.bytes(SECRET, self.secret.expose());
-        if let Some(url) = &self.relay_url {
-            w.bytes(RELAY_URL, url.as_bytes());
-        }
         for entry in &entries {
             w.bytes(ENTRY_POINT, entry);
         }
@@ -218,7 +212,7 @@ impl Ticket {
             return Err(TicketError::UnsupportedVersion(*version));
         }
 
-        let (mut secret, mut relay_url, mut entry_points) = (None, None, Vec::new());
+        let (mut secret, mut entry_points) = (None, Vec::new());
         for pair in fields(payload) {
             let pair = pair.map_err(|_| TicketError::Damaged)?;
             match (pair.ty, pair.value) {
@@ -227,14 +221,6 @@ impl Ticket {
                         .try_into()
                         .map_err(|_| TicketError::Invalid("secret length"))?;
                     secret = Some(Secret::new(bytes));
-                }
-                (RELAY_URL, Value::Bytes(b)) => {
-                    if b.len() > MAX_RELAY_URL_BYTES {
-                        return Err(TicketError::Invalid("iroh-relay URL too long"));
-                    }
-                    let url = core::str::from_utf8(b)
-                        .map_err(|_| TicketError::Invalid("iroh-relay URL is not UTF-8"))?;
-                    relay_url = Some(url.to_owned());
                 }
                 (ENTRY_POINT, Value::Bytes(b)) => {
                     let entry = EntryPoint::decode(b)?;
@@ -250,7 +236,6 @@ impl Ticket {
         }
         Ok(Self {
             secret: secret.ok_or(TicketError::Invalid("no secret"))?,
-            relay_url,
             entry_points,
         })
     }
@@ -274,7 +259,6 @@ mod tests {
     fn sample() -> Ticket {
         Ticket {
             secret: Secret::new([7; SECRET_BYTES]),
-            relay_url: Some("https://relay.example.org".to_owned()),
             entry_points: vec![
                 entry(1, &["192.168.1.5:4433", "[2001:db8::5]:4433"]),
                 entry(2, &["10.0.0.9:50123"]),
@@ -299,14 +283,13 @@ mod tests {
         let text = sample().to_text();
         assert!(text.expose().starts_with("palaver:"));
         assert_eq!(Ticket::parse(text.expose()), Ok(sample()));
-        // Two entry points with three addresses and a relay: short enough to paste anywhere.
+        // Two entry points with three addresses: short enough to paste anywhere.
         assert!(text.expose().len() < 300, "{} chars", text.expose().len());
     }
 
     #[test]
-    fn a_ticket_without_a_relay_or_addresses_round_trips() {
+    fn a_ticket_without_addresses_round_trips() {
         let ticket = Ticket {
-            relay_url: None,
             entry_points: vec![entry(1, &[])],
             ..sample()
         };

@@ -15,10 +15,10 @@ pub const MAX_NAME_BYTES: usize = 128;
 pub const MAX_ADDRESSES: usize = 8;
 /// Most media tracks a node offers. A reader keeps the first this many and ignores the rest.
 pub const MAX_TRACKS: usize = 32;
-/// Longest iroh-relay URL, in bytes.
-pub const MAX_RELAY_URL_BYTES: usize = 256;
 
-// Field numbers. Even numbers carry integers, odd ones bytes. Never reuse a number.
+// Field numbers. Even numbers carry integers, odd ones bytes. Never reuse a number:
+// 11 was a relay's URL, and 2 inside a link was the kind of path, when a relay server was
+// part of the design.
 const KEY: u64 = 1;
 const SEQUENCE: u64 = 2;
 const NAME: u64 = 3;
@@ -26,28 +26,16 @@ const APPLIED_PLAN: u64 = 4;
 const LINK: u64 = 5;
 const UNREACHABLE: u64 = 7;
 const ADDRESS: u64 = 9;
-const RELAY_URL: u64 = 11;
 const TRACK: u64 = 13;
 
 const LINK_PEER: u64 = 1;
-const LINK_PATH: u64 = 2;
 const LINK_OBSERVED: u64 = 3;
 const LINK_RTT_MS: u64 = 4;
-
-/// How packets travel on a link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathKind {
-    /// Peer to peer over UDP.
-    Direct,
-    /// Through an iroh-relay; poor for media.
-    IrohRelay,
-}
 
 /// One connection the node holds to another node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
     pub peer: ParticipantId,
-    pub path: PathKind,
     /// Round-trip time. Sent in whole milliseconds.
     pub rtt: Duration,
     /// The address this node sees the peer's packets come from. Behind a NAT that is an
@@ -74,7 +62,6 @@ pub struct Report {
     /// of them. Redacted in debug output.
     pub addresses: Vec<Redacted<SocketAddr>>,
     /// The iroh-relay through which the node can be reached by key, if it uses one.
-    pub relay_url: Option<String>,
     /// Every media track the node can send, including those it is not sending now (the
     /// simulcast renditions, a screen share not yet started), at most [`MAX_TRACKS`]. The
     /// conductor gives each an alias in the plan; a track not listed here cannot be sent.
@@ -128,7 +115,6 @@ impl Link {
         let observed = self.observed.as_ref().map(|a| encode_address(a.reveal()));
         let mut w = Writer::default();
         w.bytes(LINK_PEER, self.peer.as_bytes());
-        w.int(LINK_PATH, u64::from(self.path == PathKind::IrohRelay));
         w.int(
             LINK_RTT_MS,
             u64::try_from(self.rtt.as_millis()).unwrap_or(u64::MAX),
@@ -140,15 +126,12 @@ impl Link {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let (mut peer, mut path, mut rtt) = (None, PathKind::Direct, Duration::ZERO);
+        let (mut peer, mut rtt) = (None, Duration::ZERO);
         let mut observed = None;
         for pair in fields(bytes) {
             let pair = pair?;
             match (pair.ty, pair.value) {
                 (LINK_PEER, Value::Bytes(b)) => peer = ParticipantId::new(b),
-                (LINK_PATH, Value::Int(0)) => path = PathKind::Direct,
-                (LINK_PATH, Value::Int(1)) => path = PathKind::IrohRelay,
-                (LINK_PATH, _) => return Err(DecodeError::Invalid("link path kind")),
                 (LINK_RTT_MS, Value::Int(v)) => rtt = Duration::from_millis(v),
                 (LINK_OBSERVED, Value::Bytes(b)) => {
                     let address = decode_address(b).ok_or(DecodeError::Invalid("address"))?;
@@ -159,7 +142,6 @@ impl Link {
         }
         Ok(Self {
             peer: peer.ok_or(DecodeError::Missing("link peer"))?,
-            path,
             rtt,
             observed,
         })
@@ -198,9 +180,6 @@ impl Report {
         for address in &addresses {
             w.bytes(ADDRESS, address);
         }
-        if let Some(url) = &self.relay_url {
-            w.bytes(RELAY_URL, url.as_bytes());
-        }
         for track in &tracks {
             w.bytes(TRACK, track);
         }
@@ -210,8 +189,7 @@ impl Report {
     /// Decode a payload. Fields with unknown numbers are skipped.
     pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
         let (mut key, mut sequence, mut name, mut applied_plan) = (None, None, None, None);
-        let (mut links, mut unreachable, mut addresses, mut relay_url) =
-            (vec![], vec![], vec![], None);
+        let (mut links, mut unreachable, mut addresses) = (vec![], vec![], vec![]);
         let mut tracks = vec![];
         for pair in fields(payload) {
             let pair = pair?;
@@ -241,14 +219,6 @@ impl Report {
                         addresses.push(Redacted::new(address));
                     }
                 }
-                (RELAY_URL, Value::Bytes(b)) => {
-                    if b.len() > MAX_RELAY_URL_BYTES {
-                        return Err(DecodeError::Invalid("relay URL too long"));
-                    }
-                    let url = core::str::from_utf8(b)
-                        .map_err(|_| DecodeError::Invalid("relay URL is not UTF-8"))?;
-                    relay_url = Some(url.to_owned());
-                }
                 (TRACK, Value::Bytes(b)) => {
                     let (track, _) = MediaTrack::decode(b)?;
                     if tracks.len() < MAX_TRACKS && !tracks.contains(&track) {
@@ -266,7 +236,6 @@ impl Report {
             links,
             unreachable,
             addresses,
-            relay_url,
             tracks,
         })
     }
@@ -328,20 +297,17 @@ mod tests {
             links: vec![
                 Link {
                     peer: id_of(2),
-                    path: PathKind::Direct,
                     rtt: Duration::from_millis(12),
                     observed: Some(addr("203.0.113.9:50123")),
                 },
                 Link {
                     peer: id_of(3),
-                    path: PathKind::IrohRelay,
                     rtt: Duration::from_millis(180),
                     observed: None,
                 },
             ],
             unreachable: vec![id_of(4)],
             addresses: vec![addr("192.168.1.5:4433"), addr("[2001:db8::7]:4433")],
-            relay_url: Some(String::from("https://relay.example./")),
             tracks: vec![
                 MediaTrack {
                     audio: true,
@@ -369,7 +335,6 @@ mod tests {
             links: vec![],
             unreachable: vec![],
             addresses: vec![],
-            relay_url: None,
             tracks: vec![],
             ..sample()
         };
@@ -399,7 +364,6 @@ mod tests {
             decoded.links,
             [Link {
                 peer: id_of(2),
-                path: PathKind::Direct,
                 rtt: Duration::from_millis(12),
                 observed: None,
             }]
@@ -559,31 +523,6 @@ mod tests {
             w.bytes(ADDRESS, a);
         }
         assert_eq!(Report::decode(&w.finish()).unwrap().addresses, many[..8]);
-    }
-
-    #[test]
-    fn a_relay_url_must_be_utf8_and_short() {
-        let key = FakeIdentity(1).public_key();
-        let build = |url: &[u8]| {
-            let mut w = Writer::default();
-            w.bytes(KEY, &key.0);
-            w.int(SEQUENCE, 1);
-            w.bytes(NAME, b"A");
-            w.bytes(RELAY_URL, url);
-            Report::decode(&w.finish())
-        };
-        assert_eq!(
-            build(&[0xff]),
-            Err(DecodeError::Invalid("relay URL is not UTF-8"))
-        );
-        assert_eq!(
-            build(&[b'a'; 257]),
-            Err(DecodeError::Invalid("relay URL too long"))
-        );
-        assert_eq!(
-            build(b"https://r.example./").unwrap().relay_url.as_deref(),
-            Some("https://r.example./")
-        );
     }
 
     #[test]

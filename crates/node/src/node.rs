@@ -7,8 +7,8 @@ use palaver_khef_core::{
 };
 use palaver_moq_wire::Setup;
 use palaver_proto::{
-    Link, MediaTrack, MeetingTag, ParticipantId, PathKind, Plan, Redacted, Report, Signer, Source,
-    Timestamp, Track, TrackName, Verifier,
+    Link, MediaTrack, MeetingTag, ParticipantId, Plan, Redacted, Report, Signer, Source, Timestamp,
+    Track, TrackName, Verifier,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
@@ -33,7 +33,6 @@ pub struct Config {
     pub tracks: Vec<MediaTrack>,
     /// Where the node can be reached.
     pub addresses: Vec<Redacted<SocketAddr>>,
-    pub relay_url: Option<String>,
 }
 
 /// Something for the caller to do.
@@ -52,7 +51,6 @@ pub enum Output {
 
 #[derive(Debug, Clone, Copy)]
 struct LinkInfo {
-    path: PathKind,
     rtt: Duration,
     observed: Option<SocketAddr>,
 }
@@ -86,7 +84,6 @@ pub struct Node<S, V> {
     meeting: MeetingTag,
     tracks: Vec<MediaTrack>,
     addresses: Vec<Redacted<SocketAddr>>,
-    relay_url: Option<String>,
     links: BTreeMap<ParticipantId, LinkInfo>,
     dialing: BTreeSet<ParticipantId>,
     unreachable: BTreeSet<ParticipantId>,
@@ -129,7 +126,6 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
             meeting: config.meeting,
             tracks: config.tracks,
             addresses: config.addresses,
-            relay_url: config.relay_url,
             links: BTreeMap::new(),
             dialing: BTreeSet::new(),
             unreachable: BTreeSet::new(),
@@ -234,7 +230,6 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         &mut self,
         peer: ParticipantId,
         role: Role,
-        path: PathKind,
         rtt: Duration,
         observed: Option<SocketAddr>,
         now: Timestamp,
@@ -245,14 +240,7 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         }
         // It answered, whatever was thought before.
         self.unreachable.remove(&peer);
-        self.links.insert(
-            peer.clone(),
-            LinkInfo {
-                path,
-                rtt,
-                observed,
-            },
-        );
+        self.links.insert(peer.clone(), LinkInfo { rtt, observed });
         self.khef.link_up(peer, role, now);
         self.started = true;
         self.refresh_view();
@@ -261,15 +249,8 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
     }
 
     /// What is known about the path to `peer` changed.
-    pub fn link_changed(
-        &mut self,
-        peer: &ParticipantId,
-        path: PathKind,
-        rtt: Duration,
-        now: Timestamp,
-    ) {
+    pub fn link_changed(&mut self, peer: &ParticipantId, rtt: Duration, now: Timestamp) {
         if let Some(info) = self.links.get_mut(peer) {
-            info.path = path;
             info.rtt = rtt;
             self.refresh_view();
             self.service(now);
@@ -363,14 +344,12 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
                 .iter()
                 .map(|(peer, info)| Link {
                     peer: peer.clone(),
-                    path: info.path,
                     rtt: info.rtt,
                     observed: info.observed.map(Redacted::new),
                 })
                 .collect(),
             unreachable: self.unreachable.iter().cloned().collect(),
             addresses: self.addresses.clone(),
-            relay_url: self.relay_url.clone(),
             tracks: self.tracks.clone(),
         };
         self.control.set_view(view);

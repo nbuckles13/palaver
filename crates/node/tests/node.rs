@@ -7,7 +7,7 @@ use palaver_moq_wire::Setup;
 use palaver_node::{Config, Node, Output};
 use palaver_proto::sign::fake::{FakeIdentity, FakeVerifier};
 use palaver_proto::{
-    MediaTrack, MeetingTag, ParticipantId, PathKind, Redacted, Signer, Source, Timestamp, Verifier,
+    MediaTrack, MeetingTag, ParticipantId, Redacted, Signer, Source, Timestamp, Verifier,
 };
 use std::time::Duration;
 
@@ -32,7 +32,6 @@ fn node(seed: u8) -> Node<FakeIdentity, FakeVerifier> {
             rendition: b"opus".to_vec(),
         }],
         addresses: vec![],
-        relay_url: None,
     };
     Node::new(config, FakeIdentity(seed), FakeVerifier)
 }
@@ -102,7 +101,6 @@ fn once_connected_a_joiner_opens_a_session_and_stops_dialling() {
     n.link_up(
         id_of(1),
         Role::Client,
-        PathKind::Direct,
         Duration::from_millis(4),
         None,
         at(30),
@@ -116,22 +114,8 @@ fn once_connected_a_joiner_opens_a_session_and_stops_dialling() {
     assert!(!out.is_empty());
     assert_eq!(n.links().collect::<Vec<_>>(), [&id_of(1)]);
     // The same link again, or a link to itself, is ignored.
-    n.link_up(
-        id_of(1),
-        Role::Client,
-        PathKind::Direct,
-        Duration::ZERO,
-        None,
-        at(31),
-    );
-    n.link_up(
-        id_of(5),
-        Role::Client,
-        PathKind::Direct,
-        Duration::ZERO,
-        None,
-        at(31),
-    );
+    n.link_up(id_of(1), Role::Client, Duration::ZERO, None, at(31));
+    n.link_up(id_of(5), Role::Client, Duration::ZERO, None, at(31));
     assert_eq!(n.links().count(), 1);
 }
 
@@ -142,7 +126,6 @@ fn a_joiner_whose_only_link_goes_silent_hangs_up_and_tries_the_next_entry_point(
     n.link_up(
         id_of(1),
         Role::Client,
-        PathKind::Direct,
         Duration::from_millis(4),
         None,
         at(0),
