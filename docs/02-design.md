@@ -885,10 +885,26 @@ What there is so far, in three layers:
 
 - `sdk::Engine` runs one node (its khef and its control logic) over a transport.
 - `sdk::Call` puts a voice on it: 20 ms of samples in, 20 ms out.
-- `sdk::Participant` is the two on a network with a key of its own, which is what an
-  application or a bot starts with: over QUIC or in memory, it makes tickets, joins by
-  them, answers a ticket that came back, and finds out what network it is on. The bot is
-  a participant with a made-up voice and ears; the app is one with a sound card.
+- `sdk::Participant` is a node on a network with a key of its own, started together with
+  its call, which is what an application or a bot begins with: over QUIC or in memory, it
+  makes tickets, joins by them, answers a ticket that came back, and finds out what
+  network it is on. It works through an `sdk::Controller`, a handle on the running node
+  that can be cloned and kept apart from the call, so that the call can go to the thread
+  that serves the sound card. The bot is a participant with a made-up voice and ears;
+  the app is one with a sound card.
+
+**A participant with a sound card** (`apps/harness`):
+
+- `voice::Voice` joins a call to a microphone and a speaker. **The speaker keeps time**:
+  each turn makes frames only until two frames' worth wait for the device, and sends on
+  whatever the microphone has gathered. A timer beside the device would be a second
+  clock; with the speaker as the clock, a device that takes 3% too little is simply
+  given 3% fewer frames, and nothing is thrown away (tested on a made-up speaker; seen
+  on WSLg's, which is that slow).
+- `live::Live` runs one on a thread of its own, against the system's devices, and keeps
+  a meter for whoever shows it.
+- The program is a call from the command line: `palaver-harness create`, or
+  `join <ticket>`. The window is to come.
 
 ## 16. Operability without servers
 

@@ -34,13 +34,13 @@ async fn room(scripts: &[Script]) -> Vec<Bot> {
         bots.push(bot);
     }
     for bot in &bots {
-        let mut status = bot.participant().engine().status();
+        let mut status = bot.participant().control().status();
         let settled = status
             .wait_for(|s| s.roster.len() == scripts.len() && s.microphones.len() == scripts.len());
         assert!(
             timeout(Duration::from_secs(30), settled).await.is_ok(),
             "the room never formed: {:?}",
-            *bot.participant().engine().status().borrow()
+            *bot.participant().control().status().borrow()
         );
     }
     bots
@@ -139,7 +139,7 @@ async fn a_bot_that_leaves_is_dropped_and_the_rest_carry_on() {
     assert_eq!(
         bots[0]
             .participant()
-            .engine()
+            .control()
             .status()
             .borrow()
             .roster

@@ -857,7 +857,12 @@ dependencies = [
 name = "palaver-harness"
 version = "0.0.0"
 dependencies = [
+ "palaver-media",
+ "palaver-net",
+ "palaver-proto",
  "palaver-sdk",
+ "palaver-sound",
+ "tokio",
 ]
 
 [[package]]

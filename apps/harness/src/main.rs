@@ -1,3 +1,260 @@
-//! Developer harness UI (egui) for manual sessions.
+//! A call on real devices, from the command line.
+//!
+//! ```text
+//! palaver-harness create [options]          start a meeting; prints a ticket to hand on
+//! palaver-harness join <ticket> [options]   join one
+//!
+//! options:
+//!   --name <name>           the name the others see (default "someone")
+//!   --bind <address>        where to listen (default 0.0.0.0:0)
+//!   --advertise <address>   where to tell the meeting this node is; may be repeated
+//!   --no-stun               ask no STUN server for this node's public address
+//!   --raw                   send the microphone as it is: no echo, noise or level work
+//!   --seconds <n>           how long to stay (default: until stopped)
+//! ```
+//!
+//! The microphone and the speaker are the system's defaults. Each second it says who is
+//! in the meeting and how the sound is going:
+//!
+//! ```text
+//! second 3: roster 2, links 1, hears 1 voice; microphone -28 dB, 150 frames, 97 sent;
+//!     speaker 148 frames, starved 0, dropped 0
+//! ```
+//!
+//! A joiner nobody can answer prints a `reply` ticket to send back to whoever invited
+//! it; paste that into the inviter's terminal and it reaches for the joiner.
 
-const fn main() {}
+use palaver_harness::live::Live;
+use palaver_media::Channels;
+use palaver_media::process::Settings;
+use palaver_net::quic::QuicOptions;
+use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
+use palaver_proto::{Secret, Ticket};
+use palaver_sdk::{Options, Participant, entry_points};
+use std::net::SocketAddr;
+use std::process::ExitCode;
+use std::time::Duration;
+
+/// What the command line asks for.
+#[derive(Debug)]
+struct Asked {
+    ticket: Option<Ticket>,
+    name: String,
+    bind: Option<SocketAddr>,
+    advertise: Vec<SocketAddr>,
+    stun: bool,
+    cleaning: Option<Settings>,
+    seconds: Option<u64>,
+}
+
+fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
+    let ticket = match args.next().as_deref() {
+        Some("create") => None,
+        Some("join") => {
+            let text = args.next().ok_or("join needs a ticket")?;
+            Some(Ticket::parse(&text).map_err(|error| format!("bad ticket: {error:?}"))?)
+        }
+        _ => return Err(String::from("say `create`, or `join <ticket>`")),
+    };
+    let mut asked = Asked {
+        ticket,
+        name: String::from("someone"),
+        bind: None,
+        advertise: Vec::new(),
+        stun: true,
+        cleaning: Some(Settings::default()),
+        seconds: None,
+    };
+    while let Some(arg) = args.next() {
+        let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what}"));
+        let address = |text: String| {
+            text.parse::<SocketAddr>()
+                .map_err(|_| format!("not an address: {text}"))
+        };
+        match arg.as_str() {
+            "--name" => asked.name = value("a name")?,
+            "--bind" => asked.bind = Some(address(value("an address")?)?),
+            "--advertise" => asked.advertise.push(address(value("an address")?)?),
+            "--no-stun" => asked.stun = false,
+            "--raw" => asked.cleaning = None,
+            "--seconds" => {
+                let text = value("a number")?;
+                asked.seconds = Some(text.parse().map_err(|_| format!("not a number: {text}"))?);
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+    Ok(asked)
+}
+
+fn say_network(network: Network) {
+    println!(
+        "network {}",
+        match network {
+            Network::Open(_) => "open",
+            Network::BehindRouter(_) => "behind a router",
+            Network::PerDestination => "gives a port per destination",
+            Network::Unknown => "unknown",
+        }
+    );
+}
+
+/// A level as decibels below full scale.
+fn decibels(level: u8) -> i32 {
+    i32::from(level).saturating_sub(127)
+}
+
+async fn run(asked: Asked) -> Result<(), String> {
+    let secret = match &asked.ticket {
+        Some(ticket) => Secret::new(*ticket.secret.expose()),
+        None => palaver_net::identity::Identity::generate()
+            .map_err(|_| "the system gave no random bytes")?
+            .secret(),
+    };
+    let quic = QuicOptions {
+        bind: asked.bind.unwrap_or_else(|| QuicOptions::default().bind),
+        ..QuicOptions::default()
+    };
+    let playout = Channels::Stereo;
+    let options = Options {
+        playout,
+        ..Options::named(&asked.name)
+    };
+    let (mut participant, call) =
+        Participant::on_quic(quic, asked.advertise.clone(), &secret, options)
+            .map_err(|error| format!("could not start: {error:?}"))?;
+    let names = if asked.stun {
+        DEFAULT_STUN_SERVERS.map(String::from).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let live = match Live::start(call, asked.cleaning, playout) {
+        Ok(live) => live,
+        Err(failed) => {
+            if let Some(call) = failed.call {
+                call.stop().await;
+            }
+            return Err(format!("sound: {}", failed.error));
+        }
+    };
+    for (what, device) in [
+        ("microphone", live.microphone()),
+        ("speaker", live.speaker()),
+    ] {
+        println!(
+            "{what}: {:?}, {} Hz, {} channels",
+            device.name, device.format.rate, device.format.channels
+        );
+    }
+
+    if let Some(ticket) = &asked.ticket {
+        participant.join(entry_points(ticket)).await;
+    } else {
+        // An invitation is about to be made: now is when the public address matters.
+        say_network(participant.find_network_asking(&names).await);
+        participant.create_meeting().await;
+        // The ticket holds the meeting secret; showing it is the point of this line.
+        println!("ticket {}", participant.ticket(&secret).to_text().expose());
+    }
+
+    stay(&mut participant, &live, &asked, &names).await;
+    if let Some(call) = live.stop() {
+        call.stop().await;
+    }
+    Ok(())
+}
+
+/// Stay in the meeting: say each second how it goes, answer tickets that come back, and
+/// send one back if nobody answers this node.
+async fn stay(participant: &mut Participant, live: &Live, asked: &Asked, names: &[String]) {
+    // Tickets sent back by those who could not get in arrive as lines on standard input.
+    let (paste, mut pasted) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            if paste.send(line).is_err() {
+                return;
+            }
+        }
+    });
+
+    let mut beat = tokio::time::interval(Duration::from_secs(1));
+    beat.tick().await;
+    let mut second = 0u64;
+    let mut replied = false;
+    while asked.seconds.is_none_or(|seconds| second < seconds) && live.running() {
+        tokio::select! {
+            _ = beat.tick() => {}
+            Some(text) = pasted.recv() => {
+                match Ticket::parse(text.trim()) {
+                    Ok(back) => {
+                        println!("reaching for whoever sent a ticket back");
+                        participant.reach(&back).await;
+                    }
+                    Err(error) => eprintln!("not a ticket: {error:?}"),
+                }
+                continue;
+            }
+        }
+        second = second.saturating_add(1);
+        let (roster, connected, nobody_answers) = {
+            let status = participant.control().status();
+            let status = status.borrow();
+            (
+                status.roster.len(),
+                status.links.len(),
+                status.nobody_answers,
+            )
+        };
+        if let (true, false, Some(invitation)) = (nobody_answers, replied, &asked.ticket) {
+            // It cannot get in on its own. Its public address is wanted now, for the
+            // ticket that goes back to whoever invited it.
+            replied = true;
+            say_network(participant.find_network_asking(names).await);
+            println!(
+                "reply {}",
+                participant.reply_to(invitation).to_text().expose()
+            );
+        }
+        let sound = live.meter().read();
+        println!(
+            "second {second}: roster {roster}, links {connected}, hears {} voice{}; \
+             microphone {} dB, {} frames, {} sent; speaker {} frames, starved {}, dropped {}",
+            sound.voices,
+            if sound.voices == 1 { "" } else { "s" },
+            decibels(sound.loudest),
+            sound.captured,
+            sound.sent,
+            sound.played,
+            sound.starved,
+            sound.dropped
+        );
+    }
+}
+
+fn main() -> ExitCode {
+    let asked = match asked(std::env::args().skip(1)) {
+        Ok(asked) => asked,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("could not start: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(run(asked)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}

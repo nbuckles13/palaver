@@ -1,6 +1,6 @@
 [package]
 name = "palaver-harness"
-description = "Developer harness UI (egui) for manual sessions."
+description = "A participant with a sound card: the call on real devices, for manual sessions."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+palaver-media = { workspace = true }
+palaver-net = { workspace = true }
+palaver-proto = { workspace = true }
 palaver-sdk = { workspace = true }
+palaver-sound = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "macros", "net", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

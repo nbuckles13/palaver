@@ -40,19 +40,13 @@ use palaver_bot::{Bot, BotError, FRAME, Script, entry_points};
 use palaver_media::synthetic::{PITCHES, Rhythm};
 use palaver_net::memory::MemoryNetwork;
 use palaver_net::quic::{BindError, QuicOptions};
-use palaver_net::reach::{
-    DEFAULT_STUN_SERVERS, Network, STUN_PATIENCE, StunConfig, StunMode, is_public, resolve,
-};
+use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
 use palaver_net::stun::{TransactionId, binding_response, is_stun};
 use palaver_proto::{Secret, Ticket};
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
 
-#[expect(
-    clippy::future_not_send,
-    reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
-)]
 async fn room(count: u32, seconds: u64) -> Result<(), BotError> {
     let network = MemoryNetwork::new();
     let secret = fresh_secret()?;
@@ -98,7 +92,7 @@ async fn room(count: u32, seconds: u64) -> Result<(), BotError> {
         if frame % 50 == 49 {
             let second = frame / 50 + 1;
             let roster = bots.first().map_or(0, |bot| {
-                bot.participant().engine().status().borrow().roster.len()
+                bot.participant().control().status().borrow().roster.len()
             });
             println!("second {second}: {roster} in the meeting");
             for (n, bot) in bots.iter().enumerate() {
@@ -173,10 +167,6 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
 }
 
 /// One bot on the network: it creates a meeting, or joins the one `ticket` is for.
-#[expect(
-    clippy::future_not_send,
-    reason = "a bot holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
-)]
 async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotError> {
     let speaker = options.speaker.unwrap_or(1);
     let script = if options.silent {
@@ -212,7 +202,7 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
         bot.participant().join(entry_points(ticket)).await;
     } else {
         // An invitation is about to be made: now is when the public address matters.
-        say_network(find_network(&mut bot, &names).await);
+        say_network(bot.participant_mut().find_network_asking(&names).await);
         bot.participant().create_meeting().await;
         // The ticket holds the meeting secret; showing it is the point of this line.
         println!(
@@ -250,12 +240,12 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
             }
         }
         bot.tick().map_err(BotError::Codec)?;
-        let nobody_answers = bot.participant().engine().status().borrow().nobody_answers;
+        let nobody_answers = bot.participant().control().status().borrow().nobody_answers;
         if let (true, false, Some(invitation)) = (nobody_answers, replied, &ticket) {
             // It cannot get in on its own. Its public address is wanted now, for the
             // ticket that goes back to whoever invited it.
             replied = true;
-            say_network(find_network(&mut bot, &names).await);
+            say_network(bot.participant_mut().find_network_asking(&names).await);
             println!(
                 "reply {}",
                 bot.participant().reply_to(invitation).to_text().expose()
@@ -263,7 +253,7 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
         }
         if frame % 50 == 49 {
             let (roster, links) = {
-                let status = bot.participant().engine().status();
+                let status = bot.participant().control().status();
                 let status = status.borrow();
                 (status.roster.len(), status.links.len())
             };
@@ -277,30 +267,6 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
     }
     bot.stop().await;
     Ok(())
-}
-
-/// Find what network `bot` is on, asking the STUN servers named if it needs to.
-async fn find_network(bot: &mut Bot, names: &[String]) -> Network {
-    let local = bot
-        .participant()
-        .address()
-        .addresses
-        .first()
-        .map(|a| *a.reveal());
-    let servers = match local {
-        Some(local) if !is_public(local.ip()) => resolve(names, local).await,
-        _ => Vec::new(),
-    };
-    let config = StunConfig {
-        mode: if names.is_empty() {
-            StunMode::Never
-        } else {
-            StunMode::WhenNeeded
-        },
-        servers,
-        patience: STUN_PATIENCE,
-    };
-    bot.participant_mut().find_network(&config).await
 }
 
 fn say_network(network: Network) {
