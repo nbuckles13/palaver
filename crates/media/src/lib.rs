@@ -22,4 +22,4 @@ pub mod synthetic;
 pub mod voice;
 
 pub use jitter::JitterBuffer;
-pub use palaver_opus::{EncoderConfig, Error as CodecError, FRAME_SAMPLES, SAMPLE_RATE};
+pub use palaver_opus::{Channels, EncoderConfig, Error as CodecError, FRAME_SAMPLES, SAMPLE_RATE};

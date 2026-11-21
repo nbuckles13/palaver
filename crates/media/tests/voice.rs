@@ -8,7 +8,7 @@ use palaver_media::level::audio_level;
 use palaver_media::mix;
 use palaver_media::synthetic::{Voice, hears, pitch_of, strength};
 use palaver_media::voice::{Played, VoiceReceiver, VoiceSender};
-use palaver_media::{FRAME_SAMPLES, SAMPLE_RATE};
+use palaver_media::{Channels, FRAME_SAMPLES, SAMPLE_RATE};
 use palaver_opus::EncoderConfig;
 use palaver_proto::Timestamp;
 
@@ -46,7 +46,8 @@ fn carry(
 ) -> Heard {
     let mut voice = Voice::new(pitch_of(speaker), LOUDNESS);
     let mut sender = VoiceSender::new(EncoderConfig::default()).unwrap();
-    let mut receiver: VoiceReceiver<Vec<u8>> = VoiceReceiver::new(JitterConfig::default()).unwrap();
+    let mut receiver: VoiceReceiver<Vec<u8>> =
+        VoiceReceiver::new(JitterConfig::default(), Channels::Mono).unwrap();
     let mut heard = Heard {
         pcm: Vec::new(),
         played: Vec::new(),
@@ -190,6 +191,82 @@ fn a_frame_of_the_wrong_length_is_refused() {
     assert!(sender.encode(&[0.0; 100]).is_err());
     // A refused frame does not use up a number.
     assert_eq!(sender.next_seq(), 0);
-    let mut receiver: VoiceReceiver<Vec<u8>> = VoiceReceiver::new(JitterConfig::default()).unwrap();
+    let mut receiver: VoiceReceiver<Vec<u8>> =
+        VoiceReceiver::new(JitterConfig::default(), Channels::Mono).unwrap();
     assert!(receiver.pull(Timestamp::ZERO, &mut [0.0; 100]).is_err());
+}
+
+/// One side of interleaved samples: 0 for the left, 1 for the right.
+fn side(interleaved: &[f32], which: usize) -> Vec<f32> {
+    interleaved.iter().skip(which).step_by(2).copied().collect()
+}
+
+#[test]
+fn two_voices_sent_in_two_channels_are_heard_one_on_each_side() {
+    let (mut left, mut right) = (
+        Voice::new(pitch_of(1), LOUDNESS),
+        Voice::new(pitch_of(5), LOUDNESS),
+    );
+    let config = EncoderConfig {
+        channels: Channels::Stereo,
+        bitrate: 64_000,
+        ..EncoderConfig::default()
+    };
+    let mut sender = VoiceSender::new(config).unwrap();
+    let mut two: VoiceReceiver<Vec<u8>> =
+        VoiceReceiver::new(JitterConfig::default(), Channels::Stereo).unwrap();
+    let mut one: VoiceReceiver<Vec<u8>> =
+        VoiceReceiver::new(JitterConfig::default(), Channels::Mono).unwrap();
+    let (mut heard_two, mut heard_one) = (Vec::new(), Vec::new());
+    let mut frame_two = vec![0.0; Channels::Stereo.frame_len()];
+    let mut frame_one = vec![0.0; FRAME_SAMPLES];
+    for frame in 0..100u64 {
+        let now = Timestamp::from_millis(frame * FRAME_MS);
+        let (l, r) = (left.next_frame(true), right.next_frame(true));
+        let pcm: Vec<f32> = l.iter().zip(&r).flat_map(|(l, r)| [*l, *r]).collect();
+        if let Some(packet) = sender.encode(&pcm).unwrap() {
+            // Every tenth packet is lost: what fills the gap has two channels as well.
+            if frame % 10 != 9 {
+                two.insert(packet.seq, Some(packet.level), packet.payload.to_vec(), now);
+                one.insert(packet.seq, Some(packet.level), packet.payload.to_vec(), now);
+            }
+        }
+        two.pull(now, &mut frame_two).unwrap();
+        one.pull(now, &mut frame_one).unwrap();
+        heard_two.extend_from_slice(&frame_two);
+        heard_one.extend_from_slice(&frame_one);
+    }
+    // A listener in two channels hears each voice on its own side and not on the other.
+    let (on_left, on_right) = (side(&heard_two[48_000..], 0), side(&heard_two[48_000..], 1));
+    assert!(hears(&on_left, pitch_of(1)) && !hears(&on_left, pitch_of(5)));
+    assert!(hears(&on_right, pitch_of(5)) && !hears(&on_right, pitch_of(1)));
+    // A listener in one channel hears both.
+    assert!(hears(&heard_one[24_000..], pitch_of(1)));
+    assert!(hears(&heard_one[24_000..], pitch_of(5)));
+    // A frame of one channel's length is not a frame for the listener in two.
+    assert!(two.pull(Timestamp::ZERO, &mut frame_one).is_err());
+}
+
+#[test]
+fn a_voice_sent_in_one_channel_is_heard_on_both_sides_by_a_listener_in_two() {
+    let mut voice = Voice::new(pitch_of(2), LOUDNESS);
+    let mut sender = VoiceSender::new(EncoderConfig::default()).unwrap();
+    let mut receiver: VoiceReceiver<Vec<u8>> =
+        VoiceReceiver::new(JitterConfig::default(), Channels::Stereo).unwrap();
+    let mut heard = Vec::new();
+    let mut frame_out = vec![0.0; Channels::Stereo.frame_len()];
+    for frame in 0..50u64 {
+        let now = Timestamp::from_millis(frame * FRAME_MS);
+        if let Some(packet) = sender.encode(&voice.next_frame(true)).unwrap() {
+            receiver.insert(packet.seq, Some(packet.level), packet.payload.to_vec(), now);
+        }
+        receiver.pull(now, &mut frame_out).unwrap();
+        heard.extend_from_slice(&frame_out);
+    }
+    for which in [0, 1] {
+        assert!(
+            hears(&side(&heard[48_000..], which), pitch_of(2)),
+            "{which}"
+        );
+    }
 }

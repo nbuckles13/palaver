@@ -1,4 +1,5 @@
-//! A safe wrapper over libopus, for one use: mono speech at 48 kHz in 20 ms frames.
+//! A safe wrapper over libopus, for one use: speech at 48 kHz in 20 ms frames, in one
+//! channel or two.
 //!
 //! This is the one crate that talks to the Opus C library, and so the one crate that may use
 //! `unsafe` for it. Nothing unsafe leaves it: every pointer is owned by a type here and freed
@@ -27,8 +28,34 @@ use opusic_sys as sys;
 
 /// The only sample rate used.
 pub const SAMPLE_RATE: u32 = 48_000;
-/// Samples in one 20 ms frame.
+/// Samples in one 20 ms frame, for each channel.
 pub const FRAME_SAMPLES: usize = 960;
+
+/// How many channels a stream of samples has. With two, the samples are interleaved:
+/// left, right, left, right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Channels {
+    #[default]
+    Mono,
+    Stereo,
+}
+
+impl Channels {
+    pub fn count(self) -> usize {
+        match self {
+            Self::Mono => 1,
+            Self::Stereo => 2,
+        }
+    }
+
+    /// How many samples one 20 ms frame holds: [`FRAME_SAMPLES`] for each channel.
+    pub fn frame_len(self) -> usize {
+        match self {
+            Self::Mono => FRAME_SAMPLES,
+            Self::Stereo => FRAME_SAMPLES.saturating_mul(2),
+        }
+    }
+}
 /// The largest packet the encoder will produce.
 pub const MAX_PACKET_BYTES: usize = 1275;
 /// A packet this short or shorter means "nothing worth sending" (discontinuous
@@ -40,7 +67,7 @@ pub const MAX_DRED_FRAMES: u32 = 50;
 /// Why a call into libopus failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// A frame of audio must be exactly [`FRAME_SAMPLES`] long.
+    /// A frame of audio must be exactly [`Channels::frame_len`] long.
     FrameLength,
     /// The output buffer or the packet is too long for libopus to be told its length.
     TooLong,
@@ -70,6 +97,8 @@ pub fn version() -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderConfig {
+    /// What the encoder is given. A decoder may ask for either, whatever was sent.
+    pub channels: Channels,
     /// Target bitrate, in bits per second.
     pub bitrate: u32,
     /// Send nothing during silence.
@@ -85,7 +114,7 @@ pub struct EncoderConfig {
 }
 
 impl Default for EncoderConfig {
-    /// 32 kbit/s, DTX and FEC on, DRED off, planning for 15% loss.
+    /// One channel, 32 kbit/s, DTX and FEC on, DRED off, planning for 15% loss.
     ///
     /// DRED is off to begin with: it is to be turned on when a link shows the bursts of
     /// loss it is for, as part of adapting to the network. FEC and DRED are both paid for
@@ -105,6 +134,7 @@ impl Default for EncoderConfig {
     /// So turning DRED on at 32 kbit/s means turning FEC off, or raising the bitrate.
     fn default() -> Self {
         Self {
+            channels: Channels::Mono,
             bitrate: 32_000,
             dtx: true,
             fec: true,
@@ -114,10 +144,11 @@ impl Default for EncoderConfig {
     }
 }
 
-/// An Opus encoder for mono speech.
+/// An Opus encoder for speech.
 #[derive(Debug)]
 pub struct Encoder {
     raw: NonNull<sys::OpusEncoder>,
+    channels: Channels,
 }
 
 // SAFETY: the encoder state is owned by this value alone and libopus keeps no thread-local
@@ -128,12 +159,12 @@ unsafe impl Send for Encoder {}
 impl Encoder {
     pub fn new(config: EncoderConfig) -> Result<Self, Error> {
         let mut error: c_int = 0;
-        // SAFETY: valid arguments (48 kHz, one channel, a defined application) and a valid
+        // SAFETY: valid arguments (48 kHz, one or two channels, a defined application) and a valid
         // pointer for the error code. The result is checked for null below.
         let raw = unsafe {
             sys::opus_encoder_create(
                 SAMPLE_RATE as i32,
-                1,
+                config.channels.count() as c_int,
                 sys::OPUS_APPLICATION_VOIP as c_int,
                 &mut error,
             )
@@ -141,6 +172,7 @@ impl Encoder {
         check(error)?;
         let encoder = Self {
             raw: NonNull::new(raw).ok_or(Error::Opus(sys::OPUS_ALLOC_FAIL))?,
+            channels: config.channels,
         };
         let dred_frames = config.dred_frames.min(MAX_DRED_FRAMES);
         // DRED's duration is given in 10 ms units.
@@ -171,12 +203,12 @@ impl Encoder {
     /// Encode one frame. Returns how many bytes of `packet` were written. A result of
     /// [`DTX_PACKET_BYTES`] or fewer means the frame was silence and nothing need be sent.
     pub fn encode(&mut self, pcm: &[f32], packet: &mut [u8]) -> Result<usize, Error> {
-        if pcm.len() != FRAME_SAMPLES {
+        if pcm.len() != self.channels.frame_len() {
             return Err(Error::FrameLength);
         }
         let capacity = len(packet.len().min(MAX_PACKET_BYTES))?;
         // SAFETY: `raw` is a live encoder; `pcm` holds exactly the `FRAME_SAMPLES` samples
-        // libopus is told to read; `packet` has at least `capacity` bytes to write into.
+        // for each of its channels that libopus is told to read; `packet` has at least `capacity` bytes to write into.
         let written = unsafe {
             sys::opus_encode_float(
                 self.raw.as_ptr(),
@@ -197,9 +229,10 @@ impl Drop for Encoder {
     }
 }
 
-/// An Opus decoder for mono speech, with its DRED state.
+/// An Opus decoder for speech, with its DRED state.
 #[derive(Debug)]
 pub struct Decoder {
+    channels: Channels,
     raw: NonNull<sys::OpusDecoder>,
     dred_decoder: NonNull<sys::OpusDREDDecoder>,
     dred: NonNull<sys::OpusDRED>,
@@ -210,14 +243,19 @@ pub struct Decoder {
 unsafe impl Send for Decoder {}
 
 impl Decoder {
-    pub fn new() -> Result<Self, Error> {
+    /// A decoder that gives `channels`, whichever of the two a packet was encoded with:
+    /// one channel is given as both, two are averaged into one.
+    pub fn new(channels: Channels) -> Result<Self, Error> {
         let mut error: c_int = 0;
         // SAFETY: valid arguments and a valid pointer for the error code; checked for null.
-        let raw = unsafe { sys::opus_decoder_create(SAMPLE_RATE as i32, 1, &mut error) };
+        let raw = unsafe {
+            sys::opus_decoder_create(SAMPLE_RATE as i32, channels.count() as c_int, &mut error)
+        };
         check(error)?;
         let raw = NonNull::new(raw).ok_or(Error::Opus(sys::OPUS_ALLOC_FAIL))?;
         // From here on, a failure must free what was made: `partial` does that on drop.
         let mut partial = Partial {
+            channels,
             raw: Some(raw),
             dred_decoder: None,
             dred: None,
@@ -234,8 +272,13 @@ impl Decoder {
         partial.finish().ok_or(Error::Opus(sys::OPUS_ALLOC_FAIL))
     }
 
-    fn check_output(pcm: &[f32]) -> Result<(), Error> {
-        if pcm.len() == FRAME_SAMPLES {
+    /// How many channels it gives.
+    pub fn channels(&self) -> Channels {
+        self.channels
+    }
+
+    fn check_output(&self, pcm: &[f32]) -> Result<(), Error> {
+        if pcm.len() == self.channels.frame_len() {
             Ok(())
         } else {
             Err(Error::FrameLength)
@@ -248,14 +291,14 @@ impl Decoder {
         fec: bool,
         pcm: &mut [f32],
     ) -> Result<(), Error> {
-        Self::check_output(pcm)?;
+        self.check_output(pcm)?;
         let (data, length) = match packet {
             Some(packet) => (packet.as_ptr(), len(packet.len())?),
             None => (core::ptr::null(), 0),
         };
         // SAFETY: `raw` is a live decoder; `data` is either null with length 0 (which asks
         // for concealment) or points to `length` readable bytes; `pcm` has room for the
-        // `FRAME_SAMPLES` samples libopus is told it may write.
+        // `FRAME_SAMPLES` samples for each channel that libopus is told it may write.
         let samples = unsafe {
             sys::opus_decode_float(
                 self.raw.as_ptr(),
@@ -325,7 +368,7 @@ impl Decoder {
         frames_back: u32,
         pcm: &mut [f32],
     ) -> Result<bool, Error> {
-        Self::check_output(pcm)?;
+        self.check_output(pcm)?;
         if frames_back == 0 || frames_back > MAX_DRED_FRAMES {
             return Ok(false);
         }
@@ -352,7 +395,7 @@ impl Decoder {
             return Ok(false);
         }
         // SAFETY: the decoder and the DRED state just filled are live; `pcm` has room for
-        // the `FRAME_SAMPLES` samples libopus is told it may write.
+        // the `FRAME_SAMPLES` samples for each channel that libopus is told it may write.
         let samples = unsafe {
             sys::opus_decoder_dred_decode_float(
                 self.raw.as_ptr(),
@@ -380,6 +423,7 @@ impl Drop for Decoder {
 
 /// The parts of a decoder made so far, freed on drop unless it was finished.
 struct Partial {
+    channels: Channels,
     raw: Option<NonNull<sys::OpusDecoder>>,
     dred_decoder: Option<NonNull<sys::OpusDREDDecoder>>,
     dred: Option<NonNull<sys::OpusDRED>>,
@@ -388,6 +432,7 @@ struct Partial {
 impl Partial {
     fn finish(mut self) -> Option<Decoder> {
         Some(Decoder {
+            channels: self.channels,
             raw: self.raw.take()?,
             dred_decoder: self.dred_decoder.take()?,
             dred: self.dred.take()?,
@@ -439,7 +484,7 @@ mod tests {
     fn encode_all(config: EncoderConfig, pcm: &[f32]) -> Vec<Vec<u8>> {
         let mut encoder = Encoder::new(config).unwrap();
         let mut packet = [0u8; MAX_PACKET_BYTES];
-        pcm.chunks_exact(FRAME_SAMPLES)
+        pcm.chunks_exact(config.channels.frame_len())
             .map(|frame| {
                 let n = encoder.encode(frame, &mut packet).unwrap();
                 packet[..n].to_vec()
@@ -464,7 +509,7 @@ mod tests {
         // 32 kbit/s for two seconds is 8000 bytes; FEC and DRED are inside that.
         assert!((5000..=9000).contains(&bytes), "{bytes} bytes");
 
-        let mut decoder = Decoder::new().unwrap();
+        let mut decoder = Decoder::new(Channels::Mono).unwrap();
         let mut out = vec![0.0f32; pcm.len()];
         for (packet, frame) in packets.iter().zip(out.chunks_exact_mut(FRAME_SAMPLES)) {
             decoder.decode(packet, frame).unwrap();
@@ -502,7 +547,7 @@ mod tests {
         lost: usize,
         fill: impl Fn(&mut Decoder, &mut [f32]),
     ) -> Vec<f32> {
-        let mut decoder = Decoder::new().unwrap();
+        let mut decoder = Decoder::new(Channels::Mono).unwrap();
         let mut frame = vec![0.0f32; FRAME_SAMPLES];
         let mut filled = vec![];
         for (i, packet) in packets.iter().enumerate() {
@@ -563,7 +608,7 @@ mod tests {
     fn dred_reaches_some_way_back_and_says_when_it_does_not_reach_far_enough() {
         let pcm = voice(80);
         let packets = encode_all(dred_only(), &pcm);
-        let mut decoder = Decoder::new().unwrap();
+        let mut decoder = Decoder::new(Channels::Mono).unwrap();
         let mut frame = vec![0.0f32; FRAME_SAMPLES];
         for packet in &packets[..60] {
             decoder.decode(packet, &mut frame).unwrap();
@@ -597,7 +642,7 @@ mod tests {
         let pcm = voice(120);
         let reach = |config: EncoderConfig| {
             let packets = encode_all(config, &pcm);
-            let mut decoder = Decoder::new().unwrap();
+            let mut decoder = Decoder::new(Channels::Mono).unwrap();
             let reaches: Vec<u32> = packets[60..]
                 .iter()
                 .map(|p| decoder.dred_reach(p).unwrap())
@@ -632,7 +677,7 @@ mod tests {
     fn concealment_fades_to_silence() {
         let pcm = voice(40);
         let packets = encode_all(EncoderConfig::default(), &pcm);
-        let mut decoder = Decoder::new().unwrap();
+        let mut decoder = Decoder::new(Channels::Mono).unwrap();
         let mut frame = vec![0.0f32; FRAME_SAMPLES];
         for packet in &packets {
             decoder.decode(packet, &mut frame).unwrap();
@@ -661,7 +706,7 @@ mod tests {
             Err(Error::Opus(_))
         ));
 
-        let mut decoder = Decoder::new().unwrap();
+        let mut decoder = Decoder::new(Channels::Mono).unwrap();
         let mut pcm = vec![0.0f32; FRAME_SAMPLES];
         assert_eq!(
             decoder.decode(&[1, 2, 3], &mut pcm[..10]),
@@ -688,11 +733,156 @@ mod tests {
         }
     }
 
+    /// Two voices at once, interleaved: `voice` on the left, and on the right the same
+    /// an octave and a bit higher and half a second out of step.
+    fn two_voices(frames: usize) -> Vec<f32> {
+        let left = voice(frames);
+        (0..left.len())
+            .flat_map(|n| {
+                let t = n as f32 / SAMPLE_RATE as f32;
+                let envelope = 0.5 + 0.5 * (2.0 * core::f32::consts::PI * 3.0 * (t + 0.5)).sin();
+                let right = 0.25 * envelope * (2.0 * core::f32::consts::PI * 330.0 * t).sin();
+                [left[n], right]
+            })
+            .collect()
+    }
+
+    fn stereo(config: EncoderConfig) -> EncoderConfig {
+        EncoderConfig {
+            channels: Channels::Stereo,
+            bitrate: 64_000,
+            ..config
+        }
+    }
+
+    /// How alike two signals are: 1 for the same shape, 0 for unrelated.
+    fn likeness(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b).map(|(a, b)| a * b).sum();
+        let (a, b) = (energy(a) * a.len() as f32, energy(b) * b.len() as f32);
+        dot / (a * b).sqrt()
+    }
+
+    fn side(interleaved: &[f32], which: usize) -> Vec<f32> {
+        interleaved.iter().skip(which).step_by(2).copied().collect()
+    }
+
+    #[test]
+    fn two_channels_stay_two_channels() {
+        let pcm = two_voices(100);
+        let packets = encode_all(stereo(EncoderConfig::default()), &pcm);
+        let mut decoder = Decoder::new(Channels::Stereo).unwrap();
+        assert_eq!(decoder.channels(), Channels::Stereo);
+        let mut out = vec![0.0f32; pcm.len()];
+        let frame = Channels::Stereo.frame_len();
+        assert_eq!(frame, 2 * FRAME_SAMPLES);
+        for (packet, frame) in packets.iter().zip(out.chunks_exact_mut(frame)) {
+            decoder.decode(packet, frame).unwrap();
+        }
+        // Each side comes out with about the energy that went in on that side, and the
+        // two are no more alike than they were: nothing has run from one into the other.
+        let settled = 20 * frame;
+        for which in [0, 1] {
+            let (sent, got) = (side(&pcm[settled..], which), side(&out[settled..], which));
+            let ratio = energy(&got) / energy(&sent);
+            assert!((0.5..=1.5).contains(&ratio), "side {which}: {ratio}");
+        }
+        let alike = likeness(&side(&out[settled..], 0), &side(&out[settled..], 1));
+        assert!(alike.abs() < 0.2, "the sides are {alike} alike");
+    }
+
+    #[test]
+    fn a_decoder_gives_the_channels_it_was_asked_for_whatever_was_sent() {
+        // One channel sent, two asked for: the same on both sides.
+        let pcm = voice(50);
+        let packets = encode_all(EncoderConfig::default(), &pcm);
+        let mut decoder = Decoder::new(Channels::Stereo).unwrap();
+        let mut frame = vec![0.0f32; Channels::Stereo.frame_len()];
+        for packet in &packets {
+            decoder.decode(packet, &mut frame).unwrap();
+        }
+        assert!(energy(&frame) > 1e-4);
+        assert!(frame.chunks_exact(2).all(|pair| pair[0] == pair[1]));
+
+        // Two sent, one asked for: the two averaged.
+        let pcm = two_voices(50);
+        let packets = encode_all(stereo(EncoderConfig::default()), &pcm);
+        let mut decoder = Decoder::new(Channels::Mono).unwrap();
+        let mut out = vec![0.0f32; 50 * FRAME_SAMPLES];
+        for (packet, frame) in packets.iter().zip(out.chunks_exact_mut(FRAME_SAMPLES)) {
+            decoder.decode(packet, frame).unwrap();
+        }
+        let averaged: Vec<f32> = pcm
+            .chunks_exact(2)
+            .map(|pair| (pair[0] + pair[1]) / 2.0)
+            .collect();
+        let settled = 20 * FRAME_SAMPLES;
+        let ratio = energy(&out[settled..]) / energy(&averaged[settled..]);
+        assert!((0.5..=1.5).contains(&ratio), "{ratio}");
+    }
+
+    #[test]
+    fn a_lost_frame_of_two_channels_is_filled_all_three_ways() {
+        let pcm = two_voices(60);
+        let frame_len = Channels::Stereo.frame_len();
+        let lost = 40;
+        let original = energy(&pcm[lost * frame_len..(lost + 1) * frame_len]);
+        let run = |packets: &[Vec<u8>], fill: &dyn Fn(&mut Decoder, &mut [f32])| {
+            let mut decoder = Decoder::new(Channels::Stereo).unwrap();
+            let mut frame = vec![0.0f32; frame_len];
+            for packet in &packets[..lost] {
+                decoder.decode(packet, &mut frame).unwrap();
+            }
+            fill(&mut decoder, &mut frame);
+            energy(&frame)
+        };
+        let packets = encode_all(stereo(EncoderConfig::default()), &pcm);
+        let with_dred = encode_all(stereo(dred_only()), &pcm);
+        let fec = run(&packets, &|decoder, frame| {
+            decoder.decode_fec(&packets[lost + 1], frame).unwrap();
+        });
+        let dred = run(&with_dred, &|decoder, frame| {
+            assert!(decoder.dred_reach(&with_dred[lost + 3]).unwrap() >= 3);
+            assert!(decoder.decode_dred(&with_dred[lost + 3], 3, frame).unwrap());
+        });
+        let concealed = run(&packets, &|decoder, frame| {
+            decoder.conceal(frame).unwrap();
+        });
+        for (how, got) in [("fec", fec), ("dred", dred), ("concealed", concealed)] {
+            assert!(
+                got > original * 0.1 && got < original * 4.0,
+                "{how}: energy {got}, the original had {original}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_must_be_as_long_as_its_channels_make_it() {
+        let mut packet = [0u8; MAX_PACKET_BYTES];
+        let mut two = Encoder::new(stereo(EncoderConfig::default())).unwrap();
+        assert_eq!(
+            two.encode(&[0.0; FRAME_SAMPLES], &mut packet),
+            Err(Error::FrameLength)
+        );
+        assert!(two.encode(&[0.0; 2 * FRAME_SAMPLES], &mut packet).is_ok());
+        let mut one = Encoder::new(EncoderConfig::default()).unwrap();
+        assert_eq!(
+            one.encode(&[0.0; 2 * FRAME_SAMPLES], &mut packet),
+            Err(Error::FrameLength)
+        );
+        let mut decoder = Decoder::new(Channels::Stereo).unwrap();
+        assert_eq!(
+            decoder.conceal(&mut [0.0; FRAME_SAMPLES]),
+            Err(Error::FrameLength)
+        );
+        assert_eq!(Channels::default(), Channels::Mono);
+        assert_eq!((Channels::Mono.count(), Channels::Stereo.count()), (1, 2));
+    }
+
     #[test]
     fn encoders_and_decoders_can_be_made_and_dropped_freely() {
         for _ in 0..50 {
             let _encoder = Encoder::new(EncoderConfig::default()).unwrap();
-            let _decoder = Decoder::new().unwrap();
+            let _decoder = Decoder::new(Channels::Mono).unwrap();
         }
         fn is_send<T: Send>() {}
         is_send::<Encoder>();

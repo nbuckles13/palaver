@@ -11,7 +11,7 @@
 use palaver_khef_core::LinkWatchConfig;
 use palaver_media::jitter::Config as JitterConfig;
 use palaver_media::synthetic::{Rhythm, Voice, hears, pitch_of, strength};
-use palaver_media::{CodecError, EncoderConfig, FRAME_SAMPLES, SAMPLE_RATE};
+use palaver_media::{Channels, CodecError, EncoderConfig, FRAME_SAMPLES, SAMPLE_RATE};
 use palaver_net::admission::{AdmissionKey, Admitted};
 use palaver_net::identity::{Identity, meeting_tag};
 use palaver_net::memory::MemoryNetwork;
@@ -184,8 +184,13 @@ impl Bot {
             link_watch: LinkWatchConfig::default(),
         };
         let engine = Engine::start(Admitted::new(endpoint, key), identity, config);
-        let call = Call::new(engine, EncoderConfig::default(), JitterConfig::default())
-            .map_err(BotError::Codec)?;
+        let call = Call::new(
+            engine,
+            EncoderConfig::default(),
+            JitterConfig::default(),
+            Channels::Mono,
+        )
+        .map_err(BotError::Codec)?;
         Ok(Self {
             call,
             script,

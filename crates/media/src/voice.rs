@@ -5,13 +5,17 @@
 //! arrive, and every 20 ms gives the samples to play: decoded, rebuilt from the next
 //! packet when one was lost, or guessed by the decoder when there is nothing to go on.
 //!
+//! A voice is sent in one channel or two ([`EncoderConfig::channels`]) and a receiver
+//! gives whichever it is asked for, whatever was sent. Samples of two channels are
+//! interleaved.
+//!
 //! The frame counter advances through silence, whether or not a packet is sent, so a gap
 //! in the numbers is a gap in time (design section 8).
 
 use crate::jitter::{self, Inserted, JitterBuffer, Packet, Playout};
 use crate::level::audio_level;
 use palaver_opus::{
-    DTX_PACKET_BYTES, Decoder, Encoder, EncoderConfig, Error, FRAME_SAMPLES, MAX_PACKET_BYTES,
+    Channels, DTX_PACKET_BYTES, Decoder, Encoder, EncoderConfig, Error, MAX_PACKET_BYTES,
 };
 use palaver_proto::Timestamp;
 
@@ -46,7 +50,7 @@ impl VoiceSender {
         self.next_seq
     }
 
-    /// Encode the next 20 ms. `None` if the encoder found nothing worth sending (silence,
+    /// Encode the next 20 ms: a frame of the channels the sender was made for. `None` if the encoder found nothing worth sending (silence,
     /// with discontinuous transmission on); the counter advances all the same.
     pub fn encode(&mut self, pcm: &[f32]) -> Result<Option<Encoded<'_>>, Error> {
         let level = audio_level(pcm);
@@ -84,10 +88,12 @@ pub struct VoiceReceiver<P> {
 }
 
 impl<P: AsRef<[u8]> + Clone> VoiceReceiver<P> {
-    pub fn new(config: jitter::Config) -> Result<Self, Error> {
+    /// A receiver that gives `channels`: a voice sent in one is given on both sides, a
+    /// voice sent in two is averaged into one.
+    pub fn new(config: jitter::Config, channels: Channels) -> Result<Self, Error> {
         Ok(Self {
             jitter: JitterBuffer::new(config),
-            decoder: Decoder::new()?,
+            decoder: Decoder::new(channels)?,
         })
     }
 
@@ -103,10 +109,10 @@ impl<P: AsRef<[u8]> + Clone> VoiceReceiver<P> {
         )
     }
 
-    /// The next 20 ms to play, written to `pcm` (which must hold [`FRAME_SAMPLES`]). Call
-    /// once per frame interval.
+    /// The next 20 ms to play, written to `pcm` (which must hold a frame of the receiver's
+    /// channels: [`Channels::frame_len`]). Call once per frame interval.
     pub fn pull(&mut self, now: Timestamp, pcm: &mut [f32]) -> Result<Played, Error> {
-        if pcm.len() != FRAME_SAMPLES {
+        if pcm.len() != self.decoder.channels().frame_len() {
             return Err(Error::FrameLength);
         }
         match self.jitter.pull(now) {
