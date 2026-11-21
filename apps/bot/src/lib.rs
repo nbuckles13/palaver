@@ -13,7 +13,7 @@ use palaver_media::{CodecError, FRAME_SAMPLES, SAMPLE_RATE};
 use palaver_net::memory::MemoryNetwork;
 use palaver_net::quic::QuicOptions;
 use palaver_proto::{SECRET_BYTES, Secret};
-use palaver_sdk::{Options, Participant};
+use palaver_sdk::{Call, Options, Participant};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -61,6 +61,7 @@ impl Script {
 /// One headless participant.
 pub struct Bot {
     participant: Participant,
+    call: Call,
     script: Script,
     voice: Voice,
     /// Frames made so far.
@@ -88,7 +89,7 @@ impl Bot {
         script: Script,
     ) -> Result<Self, BotError> {
         Participant::on_memory(network, secret, Options::named(name))
-            .map(|participant| Self::with(participant, script))
+            .map(|(participant, call)| Self::with(participant, call, script))
     }
 
     /// A bot on the network, over QUIC, for a meeting with this secret; `advertise` as
@@ -105,12 +106,13 @@ impl Bot {
         script: Script,
     ) -> Result<Self, BotError> {
         Participant::on_quic(options, advertise, secret, Options::named(name))
-            .map(|participant| Self::with(participant, script))
+            .map(|(participant, call)| Self::with(participant, call, script))
     }
 
-    fn with(participant: Participant, script: Script) -> Self {
+    fn with(participant: Participant, call: Call, script: Script) -> Self {
         Self {
             participant,
+            call,
             script,
             voice: Voice::new(pitch_of(script.speaker), script.loudness),
             frames: 0,
@@ -144,9 +146,8 @@ impl Bot {
         self.frames = self.frames.saturating_add(1);
         let talking = self.script.rhythm.talking(elapsed);
         self.voice.frame(talking, &mut self.frame);
-        let call = self.participant.call();
-        call.speak(&self.frame)?;
-        call.listen(&mut self.frame)?;
+        self.call.speak(&self.frame)?;
+        self.call.listen(&mut self.frame)?;
         self.played.extend_from_slice(&self.frame);
         let extra = self.played.len().saturating_sub(Self::EARS);
         self.played.drain(..extra);
@@ -181,6 +182,6 @@ impl Bot {
     }
 
     pub async fn stop(self) {
-        self.participant.stop().await;
+        self.call.stop().await;
     }
 }

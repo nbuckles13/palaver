@@ -1,8 +1,12 @@
 //! One participant: a node on a network, with a voice.
 //!
-//! A [`Participant`] is what an application or a bot starts with: a key of its own, an
-//! endpoint, a running [`Engine`] for the meeting a secret names, and a [`Call`] to put
-//! sound on it. It makes invitations and takes them:
+//! Starting one gives two things. The [`Participant`] is the node as its owner sees it: a
+//! key of its own, an endpoint, a running engine for the meeting a secret names. The
+//! [`Call`] is its voice, samples in and samples out, and may go to another thread (the
+//! one that serves the sound card) while the participant stays with whoever decides
+//! what the node does.
+//!
+//! A participant makes invitations and takes them:
 //!
 //! - [`ticket`](Participant::ticket): an invitation with this participant as the way in;
 //! - [`join`](Participant::join) with [`entry_points`] of a ticket someone gave;
@@ -12,6 +16,7 @@
 //! It does nothing until told to [`create_meeting`](Participant::create_meeting) or to
 //! [`join`](Participant::join).
 
+use crate::engine::Controller;
 use crate::{Call, Engine, EngineConfig};
 use palaver_khef_core::LinkWatchConfig;
 use palaver_media::jitter::Config as JitterConfig;
@@ -20,7 +25,7 @@ use palaver_net::admission::{AdmissionKey, Admitted};
 use palaver_net::identity::{Identity, meeting_tag};
 use palaver_net::memory::MemoryNetwork;
 use palaver_net::quic::{BindError, QuicEndpoint, QuicOptions};
-use palaver_net::reach::{self, Network, StunConfig};
+use palaver_net::reach::{self, Network, STUN_PATIENCE, StunConfig, StunMode, is_public, resolve};
 use palaver_net::transport::{Endpoint, Peer};
 use palaver_proto::{
     EntryPoint, MAX_ENTRY_POINTS, MediaTrack, Redacted, SECRET_BYTES, Secret, Signer, Source,
@@ -68,9 +73,9 @@ pub enum StartError {
     Bind(BindError),
 }
 
-/// A node on a network, with a voice.
+/// A node on a network, as its owner sees it.
 pub struct Participant {
-    call: Call,
+    control: Controller,
     /// Where others can find it.
     address: Peer,
     /// The QUIC endpoint it runs on, if it is on the network.
@@ -78,8 +83,8 @@ pub struct Participant {
 }
 
 impl Participant {
-    /// A participant on an in-memory network, for a meeting with this secret. Must be
-    /// called inside a tokio runtime.
+    /// A participant on an in-memory network, for a meeting with this secret, and its
+    /// voice. Must be called inside a tokio runtime.
     ///
     /// # Errors
     ///
@@ -90,7 +95,7 @@ impl Participant {
         network: &MemoryNetwork,
         secret: &Secret<[u8; SECRET_BYTES]>,
         options: Options,
-    ) -> Result<Self, StartError> {
+    ) -> Result<(Self, Call), StartError> {
         let identity = Identity::generate().map_err(|_| StartError::NoRandomness)?;
         let endpoint = network
             .endpoint(identity.public_key())
@@ -98,7 +103,8 @@ impl Participant {
         Self::start(endpoint, identity, secret, options, Vec::new(), None)
     }
 
-    /// A participant on the network, over QUIC, for a meeting with this secret. It tells
+    /// A participant on the network, over QUIC, for a meeting with this secret, and its
+    /// voice. It tells
     /// the meeting it can be reached at `advertise`; if that is empty, at the address it
     /// is bound to, with the machine's outward address in place of "every interface".
     /// Must be called inside a tokio runtime.
@@ -113,7 +119,7 @@ impl Participant {
         advertise: Vec<SocketAddr>,
         secret: &Secret<[u8; SECRET_BYTES]>,
         options: Options,
-    ) -> Result<Self, StartError> {
+    ) -> Result<(Self, Call), StartError> {
         let identity = Identity::generate().map_err(|_| StartError::NoRandomness)?;
         let endpoint = Arc::new(QuicEndpoint::bind(&identity, quic).map_err(StartError::Bind)?);
         let advertise = if advertise.is_empty() {
@@ -136,7 +142,7 @@ impl Participant {
         options: Options,
         addresses: Vec<SocketAddr>,
         quic: Option<Arc<QuicEndpoint>>,
-    ) -> Result<Self, StartError> {
+    ) -> Result<(Self, Call), StartError> {
         let key = AdmissionKey::from_meeting_secret(secret).ok_or(StartError::Derivation)?;
         let address = Peer {
             key: identity.public_key(),
@@ -154,13 +160,17 @@ impl Participant {
             link_watch: LinkWatchConfig::default(),
         };
         let engine = Engine::start(Admitted::new(endpoint, key), identity, config);
+        let control = engine.controller();
         let call = Call::new(engine, options.encoder, options.jitter, options.playout)
             .map_err(StartError::Codec)?;
-        Ok(Self {
+        Ok((
+            Self {
+                control,
+                address,
+                quic,
+            },
             call,
-            address,
-            quic,
-        })
+        ))
     }
 
     /// Find out what kind of network this is on, asking STUN servers if `config` says
@@ -176,9 +186,31 @@ impl Participant {
         {
             self.address.addresses.push(public);
             let all = self.address.addresses.iter().map(|a| *a.reveal()).collect();
-            self.call.engine().set_addresses(all).await;
+            self.control.set_addresses(all).await;
         }
         network
+    }
+
+    /// [`find_network`](Self::find_network) with the usual settings: the STUN servers
+    /// `names` (host names with ports) are asked only if this node has no public address
+    /// of its own, and their names are looked up only then, because a lookup can take
+    /// seconds. With no names, nobody is asked.
+    pub async fn find_network_asking(&mut self, names: &[String]) -> Network {
+        let local = self.address.addresses.first().map(|a| *a.reveal());
+        let servers = match local {
+            Some(local) if !is_public(local.ip()) => resolve(names, local).await,
+            _ => Vec::new(),
+        };
+        let config = StunConfig {
+            mode: if names.is_empty() {
+                StunMode::Never
+            } else {
+                StunMode::WhenNeeded
+            },
+            servers,
+            patience: STUN_PATIENCE,
+        };
+        self.find_network(&config).await
     }
 
     /// Where others can find it.
@@ -213,43 +245,27 @@ impl Participant {
     }
 
     /// Dial everyone `ticket` names: for a ticket sent back by someone who cannot get in.
-    #[expect(
-        clippy::future_not_send,
-        reason = "it holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
-    )]
     pub async fn reach(&self, ticket: &Ticket) {
-        self.call.engine().reach(entry_points(ticket)).await;
+        self.control.reach(entry_points(ticket)).await;
     }
 
-    #[expect(
-        clippy::future_not_send,
-        reason = "it holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
-    )]
     pub async fn create_meeting(&self) {
-        self.call.engine().create_meeting().await;
+        self.control.create_meeting().await;
     }
 
-    #[expect(
-        clippy::future_not_send,
-        reason = "it holds Opus coders, which are not `Sync`; it runs on a current-thread runtime"
-    )]
     pub async fn join(&self, entry_points: Vec<Peer>) {
-        self.call.engine().join(entry_points).await;
+        self.control.join(entry_points).await;
     }
 
+    /// The handle on the running node: its status, and the same orders as above.
     #[must_use]
-    pub const fn engine(&self) -> &Engine {
-        self.call.engine()
+    pub const fn control(&self) -> &Controller {
+        &self.control
     }
 
-    /// Its voice: samples in, samples out.
-    pub const fn call(&mut self) -> &mut Call {
-        &mut self.call
-    }
-
-    /// Stop the node.
-    pub async fn stop(self) {
-        self.call.stop().await;
+    /// Stop the node: close its endpoint and every connection.
+    pub async fn stop(&self) {
+        self.control.stop().await;
     }
 }
 

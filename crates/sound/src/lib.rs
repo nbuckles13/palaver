@@ -19,7 +19,8 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use palaver_media::Channels;
 use palaver_media::pcm::{Capture, Format, Playback};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// The most sound that may wait for the speaker. More than this and what is heard has
 /// fallen behind what is said; the oldest is dropped.
@@ -245,6 +246,8 @@ impl Microphone {
 pub struct Speaker {
     _stream: cpal::Stream,
     playback: Arc<Mutex<Playback>>,
+    /// Told each time the device has taken sound.
+    taken: Arc<Condvar>,
     device: Device,
     errors: Arc<AtomicU64>,
 }
@@ -264,6 +267,7 @@ impl Speaker {
             device: &cpal::Device,
             config: cpal::StreamConfig,
             playback: Arc<Mutex<Playback>>,
+            taken: Arc<Condvar>,
             errors: &Arc<AtomicU64>,
         ) -> Result<cpal::Stream, cpal::Error>
         where
@@ -274,6 +278,7 @@ impl Speaker {
                 config,
                 move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                     give(data, &mut scratch, &playback);
+                    taken.notify_all();
                 },
                 counter(errors),
                 None,
@@ -290,6 +295,7 @@ impl Speaker {
         let playback = Playback::new(described.format, channels, SPEAKER_LIMIT_MS)
             .ok_or_else(|| SoundError::NoFormat(String::from("no channels or no rate")))?;
         let playback = Arc::new(Mutex::new(playback));
+        let taken = Arc::new(Condvar::new());
         let errors = Arc::new(AtomicU64::new(0));
         let format = config.sample_format();
         if !matches!(
@@ -299,17 +305,18 @@ impl Speaker {
             return Err(SoundError::SampleType(format.to_string()));
         }
         let stream = start(settings(&config), |settings| {
-            let shared = Arc::clone(&playback);
+            let (shared, taken) = (Arc::clone(&playback), Arc::clone(&taken));
             match format {
-                SampleFormat::I16 => build::<i16>(&device, settings, shared, &errors),
-                SampleFormat::U16 => build::<u16>(&device, settings, shared, &errors),
-                SampleFormat::I32 => build::<i32>(&device, settings, shared, &errors),
-                _ => build::<f32>(&device, settings, shared, &errors),
+                SampleFormat::I16 => build::<i16>(&device, settings, shared, taken, &errors),
+                SampleFormat::U16 => build::<u16>(&device, settings, shared, taken, &errors),
+                SampleFormat::I32 => build::<i32>(&device, settings, shared, taken, &errors),
+                _ => build::<f32>(&device, settings, shared, taken, &errors),
             }
         })?;
         Ok(Self {
             _stream: stream,
             playback,
+            taken,
             device: described,
             errors,
         })
@@ -325,6 +332,31 @@ impl Speaker {
         if let Ok(mut playback) = self.playback.lock() {
             playback.push(frame);
         }
+    }
+
+    /// How much sound waits for the device, in samples per channel at the device's rate.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        self.playback
+            .lock()
+            .map(|playback| playback.waiting())
+            .unwrap_or_default()
+    }
+
+    /// Wait until less than `below` (samples per channel at the device's rate) is left
+    /// waiting, or `patience` has run out. `true` if there is room now.
+    ///
+    /// This is how the speaker keeps time for whoever feeds it: the device takes sound
+    /// at its own pace, and the feeder makes the next frame when that leaves room. A
+    /// timer beside the device would be a second clock, and two clocks drift apart.
+    #[must_use]
+    pub fn wait_for_room(&self, below: usize, patience: Duration) -> bool {
+        let Ok(playback) = self.playback.lock() else {
+            return false;
+        };
+        self.taken
+            .wait_timeout_while(playback, patience, |playback| playback.waiting() >= below)
+            .is_ok_and(|(playback, _)| playback.waiting() < below)
     }
 
     /// Samples (per channel) the device asked for when there were none, and samples

@@ -112,6 +112,7 @@ enum Command {
     Join(Vec<Peer>),
     Addresses(Vec<SocketAddr>),
     Reach(Vec<Peer>),
+    Stop,
     Audio {
         group: u64,
         level: u8,
@@ -214,6 +215,18 @@ impl Engine {
         &self.me
     }
 
+    /// The handle for telling the node what to do and watching what it reports. It can
+    /// be cloned and kept anywhere, while the engine itself goes to whatever carries the
+    /// sound.
+    #[must_use]
+    pub fn controller(&self) -> Controller {
+        Controller {
+            me: self.me.clone(),
+            commands: self.commands.clone(),
+            status: self.status.clone(),
+        }
+    }
+
     /// Create a meeting: this node is its conductor.
     pub async fn create_meeting(&self) {
         let _ = self.commands.send(Command::Create).await;
@@ -267,9 +280,61 @@ impl Engine {
 
     /// Stop the node: close its endpoint and every connection.
     pub async fn stop(self) {
-        drop(self.commands);
+        let _ = self.commands.send(Command::Stop).await;
         drop(self.microphone);
         let _ = self.task.await;
+    }
+}
+
+/// Tells a running node what to do, and watches what it reports.
+///
+/// Any number may exist beside the [`Engine`]. The node runs until it is told to
+/// [`stop`](Controller::stop), or until the engine and every controller are gone.
+#[derive(Debug, Clone)]
+pub struct Controller {
+    me: ParticipantId,
+    commands: mpsc::Sender<Command>,
+    status: watch::Receiver<Status>,
+}
+
+impl Controller {
+    #[must_use]
+    pub const fn me(&self) -> &ParticipantId {
+        &self.me
+    }
+
+    /// Create a meeting: this node is its conductor.
+    pub async fn create_meeting(&self) {
+        let _ = self.commands.send(Command::Create).await;
+    }
+
+    /// Join a meeting through one of `entry_points`, tried in order.
+    pub async fn join(&self, entry_points: Vec<Peer>) {
+        let _ = self.commands.send(Command::Join(entry_points)).await;
+    }
+
+    /// Dial nodes that are trying to join and cannot get through on their own: those in a
+    /// ticket one of them sent back. Through routers, a connection needs both ends to
+    /// send; the joiner has been sending since it began, and this is the other half.
+    pub async fn reach(&self, peers: Vec<Peer>) {
+        let _ = self.commands.send(Command::Reach(peers)).await;
+    }
+
+    /// Where this node can be reached has changed: it has learned its public address,
+    /// say. The meeting is told in its next report.
+    pub async fn set_addresses(&self, addresses: Vec<SocketAddr>) {
+        let _ = self.commands.send(Command::Addresses(addresses)).await;
+    }
+
+    /// What the node reports: watch it for changes.
+    #[must_use]
+    pub fn status(&self) -> watch::Receiver<Status> {
+        self.status.clone()
+    }
+
+    /// Stop the node: close its endpoint and every connection.
+    pub async fn stop(&self) {
+        let _ = self.commands.send(Command::Stop).await;
     }
 }
 
@@ -397,9 +462,9 @@ impl<E: Endpoint> Run<E> {
             });
             tokio::select! {
                 command = commands.recv() => match command {
+                    // Told to stop, or every handle is gone.
+                    Some(Command::Stop) | None => break,
                     Some(command) => self.command(command),
-                    // The handle is gone: stop.
-                    None => break,
                 },
                 Some(frame) = microphone.recv() => self.command(frame),
                 Some(input) = inputs.recv() => self.input(input),
@@ -417,6 +482,8 @@ impl<E: Endpoint> Run<E> {
         let now = self.now();
         match command {
             Command::Create => self.node.create_meeting(now),
+            // Taken before it gets here: it ends the loop.
+            Command::Stop => {}
             Command::Addresses(addresses) => self
                 .node
                 .set_addresses(addresses.into_iter().map(Redacted::new).collect(), now),
