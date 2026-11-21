@@ -161,6 +161,17 @@ level control can be made to climb faster for a faint voice (its settings, or a 
 guess at the gain from the first seconds of speech), without bringing up the noise of a
 quiet room when nobody is talking.
 
+### Echo cancelling with headphones
+
+With headphones there is no echo, and the canceller should do nothing. Measured on a real
+headset (2026-11-21, one run, the microphone made 35 dB louder and clipping in places):
+nothing of the other voice came through, but the talker's own voice came out 3 to 20 dB
+quieter while the other voice was playing, for the first ten seconds or so, and within
+4 dB of untouched after fifteen. Talking alone was untouched throughout. To do: repeat
+with a microphone at a proper level and with speakers; then decide between tuning the
+canceller, turning it off when the output is headphones (where the system can say), and
+a switch for the user.
+
 ### A sender whose clock runs fast
 
 The jitter buffer takes a steady surplus of frames for network jitter: its target delay
