@@ -122,10 +122,15 @@ K_auth  = HKDF(root, "auth")                 → never published; input to a PAK
      router gives a different port per destination (symmetric NAT), where punching fails.
      The question and its answer use the QUIC socket, since the address a router gives is
      per socket; a layer under QUIC takes the answers out (`net::stun`). The server learns
-     the node's address and that it asked, and nothing of the meeting. By default a node
-     asks only when it needs to: not when it has a public address of its own, and not
-     when everyone it must reach is on its own network. The servers and whether to ask at
-     all are the user's to set. (The transport can ask; the rule for when is not built.)
+     the node's address and that it asked, and nothing of the meeting. A node asks when
+     it makes an invitation, since that is when its public address is wanted, and by
+     default only if it has no public address of its own (`net::reach`). Whether to ask,
+     and whom, are the user's to set. Not possible at that moment: sparing the question
+     when the person invited is on the same network, because that is not yet known. An
+     invitation marked as for someone nearby could skip it. What comes back is one of:
+     open, behind a router (the address goes into the ticket and the report), a port
+     per destination (no address to give, and the user can be told a punch will not
+     work), or unknown.
   4. *The ticket comes back*: when nobody in a meeting is reachable from outside, a joiner
      adds itself to the ticket and sends it back the way it came; a member pastes it and
      dials. Needed once per joiner (to reach one member; the rest follow by step 2).

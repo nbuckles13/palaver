@@ -12,10 +12,12 @@
 # through both routers: that is the hole punch.
 #
 #   cone       the routers keep a node's port whatever it sends to (most home routers).
-#              Expected: every bot has two links.
+#              Expected: every bot has two links, and a bot behind a router finds from
+#              two STUN servers that it is "behind a router".
 #   symmetric  the routers pick a new port per destination. Punching cannot work.
 #              Expected: the homes have one link each, and still hear each other
-#              through the open node.
+#              through the open node; a bot behind a router finds that its network
+#              "gives a port per destination".
 #
 # Needs Linux with ip, nft and unshare, and either root or unprivileged user namespaces.
 # Build first: cargo build -p palaver-bot
@@ -102,8 +104,19 @@ RULES
 router router1 v2b
 router router2 v3b
 
-ip netns exec open "$bot" create --bind 10.0.0.2:4433 --silent --speaker 0 \
+# Two STUN servers at different addresses, as seen from the homes.
+ip netns exec open "$bot" stun-server 10.0.0.2:3478 &
+ip netns exec internet "$bot" stun-server 10.0.1.1:3478 &
+stun="--stun 10.0.0.2:3478 --stun 10.0.1.1:3478"
+
+# What a node behind a router learns of its network, before any meeting.
+# shellcheck disable=SC2086
+ip netns exec home1 "$bot" create $stun --silent --seconds 0 >"$out/network" 2>&1
+
+# shellcheck disable=SC2086
+ip netns exec open "$bot" create --bind 10.0.0.2:4433 $stun --silent --speaker 0 \
     --seconds "$seconds" >"$out/open" 2>&1 &
+bots="$!"
 for _ in $(seq 50); do
     grep -q '^ticket ' "$out/open" && break
     sleep 0.1
@@ -112,8 +125,12 @@ ticket="$(sed -n 's/^ticket //p' "$out/open")"
 [ -n "$ticket" ] || { echo "the open bot gave no ticket" >&2; cat "$out/open" >&2; exit 1; }
 
 ip netns exec home1 "$bot" join "$ticket" --speaker 1 --seconds "$seconds" >"$out/home1" 2>&1 &
+bots="$bots $!"
 ip netns exec home2 "$bot" join "$ticket" --speaker 2 --seconds "$seconds" >"$out/home2" 2>&1 &
-wait
+bots="$bots $!"
+# The STUN servers run until the script ends; only the bots are waited for.
+# shellcheck disable=SC2086
+wait $bots
 if [ -n "${PALAVER_NAT_VERBOSE:-}" ]; then tail -n +1 "$out"/home1 "$out"/home2; fi
 
 # What each bot said two seconds before the end: late enough that the meeting has
@@ -130,6 +147,17 @@ expect() {
         *) echo "FAIL: $1 should say '$2'" >&2; fail=1 ;;
     esac
 }
+echo "home1 alone: $(grep '^network ' "$out/network")"
+echo "open: $(grep '^network ' "$out/open")"
+network() {
+    grep -q "^network $2\$" "$out/$1" || { echo "FAIL: $1 should say 'network $2'" >&2; fail=1; }
+}
+network open "open"
+if [ "$kind" = cone ]; then
+    network network "behind a router"
+else
+    network network "gives a port per destination"
+fi
 expect open "hears [1, 2]"
 expect home1 "hears [2]"
 expect home2 "hears [1]"

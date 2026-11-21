@@ -103,6 +103,7 @@ pub struct Status {
 enum Command {
     Create,
     Join(Vec<Peer>),
+    Addresses(Vec<SocketAddr>),
     Audio {
         group: u64,
         level: u8,
@@ -210,6 +211,12 @@ impl Engine {
     /// Join a meeting through one of `entry_points`, tried in order.
     pub async fn join(&self, entry_points: Vec<Peer>) {
         let _ = self.commands.send(Command::Join(entry_points)).await;
+    }
+
+    /// Where this node can be reached has changed: it has learned its public address,
+    /// say. The meeting is told in its next report.
+    pub async fn set_addresses(&self, addresses: Vec<SocketAddr>) {
+        let _ = self.commands.send(Command::Addresses(addresses)).await;
     }
 
     /// Send one frame of this node's microphone. `false` if it was dropped because the
@@ -383,6 +390,9 @@ impl<E: Endpoint> Run<E> {
         let now = self.now();
         match command {
             Command::Create => self.node.create_meeting(now),
+            Command::Addresses(addresses) => self
+                .node
+                .set_addresses(addresses.into_iter().map(Redacted::new).collect(), now),
             Command::Join(peers) => {
                 let mut ids = Vec::new();
                 for peer in peers {

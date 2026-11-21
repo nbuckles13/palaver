@@ -18,7 +18,7 @@ hmac = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 sha2 = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "net"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "net"] }

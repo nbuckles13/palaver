@@ -14,7 +14,7 @@ palaver-media = { workspace = true }
 palaver-net = { workspace = true }
 palaver-proto = { workspace = true }
 palaver-sdk = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "time", "macros", "net"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

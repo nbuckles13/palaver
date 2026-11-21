@@ -136,6 +136,35 @@ pub trait Endpoint: Send + Sync + 'static {
     fn close(&self);
 }
 
+/// A shared endpoint is an endpoint: whoever starts a node on it can keep a handle, to ask
+/// the transport what the node cannot (its public address, say).
+impl<E: Endpoint> Endpoint for std::sync::Arc<E> {
+    type Connection = E::Connection;
+
+    fn key(&self) -> PublicKey {
+        (**self).key()
+    }
+
+    fn dials_by_address(&self) -> bool {
+        (**self).dials_by_address()
+    }
+
+    fn dial(
+        &self,
+        peer: &Peer,
+    ) -> impl Future<Output = Result<Self::Connection, DialError>> + Send {
+        (**self).dial(peer)
+    }
+
+    fn accept(&self) -> impl Future<Output = Option<Self::Connection>> + Send {
+        (**self).accept()
+    }
+
+    fn close(&self) {
+        (**self).close();
+    }
+}
+
 /// One connection. Cloning gives another handle to the same connection.
 pub trait Connection: Clone + Send + Sync + 'static {
     type Send: SendStream;
