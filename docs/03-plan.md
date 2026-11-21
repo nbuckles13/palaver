@@ -132,6 +132,17 @@ password, surviving khef and conductor churn.
 
 Topics that need a design before they can be scheduled.
 
+### Calling someone, and knocking
+
+A ticket that is always on: its owner's node stays up, and whoever holds the ticket can
+call. It is a meeting whose joiners knock and wait to be let in, which is also the host
+approval the design defers, so the two should be designed together. What it needs beyond
+a meeting: a way to find a node whose address has changed since the ticket was made
+(rendezvous; the ticket coming back does not work when nobody is there to paste it), a
+key that outlives one meeting, one ticket per contact so that one person can be cut off,
+and a place in private mode, because being always on shows ticket holders when you are
+online.
+
 ### Bots that say words
 
 For manual testing by ear, a bot that says something recognisable ("alpha, alpha, alpha")

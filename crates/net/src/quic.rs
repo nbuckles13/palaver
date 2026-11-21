@@ -15,10 +15,13 @@
 //! TLS 1.3 only. Every connection uses the protocol name [`ALPN`]; a peer that does not
 //! speak it is refused in the handshake.
 //!
-//! Not here yet: finding one's own public address, and getting through NAT. A peer is
-//! dialled at the addresses given for it, all at once, and the first to answer is used.
+//! A peer is dialled at the addresses given for it, all at once, and the first to answer
+//! is used. The endpoint can ask a STUN server what its own public address is
+//! ([`QuicEndpoint::public_address`]); the question leaves from the same socket, so the
+//! answer is the address QUIC traffic comes from ([`crate::stun`]).
 
 use crate::identity::Identity;
+use crate::stun::StunSocket;
 use crate::transport::{
     Closed, ClosedBy, Connection, DatagramError, DialError, Endpoint, Path, Peer, RecvStream,
     SendStream, Side, StreamError,
@@ -231,9 +234,33 @@ fn tls(error: impl ToString) -> BindError {
     BindError::Tls(error.to_string())
 }
 
+/// What STUN servers said of this node's address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reflexive {
+    /// Nobody answered.
+    Unknown,
+    /// Every server that answered saw this address: others can be told to send here.
+    /// With one answer only, that is a hope rather than a finding.
+    Stable(SocketAddr),
+    /// Servers saw different addresses: the router gives one per destination (a
+    /// symmetric NAT), so no address can be handed out and a hole punch will not work.
+    PerDestination,
+}
+
+impl Reflexive {
+    fn from_answers(seen: Vec<SocketAddr>) -> Self {
+        match seen.split_first() {
+            None => Self::Unknown,
+            Some((first, rest)) if rest.iter().all(|other| other == first) => Self::Stable(*first),
+            Some(_) => Self::PerDestination,
+        }
+    }
+}
+
 /// A node's presence on the network.
 pub struct QuicEndpoint {
     endpoint: quinn::Endpoint,
+    socket: Arc<StunSocket>,
     key: PublicKey,
     /// This node's key as TLS presents it, with the means to sign for it.
     certified: Arc<CertifiedKey>,
@@ -271,11 +298,21 @@ impl QuicEndpoint {
             ));
         server.alpn_protocols = vec![options.alpn.clone()];
         let server = QuicServerConfig::try_from(server).map_err(tls)?;
-        let endpoint = quinn::Endpoint::server(
-            quinn::ServerConfig::with_crypto(Arc::new(server)),
-            options.bind,
+        // One socket for everything: QUIC both ways, and the questions to STUN servers,
+        // whose answers are taken out before QUIC sees them.
+        let socket_error = |e: std::io::Error| BindError::Socket(e.to_string());
+        let runtime = Arc::new(quinn::TokioRuntime);
+        let socket = std::net::UdpSocket::bind(options.bind).map_err(socket_error)?;
+        let socket = Arc::new(StunSocket::new(
+            quinn::Runtime::wrap_udp_socket(&*runtime, socket).map_err(socket_error)?,
+        ));
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(quinn::ServerConfig::with_crypto(Arc::new(server))),
+            Arc::clone(&socket) as Arc<dyn quinn::AsyncUdpSocket>,
+            runtime,
         )
-        .map_err(|e| BindError::Socket(e.to_string()))?;
+        .map_err(socket_error)?;
 
         // Handshakes of incoming connections run side by side, so that one that stalls
         // holds up nobody else.
@@ -298,6 +335,7 @@ impl QuicEndpoint {
         };
         Ok(Self {
             endpoint,
+            socket,
             key,
             certified,
             provider,
@@ -310,6 +348,36 @@ impl QuicEndpoint {
     /// The local address the endpoint is listening on.
     pub fn local_address(&self) -> Option<SocketAddr> {
         self.endpoint.local_addr().ok()
+    }
+
+    /// The address `server`, a STUN server, sees this endpoint's packets come from: its
+    /// public address, if it is behind a router that rewrites addresses. `None` if no
+    /// answer comes within `patience`.
+    ///
+    /// The server learns this node's address and that it asked; nothing else is sent.
+    pub async fn public_address(
+        &self,
+        server: SocketAddr,
+        patience: Duration,
+    ) -> Option<SocketAddr> {
+        self.socket.mapped_address(server, patience).await
+    }
+
+    /// Ask several STUN servers at once. What they agree on tells what kind of router
+    /// this node is behind.
+    pub async fn public_addresses(&self, servers: &[SocketAddr], patience: Duration) -> Reflexive {
+        let mut asking = JoinSet::new();
+        for server in servers {
+            let (socket, server) = (Arc::clone(&self.socket), *server);
+            asking.spawn(async move { socket.mapped_address(server, patience).await });
+        }
+        let mut seen = Vec::new();
+        while let Some(answer) = asking.join_next().await {
+            if let Ok(Some(address)) = answer {
+                seen.push(address);
+            }
+        }
+        Reflexive::from_answers(seen)
     }
 
     /// The settings for dialling `peer`: present our key, accept only theirs.

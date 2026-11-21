@@ -6,7 +6,8 @@
 use bytes::Bytes;
 use palaver_net::admission::{AdmissionKey, Admitted};
 use palaver_net::identity::Identity;
-use palaver_net::quic::{QuicConnection, QuicEndpoint, QuicOptions};
+use palaver_net::quic::{QuicConnection, QuicEndpoint, QuicOptions, Reflexive};
+use palaver_net::stun::binding_response;
 use palaver_net::transport::{
     ClosedBy, Connection, DatagramError, DialError, Endpoint, Peer, RecvStream, SendStream, Side,
     StreamError,
@@ -316,4 +317,100 @@ async fn admission_runs_over_it_and_keeps_out_a_node_with_another_secret() {
     assert_eq!(theirs.peer(), a.key());
 
     assert_eq!(c.dial(&to_a).await.err(), Some(DialError::Refused));
+}
+
+/// A STUN server on the loopback interface. It answers each question with the address
+/// it came from, moved by `shift` ports, as a router that gives a port per destination
+/// would make it look.
+async fn stun_server(shift: u16) -> SocketAddr {
+    let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut packet = [0u8; 1500];
+        while let Ok((len, mut from)) = socket.recv_from(&mut packet).await {
+            let Ok(id) = <[u8; 12]>::try_from(&packet[8..20.min(len).max(8)]) else {
+                continue;
+            };
+            from.set_port(from.port().wrapping_add(shift));
+            let _ = socket
+                .send_to(&binding_response(&id, from), from_real(from, shift))
+                .await;
+        }
+    });
+    address
+}
+
+/// Where the question really came from, given what the server will claim.
+fn from_real(mut claimed: SocketAddr, shift: u16) -> SocketAddr {
+    claimed.set_port(claimed.port().wrapping_sub(shift));
+    claimed
+}
+
+#[tokio::test]
+async fn a_stun_server_tells_the_endpoint_its_address_and_quic_goes_on_working() {
+    let (a, b) = (Node::new(), Node::new());
+    let server = stun_server(0).await;
+    let patience = Duration::from_secs(2);
+    // On the loopback interface the address seen is the address bound.
+    assert_eq!(
+        a.endpoint.public_address(server, patience).await,
+        a.endpoint.local_address()
+    );
+    // The same socket still carries QUIC, before and after another question.
+    let ours = a.endpoint.dial(&b.address()).await.unwrap();
+    let theirs = b.endpoint.accept().await.unwrap();
+    assert_eq!(
+        b.endpoint.public_address(server, patience).await,
+        b.endpoint.local_address()
+    );
+    ours.send_datagram(bytes("still here")).unwrap();
+    assert_eq!(theirs.read_datagram().await.unwrap(), bytes("still here"));
+}
+
+#[tokio::test]
+async fn servers_that_agree_give_an_address_and_servers_that_differ_show_a_symmetric_nat() {
+    let a = Node::new();
+    let patience = Duration::from_secs(2);
+    let (one, two, shifted) = (
+        stun_server(0).await,
+        stun_server(0).await,
+        stun_server(7).await,
+    );
+    assert_eq!(
+        a.endpoint.public_addresses(&[one, two], patience).await,
+        Reflexive::Stable(a.endpoint.local_address().unwrap())
+    );
+    assert_eq!(
+        a.endpoint.public_addresses(&[one, shifted], patience).await,
+        Reflexive::PerDestination
+    );
+    assert_eq!(
+        a.endpoint.public_addresses(&[], patience).await,
+        Reflexive::Unknown
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_does_not_answer_gives_nothing_after_the_patience() {
+    let a = Node::new();
+    // A socket that is open and never replies.
+    let silent = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let server = silent.local_addr().unwrap();
+    let patience = Duration::from_millis(600);
+    let began = std::time::Instant::now();
+    assert_eq!(a.endpoint.public_address(server, patience).await, None);
+    assert!(began.elapsed() >= patience);
+    // It was asked more than once: at the start, then after 250 ms, then after 500 more.
+    let mut packet = [0u8; 64];
+    let mut asked = 0;
+    while let Ok(Ok(_)) =
+        tokio::time::timeout(Duration::from_millis(50), silent.recv_from(&mut packet)).await
+    {
+        asked += 1;
+    }
+    assert_eq!(asked, 2);
 }

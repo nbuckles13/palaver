@@ -21,7 +21,7 @@ sha2 = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "net"] }
 
 [lints]
 workspace = true
