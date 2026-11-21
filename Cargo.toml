@@ -42,6 +42,22 @@ tokio = { version = "1", default-features = false }
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
+# Nearly everything clippy has, as warnings (CI turns warnings into errors). The groups
+# come first (lower priority) so that the single lints below can override them.
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Which versions our dependencies pull in is theirs to decide; `cargo deny` watches it.
+multiple_crate_versions = "allow"
+# It asks for `map_or_else` with two closures where an `if let` with two branches reads
+# better.
+option_if_let_else = "allow"
+# It asks for `mul_add`, which rounds once where `a * b + c` rounds twice: results then
+# differ by machine (fused where the processor has it, a slow library call where not).
+# The same input must give the same output everywhere.
+suboptimal_flops = "allow"
+# The same, for `hypot`, `ln_1p` and their like.
+imprecise_flops = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
@@ -49,6 +65,10 @@ todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
 undocumented_unsafe_blocks = "deny"
+# A lint is set aside with `#[expect(..., reason = "...")]`, never `#[allow]`: an `expect`
+# that no longer has anything to excuse is itself reported, so none outlives its cause.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 
 # The simulator runs whole meetings through the sans-IO cores, so their speed is the tests'
 # speed. In development and test builds the cores are optimised; overflow checks and debug

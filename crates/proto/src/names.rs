@@ -1,6 +1,6 @@
 //! Track naming (design section 4).
 //!
-//! A MoQ track is a namespace tuple plus a name. MoQ has no wildcards, only namespace-prefix
+//! A `MoQ` track is a namespace tuple plus a name. `MoQ` has no wildcards, only namespace-prefix
 //! matching, so the fields that need wildcarding go last:
 //!
 //! ```text
@@ -36,19 +36,22 @@ fn field(bytes: &[u8]) -> Option<Vec<u8>> {
     (!bytes.is_empty() && bytes.len() <= MAX_FIELD_BYTES).then(|| bytes.to_vec())
 }
 
-/// The opaque value that identifies a meeting on the wire. It is derived from the meeting
-/// secret (the derivation lives with admission, not here), so every member computes the same
-/// tag and it means nothing to anyone outside the meeting.
+/// The opaque value that identifies a meeting on the wire.
+///
+/// It is derived from the meeting secret (the derivation lives with admission, not here), so
+/// every member computes the same tag and it means nothing to anyone outside the meeting.
 /// Redacted in logs: it would let two log lines be tied to the same meeting.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MeetingTag(Redacted<Vec<u8>>);
 
 impl MeetingTag {
     /// `None` if `bytes` is empty or longer than [`MAX_FIELD_BYTES`].
+    #[must_use]
     pub fn new(bytes: &[u8]) -> Option<Self> {
         field(bytes).map(|b| Self(Redacted::new(b)))
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         self.0.reveal()
     }
@@ -67,10 +70,12 @@ impl ParticipantId {
     }
 
     /// The id for a node whose public key hashes to `hash` (the first 16 bytes of the hash).
+    #[must_use]
     pub fn from_key_hash(hash: [u8; 16]) -> Self {
         Self(hash.to_vec())
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -86,7 +91,7 @@ pub enum Source {
 }
 
 impl Source {
-    fn as_bytes(self) -> &'static [u8] {
+    const fn as_bytes(self) -> &'static [u8] {
         match self {
             Self::Main => MAIN,
             Self::Screen => SCREEN,
@@ -144,6 +149,7 @@ pub struct MediaTrack {
 
 impl MediaTrack {
     /// This track as `participant`'s.
+    #[must_use]
     pub fn of(&self, participant: ParticipantId) -> Track {
         let (source, rendition) = (self.source, self.rendition.clone());
         if self.audio {
@@ -200,7 +206,8 @@ impl MediaTrack {
 
 impl Track {
     /// The participant whose track this is; `None` for the plan.
-    pub fn participant(&self) -> Option<&ParticipantId> {
+    #[must_use]
+    pub const fn participant(&self) -> Option<&ParticipantId> {
         match self {
             Self::Audio { participant, .. }
             | Self::Video { participant, .. }
@@ -210,6 +217,7 @@ impl Track {
     }
 
     /// This track without its participant, if it is a media track.
+    #[must_use]
     pub fn media(&self) -> Option<MediaTrack> {
         let (audio, source, rendition) = match self {
             Self::Audio {
@@ -237,6 +245,7 @@ impl Track {
     /// - The plan track: a fixed number.
     ///
     /// Both are above every alias a plan may assign.
+    #[must_use]
     pub fn control_alias(&self) -> Option<u64> {
         match self {
             Self::Plan => Some(PLAN_ALIAS),
@@ -252,7 +261,7 @@ impl Track {
     }
 }
 
-/// A track of one meeting, convertible to and from its MoQ name.
+/// A track of one meeting, convertible to and from its `MoQ` name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TrackName {
     pub meeting: MeetingTag,
@@ -264,7 +273,8 @@ fn namespace(fields: &[&[u8]]) -> Option<Namespace> {
 }
 
 impl TrackName {
-    /// The MoQ name. `None` only if a rendition is empty or too long.
+    /// The `MoQ` name. `None` only if a rendition is empty or too long.
+    #[must_use]
     pub fn to_full_name(&self) -> Option<FullTrackName> {
         let m = self.meeting.as_bytes();
         let (ns, name) = match &self.track {
@@ -293,7 +303,7 @@ impl TrackName {
         FullTrackName::new(ns, name).ok()
     }
 
-    /// Read a MoQ name. `None` if it does not have one of the shapes above.
+    /// Read a `MoQ` name. `None` if it does not have one of the shapes above.
     pub fn parse(name: &FullTrackName) -> Option<Self> {
         let fields: Vec<&[u8]> = name
             .namespace()
@@ -341,11 +351,13 @@ impl TrackName {
 impl MeetingTag {
     /// Prefix of every participant's audio tracks from `source`: what a client subscribes to
     /// for top-N audio.
+    #[must_use]
     pub fn audio_prefix(&self, source: Source) -> Option<Namespace> {
         namespace(&[self.as_bytes(), AUDIO, source.as_bytes()])
     }
 
     /// Prefix of one participant's video tracks from `source`: the unit of a default route.
+    #[must_use]
     pub fn video_prefix(&self, source: Source, participant: &ParticipantId) -> Option<Namespace> {
         namespace(&[
             self.as_bytes(),
@@ -356,11 +368,13 @@ impl MeetingTag {
     }
 
     /// Prefix of every control track: what floods to all neighbours.
+    #[must_use]
     pub fn control_prefix(&self) -> Option<Namespace> {
         namespace(&[self.as_bytes(), CTL])
     }
 
     /// Prefix of every track of the meeting.
+    #[must_use]
     pub fn meeting_prefix(&self) -> Option<Namespace> {
         namespace(&[self.as_bytes()])
     }
@@ -577,7 +591,7 @@ mod tests {
         assert!(MediaTrack::decode(&good.encode(None)).is_ok());
         let empty = MediaTrack {
             rendition: vec![],
-            ..good.clone()
+            ..good
         };
         assert_eq!(
             MediaTrack::decode(&empty.encode(None)),

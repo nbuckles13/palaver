@@ -1,7 +1,7 @@
 //! One voice end to end: made-up speech, encoded, carried (or lost), buffered, decoded,
 //! mixed. What is checked is what a listener would notice: whose voice is heard, and when.
 
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use palaver_media::jitter::Config as JitterConfig;
 use palaver_media::level::audio_level;
@@ -75,7 +75,7 @@ fn carry(
 
 /// A different sequence of yes and no for every seed, the same on every run; yes about
 /// one time in `one_in`.
-fn sometimes(seed: u64, n: u64, one_in: u64) -> bool {
+const fn sometimes(seed: u64, n: u64, one_in: u64) -> bool {
     let mut x = seed ^ n.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     x ^= x >> 33;
     x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -176,7 +176,7 @@ fn a_long_outage_is_guessed_briefly_then_silent_and_the_voice_returns_after_it()
 fn two_voices_mixed_are_both_heard_and_the_mix_stays_in_range() {
     let a = carry(0, 100, |_| true, |_| false);
     let b = carry(6, 100, |_| true, |_| false);
-    let mut mixed = a.pcm.clone();
+    let mut mixed = a.pcm;
     mix::add(&mut mixed, &b.pcm);
     mix::limit(&mut mixed);
     assert!(hears(&mixed[24_000..], pitch_of(0)));

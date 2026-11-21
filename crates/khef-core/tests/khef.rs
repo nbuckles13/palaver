@@ -1,5 +1,9 @@
 //! Several khefs joined by in-memory links.
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test may stop where it stands"
+)]
 
 use palaver_khef_core::{
     Action, AudioOut, AudioPlan, Khef, KhefConfig, LinkWatchConfig, Output, Role, StreamId,
@@ -12,7 +16,7 @@ use std::time::Duration;
 
 type Id = u8;
 
-fn at(ms: u64) -> Timestamp {
+const fn at(ms: u64) -> Timestamp {
     Timestamp::from_millis(ms)
 }
 
@@ -244,13 +248,13 @@ impl Net {
                     .or_default()
                     .push(bytes.clone());
                 let out = self.khef(to).on_datagram(&from, &bytes, now);
-                self.carry_audio(to, out, bytes);
+                self.carry_audio(to, out, &bytes);
             }
         }
     }
 
     /// Do what a khef said to do with an audio datagram.
-    fn carry_audio(&mut self, at_node: Id, out: Option<AudioOut<Id>>, bytes: Vec<u8>) {
+    fn carry_audio(&mut self, at_node: Id, out: Option<AudioOut<Id>>, bytes: &[u8]) {
         let Some(out) = out else {
             return;
         };
@@ -258,7 +262,7 @@ impl Net {
         // frame is 80 bytes of its own number.
         assert_eq!(
             bytes.get(out.payload.clone()),
-            Some(&[out.alias as u8; 80][..]),
+            Some(&[u8::try_from(out.alias).unwrap(); 80][..]),
             "at node {at_node}"
         );
         if out.for_client {
@@ -269,7 +273,7 @@ impl Net {
                 .push((out.alias, out.group));
         }
         for peer in out.forward_to {
-            self.deliver(at_node, peer, Wire::Datagram(bytes.clone()));
+            self.deliver(at_node, peer, Wire::Datagram(bytes.to_vec()));
         }
     }
 
@@ -297,7 +301,7 @@ impl Net {
         );
         assert!(out.is_some(), "node {node} has no audio track in its plan");
         assert_eq!(out.as_ref().map(|o| o.level), Some(level));
-        self.carry_audio(node, out, bytes.clone());
+        self.carry_audio(node, out, &bytes);
         bytes
     }
 
@@ -705,7 +709,7 @@ fn audio_before_the_plan_or_outside_it_goes_nowhere() {
     );
     // A datagram under an alias no plan knows.
     let sent = net.speak(1, 1, 100);
-    let mut stray = sent.clone();
+    let mut stray = sent;
     stray[1] = 99;
     assert_eq!(net.khef(2).on_datagram(&1, &stray, now), None);
     assert_eq!(net.played(2), [(1, 1)]);
@@ -734,7 +738,7 @@ fn when_the_plan_drops_a_track_its_packets_stop_and_a_new_one_starts() {
     let mut bytes = vec![];
     let now = net.now;
     let out = net.khef(3).local_audio(3, 2, 60, &[3; 80], &mut bytes, now);
-    net.carry_audio(3, out, bytes);
+    net.carry_audio(3, out, &bytes);
     assert_eq!(net.sent(2, 1), before);
     assert_eq!(net.played(1), [(3, 1)]);
     // 1 and 2 still hear each other.

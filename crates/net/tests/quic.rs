@@ -1,7 +1,7 @@
 //! The QUIC transport on the loopback interface: real sockets, real TLS, real time.
 //! Nothing here sleeps; each test waits only for things that happen in milliseconds.
 
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use bytes::Bytes;
 use palaver_net::admission::{AdmissionKey, Admitted};
@@ -57,7 +57,7 @@ async fn connected() -> (Node, Node, QuicConnection, QuicConnection) {
     (a, b, ours, theirs)
 }
 
-fn bytes(text: &'static str) -> Bytes {
+const fn bytes(text: &'static str) -> Bytes {
     Bytes::from_static(text.as_bytes())
 }
 
@@ -177,11 +177,11 @@ async fn a_megabyte_crosses_a_stream_whole_with_a_reader_that_starts_late() {
     let writer = {
         let sent = sent.clone();
         tokio::spawn(async move {
-            let mut send = ours.open_uni().await.unwrap();
+            let mut stream = ours.open_uni().await.unwrap();
             for chunk in sent.chunks(10_000) {
-                send.write(Bytes::copy_from_slice(chunk)).await.unwrap();
+                stream.write(Bytes::copy_from_slice(chunk)).await.unwrap();
             }
-            send.finish();
+            stream.finish();
             // Keep the connection until the reader is done.
             ours.closed().await;
         })
@@ -341,7 +341,7 @@ async fn stun_server(shift: u16) -> SocketAddr {
 }
 
 /// Where the question really came from, given what the server will claim.
-fn from_real(mut claimed: SocketAddr, shift: u16) -> SocketAddr {
+const fn from_real(mut claimed: SocketAddr, shift: u16) -> SocketAddr {
     claimed.set_port(claimed.port().wrapping_sub(shift));
     claimed
 }

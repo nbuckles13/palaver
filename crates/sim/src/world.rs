@@ -32,7 +32,8 @@ pub struct World<E: Ord> {
 }
 
 impl<E: Ord> World<E> {
-    pub fn new(seed: u64) -> Self {
+    #[must_use]
+    pub const fn new(seed: u64) -> Self {
         Self {
             now: Timestamp::ZERO,
             seq: 0,
@@ -43,12 +44,14 @@ impl<E: Ord> World<E> {
         }
     }
 
-    pub fn now(&self) -> Timestamp {
+    #[must_use]
+    pub const fn now(&self) -> Timestamp {
         self.now
     }
 
     /// The root random source; derive per-node and per-link streams from it.
-    pub fn rng(&self) -> &Rng {
+    #[must_use]
+    pub const fn rng(&self) -> &Rng {
         &self.rng
     }
 
@@ -64,6 +67,7 @@ impl<E: Ord> World<E> {
     }
 
     /// When the next event is due, if there is one.
+    #[must_use]
     pub fn next_at(&self) -> Option<Timestamp> {
         self.queue.peek().map(|Reverse(next)| next.at)
     }
@@ -84,18 +88,20 @@ impl<E: Ord> World<E> {
 
     /// Mix a value into the trace fingerprint. Handlers call this with what they observed, so
     /// two runs have equal fingerprints only if they behaved identically.
-    pub fn note(&mut self, value: u64) {
+    pub const fn note(&mut self, value: u64) {
         self.trace = (self.trace ^ value)
             .wrapping_mul(0x0000_0100_0000_01b3)
             .rotate_left(23);
     }
 
     /// Fingerprint of the run so far.
-    pub fn trace(&self) -> u64 {
+    #[must_use]
+    pub const fn trace(&self) -> u64 {
         self.trace
     }
 
-    pub fn delivered(&self) -> u64 {
+    #[must_use]
+    pub const fn delivered(&self) -> u64 {
         self.delivered
     }
 }
@@ -127,7 +133,7 @@ mod tests {
                 if rng.chance(100_000) {
                     continue; // lost
                 }
-                let peer = rng.below(u64::from(NODES)) as u32;
+                let peer = u32::try_from(rng.below(u64::from(NODES))).unwrap_or(0);
                 let delay = 5_000 + rng.below(3) * 10_000; // few distinct delays: many ties
                 world.schedule(Duration::from_micros(delay), peer, ttl - 1);
             }

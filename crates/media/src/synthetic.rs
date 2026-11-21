@@ -16,10 +16,16 @@ use std::time::Duration;
 /// How many different pitches [`pitch_of`] gives before they repeat.
 pub const PITCHES: u32 = 8;
 
-/// The pitch of a speaker's voice: eight pitches a semitone and a half apart, from 110 Hz
-/// up to just under 220 Hz. All lie within one octave, so no voice's harmonics fall on
+/// The pitch of a speaker's voice.
+///
+/// Eight pitches a semitone and a half apart, from 110 Hz up to just under 220 Hz. All lie within one octave, so no voice's harmonics fall on
 /// another's pitch, and they are far enough apart to tell one from the next in half a
 /// second. Speakers beyond the eighth share a pitch with an earlier one.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a number below PITCHES is exact as an f32"
+)]
 pub fn pitch_of(speaker: u32) -> f32 {
     const LOWEST: f32 = 110.0;
     LOWEST * 2f32.powf((speaker % PITCHES) as f32 * 1.5 / 12.0)
@@ -36,7 +42,8 @@ pub struct Voice {
 
 impl Voice {
     /// A voice at `pitch` Hz whose loudest moments reach `loudness` (0 to 1).
-    pub fn new(pitch: f32, loudness: f32) -> Self {
+    #[must_use]
+    pub const fn new(pitch: f32, loudness: f32) -> Self {
         Self {
             pitch,
             loudness,
@@ -44,11 +51,16 @@ impl Voice {
         }
     }
 
-    pub fn pitch(&self) -> f32 {
+    #[must_use]
+    pub const fn pitch(&self) -> f32 {
         self.pitch
     }
 
     /// The next 20 ms: speech if `talking`, silence if not. Time passes either way.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "time in seconds as an f32 is what the voice is defined by; tests compare its exact samples"
+    )]
     pub fn frame(&mut self, talking: bool, out: &mut [f32]) {
         for sample in out.iter_mut() {
             let t = self.position as f32 / SAMPLE_RATE as f32;
@@ -95,7 +107,8 @@ impl Rhythm {
     };
 
     /// Whether the voice is talking `elapsed` after it started.
-    pub fn talking(&self, elapsed: Duration) -> bool {
+    #[must_use]
+    pub const fn talking(&self, elapsed: Duration) -> bool {
         let cycle = self.talk.saturating_add(self.pause).as_micros();
         if cycle == 0 {
             return false;
@@ -105,9 +118,19 @@ impl Rhythm {
     }
 }
 
-/// How strongly `pitch` is present in `pcm`: the amplitude of that one frequency (the
-/// Goertzel algorithm, over a Hann window so that a nearby pitch does not leak in). Zero
-/// for silence; for a [`Voice`] of loudness `a` at that pitch, around `0.2 * a`.
+/// How strongly `pitch` is present in `pcm`.
+///
+/// The amplitude of that one frequency (the Goertzel algorithm, over a Hann window so
+/// that a nearby pitch does not leak in). Zero for silence; for a [`Voice`] of loudness `a` at that pitch, around `0.2 * a`.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "sample counts and the sample rate are far below 2^24"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "an amplitude worked out in f64 and given as f32, which is what the samples are"
+)]
 pub fn strength(pcm: &[f32], pitch: f32) -> f32 {
     if pcm.len() < 2 {
         return 0.0;
@@ -128,6 +151,7 @@ pub fn strength(pcm: &[f32], pitch: f32) -> f32 {
 
 /// Whether a voice at `pitch` can be heard in `pcm`. Give it half a second or more: over a
 /// shorter stretch neighbouring pitches blur together.
+#[must_use]
 pub fn hears(pcm: &[f32], pitch: f32) -> bool {
     /// A tenth of what the quietest voice a test is likely to use would give.
     const AUDIBLE: f32 = 0.004;

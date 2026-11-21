@@ -41,6 +41,11 @@ pub const FORBIDDEN_EDGES: &[(&str, &str, &str)] = &[(
 pub type Graph = BTreeMap<String, BTreeSet<String>>;
 
 /// Build the graph from `cargo metadata` JSON.
+///
+/// # Errors
+///
+/// Fails if `json` is not JSON, or lacks the package list or resolve graph that
+/// `cargo metadata` writes.
 pub fn graph_from_metadata(json: &str) -> Result<Graph, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let mut names = BTreeMap::new();
@@ -84,6 +89,7 @@ fn reachable(graph: &Graph, from: &str) -> BTreeSet<String> {
 
 /// Layering violations in `graph`. Fails (as a violation) if an expected crate is missing, so
 /// renaming a crate cannot silently switch the check off.
+#[must_use]
 pub fn violations(graph: &Graph) -> Vec<String> {
     let mut out = vec![];
     for krate in SANS_IO {
@@ -121,6 +127,7 @@ pub const REQUIRED_BANS: &[&str] = &[
 ];
 
 /// Which required bans are missing from one `clippy.toml`.
+#[must_use]
 pub fn missing_bans(clippy_toml: &str) -> Vec<&'static str> {
     REQUIRED_BANS
         .iter()
@@ -209,7 +216,8 @@ mod tests {
         let good = REQUIRED_BANS
             .iter()
             .map(|b| format!("{{ path = \"{b}\" }}\n"))
-            .collect::<String>();
+            .collect::<Vec<_>>()
+            .concat();
         assert!(missing_bans(&good).is_empty());
         let bad = good.replace("std::collections::HashMap", "std::collections::BTreeMap");
         assert_eq!(missing_bans(&bad), ["std::collections::HashMap"]);

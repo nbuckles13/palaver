@@ -48,7 +48,7 @@ pub struct Link {
 pub struct Report {
     /// The node's per-meeting public key. Its participant id is derived from it.
     pub key: PublicKey,
-    /// Counts up with every report from this node; equals the MoQ group id it is sent in.
+    /// Counts up with every report from this node; equals the `MoQ` group id it is sent in.
     pub sequence: u64,
     /// The name the user chose.
     pub name: Redacted<String>,
@@ -69,7 +69,7 @@ pub struct Report {
 }
 
 /// An address on the wire: the IP's 4 or 16 bytes, then the port, big-endian.
-pub(crate) fn encode_address(address: &SocketAddr) -> Vec<u8> {
+pub fn encode_address(address: &SocketAddr) -> Vec<u8> {
     let mut out = match address.ip() {
         IpAddr::V4(ip) => ip.octets().to_vec(),
         IpAddr::V6(ip) => ip.octets().to_vec(),
@@ -78,7 +78,7 @@ pub(crate) fn encode_address(address: &SocketAddr) -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_address(bytes: &[u8]) -> Option<SocketAddr> {
+pub fn decode_address(bytes: &[u8]) -> Option<SocketAddr> {
     let (ip, port) = bytes.split_at_checked(bytes.len().checked_sub(2)?)?;
     let port = u16::from_be_bytes(port.try_into().ok()?);
     let ip = match ip.len() {
@@ -89,11 +89,13 @@ pub(crate) fn decode_address(bytes: &[u8]) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
-/// Whether a node should advertise `address` to the meeting. Not the unspecified address, not
-/// multicast or broadcast, not port 0, and not link-local (it only means something on the
-/// sender's own interface). Loopback only when `allow_loopback` is set, which is for tests and
-/// for running several nodes on a machine with no network.
-pub fn advertisable(address: &SocketAddr, allow_loopback: bool) -> bool {
+/// Whether a node should advertise `address` to the meeting.
+///
+/// Not the unspecified address, not multicast or broadcast, not port 0, and not link-local (it
+/// only means something on the sender's own interface). Loopback only when `allow_loopback` is
+/// set, which is for tests and for running several nodes on a machine with no network.
+#[must_use]
+pub const fn advertisable(address: &SocketAddr, allow_loopback: bool) -> bool {
     if address.port() == 0 {
         return false;
     }
@@ -187,6 +189,12 @@ impl Report {
     }
 
     /// Decode a payload. Fields with unknown numbers are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the payload is not well-formed fields, the key, sequence or name is missing,
+    /// a field has a value that is not allowed, or there are too many links or unreachable
+    /// peers.
     pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
         let (mut key, mut sequence, mut name, mut applied_plan) = (None, None, None, None);
         let (mut links, mut unreachable, mut addresses) = (vec![], vec![], vec![]);
@@ -195,7 +203,7 @@ impl Report {
             let pair = pair?;
             match (pair.ty, pair.value) {
                 (KEY, Value::Bytes(b)) => {
-                    key = Some(PublicKey::from_slice(b).ok_or(DecodeError::Invalid("public key"))?)
+                    key = Some(PublicKey::from_slice(b).ok_or(DecodeError::Invalid("public key"))?);
                 }
                 (SEQUENCE, Value::Int(v)) => sequence = Some(v),
                 (NAME, Value::Bytes(b)) => {
@@ -247,9 +255,14 @@ impl Report {
     }
 
     /// Verify and decode an object received on `participant`'s report track in group
-    /// `group_id`. Checks, in order: the envelope and payload are well formed; the sequence
-    /// number is the group id; the key belongs to the participant the track is named for; the
-    /// signature is by that key over these bytes for this meeting and sequence number.
+    /// `group_id`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on the first of these checks that does not hold, in order: the envelope and
+    /// payload are well formed; the sequence number is the group id; the key belongs to the
+    /// participant the track is named for; the signature is by that key over these bytes for
+    /// this meeting and sequence number.
     pub fn open(
         meeting: &MeetingTag,
         participant: &ParticipantId,

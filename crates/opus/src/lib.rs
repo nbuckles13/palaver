@@ -15,7 +15,10 @@
 //! - [`Decoder::decode_dred`]: a later packet is here, and carries up to a second of what
 //!   came before it (DRED);
 //! - [`Decoder::conceal`]: nothing is here, guess.
-#![allow(unsafe_code)]
+#![expect(
+    unsafe_code,
+    reason = "this crate is the wrapper over libopus, a C library"
+)]
 // As on the forwarding path: no arithmetic that can overflow, no indexing that can panic.
 #![cfg_attr(
     not(test),
@@ -41,7 +44,16 @@ pub enum Channels {
 }
 
 impl Channels {
-    pub fn count(self) -> usize {
+    #[must_use]
+    pub const fn count(self) -> usize {
+        match self {
+            Self::Mono => 1,
+            Self::Stereo => 2,
+        }
+    }
+
+    /// [`Channels::count`], as libopus takes it.
+    const fn raw_count(self) -> c_int {
         match self {
             Self::Mono => 1,
             Self::Stereo => 2,
@@ -49,7 +61,8 @@ impl Channels {
     }
 
     /// How many samples one 20 ms frame holds: [`FRAME_SAMPLES`] for each channel.
-    pub fn frame_len(self) -> usize {
+    #[must_use]
+    pub const fn frame_len(self) -> usize {
         match self {
             Self::Mono => FRAME_SAMPLES,
             Self::Stereo => FRAME_SAMPLES.saturating_mul(2),
@@ -64,6 +77,22 @@ pub const DTX_PACKET_BYTES: usize = 2;
 /// The most frames back that DRED can reach.
 pub const MAX_DRED_FRAMES: u32 = 50;
 
+/// [`SAMPLE_RATE`], as libopus takes it.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "the constant 48 000 fits in an i32"
+)]
+const RATE: i32 = SAMPLE_RATE as i32;
+/// [`FRAME_SAMPLES`], as libopus takes it.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "the constant 960 fits in a C int"
+)]
+const FRAME: c_int = FRAME_SAMPLES as c_int;
+/// The highest bitrate libopus accepts, in bits per second.
+const MAX_BITRATE: c_int = 510_000;
+
 /// Why a call into libopus failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -76,7 +105,7 @@ pub enum Error {
     Opus(i32),
 }
 
-fn check(code: c_int) -> Result<c_int, Error> {
+const fn check(code: c_int) -> Result<c_int, Error> {
     if code < 0 {
         Err(Error::Opus(code))
     } else {
@@ -84,11 +113,17 @@ fn check(code: c_int) -> Result<c_int, Error> {
     }
 }
 
+/// A count that libopus returned: an error if it is negative.
+fn count(code: c_int) -> Result<usize, Error> {
+    usize::try_from(check(code)?).map_err(|_| Error::Opus(code))
+}
+
 fn len(value: usize) -> Result<c_int, Error> {
     c_int::try_from(value).map_err(|_| Error::TooLong)
 }
 
 /// The version of libopus this was built with.
+#[must_use]
 pub fn version() -> String {
     // SAFETY: opus_get_version_string returns a pointer to a static NUL-terminated string.
     let text = unsafe { core::ffi::CStr::from_ptr(sys::opus_get_version_string()) };
@@ -157,16 +192,22 @@ pub struct Encoder {
 unsafe impl Send for Encoder {}
 
 impl Encoder {
+    /// An encoder set up as `config` says. Values out of range are brought into range.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Opus`] if libopus cannot allocate the encoder, or if this build of it
+    /// does not support one of the settings.
     pub fn new(config: EncoderConfig) -> Result<Self, Error> {
         let mut error: c_int = 0;
         // SAFETY: valid arguments (48 kHz, one or two channels, a defined application) and a valid
         // pointer for the error code. The result is checked for null below.
         let raw = unsafe {
             sys::opus_encoder_create(
-                SAMPLE_RATE as i32,
-                config.channels.count() as c_int,
+                RATE,
+                config.channels.raw_count(),
                 sys::OPUS_APPLICATION_VOIP as c_int,
-                &mut error,
+                &raw mut error,
             )
         };
         check(error)?;
@@ -179,7 +220,7 @@ impl Encoder {
         let settings = [
             (
                 sys::OPUS_SET_BITRATE_REQUEST,
-                config.bitrate.min(510_000) as c_int,
+                c_int::try_from(config.bitrate).map_or(MAX_BITRATE, |rate| rate.min(MAX_BITRATE)),
             ),
             (sys::OPUS_SET_DTX_REQUEST, c_int::from(config.dtx)),
             (sys::OPUS_SET_INBAND_FEC_REQUEST, c_int::from(config.fec)),
@@ -189,7 +230,7 @@ impl Encoder {
             ),
             (
                 sys::OPUS_SET_DRED_DURATION_REQUEST,
-                (dred_frames.saturating_mul(2)) as c_int,
+                c_int::try_from(dred_frames.saturating_mul(2)).unwrap_or(c_int::MAX),
             ),
         ];
         for (request, value) in settings {
@@ -202,6 +243,12 @@ impl Encoder {
 
     /// Encode one frame. Returns how many bytes of `packet` were written. A result of
     /// [`DTX_PACKET_BYTES`] or fewer means the frame was silence and nothing need be sent.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::FrameLength`] if `pcm` is not exactly [`Channels::frame_len`] samples.
+    /// [`Error::Opus`] if libopus refuses, as it does when `packet` is too short for the
+    /// frame.
     pub fn encode(&mut self, pcm: &[f32], packet: &mut [u8]) -> Result<usize, Error> {
         if pcm.len() != self.channels.frame_len() {
             return Err(Error::FrameLength);
@@ -213,12 +260,12 @@ impl Encoder {
             sys::opus_encode_float(
                 self.raw.as_ptr(),
                 pcm.as_ptr(),
-                FRAME_SAMPLES as c_int,
+                FRAME,
                 packet.as_mut_ptr(),
                 capacity,
             )
         };
-        Ok(check(written)? as usize)
+        count(written)
     }
 }
 
@@ -231,6 +278,10 @@ impl Drop for Encoder {
 
 /// An Opus decoder for speech, with its DRED state.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "`dred_decoder` is named for the libopus type it holds, OpusDREDDecoder"
+)]
 pub struct Decoder {
     channels: Channels,
     raw: NonNull<sys::OpusDecoder>,
@@ -245,12 +296,14 @@ unsafe impl Send for Decoder {}
 impl Decoder {
     /// A decoder that gives `channels`, whichever of the two a packet was encoded with:
     /// one channel is given as both, two are averaged into one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Opus`] if libopus cannot allocate the decoder or its DRED state.
     pub fn new(channels: Channels) -> Result<Self, Error> {
         let mut error: c_int = 0;
         // SAFETY: valid arguments and a valid pointer for the error code; checked for null.
-        let raw = unsafe {
-            sys::opus_decoder_create(SAMPLE_RATE as i32, channels.count() as c_int, &mut error)
-        };
+        let raw = unsafe { sys::opus_decoder_create(RATE, channels.raw_count(), &raw mut error) };
         check(error)?;
         let raw = NonNull::new(raw).ok_or(Error::Opus(sys::OPUS_ALLOC_FAIL))?;
         // From here on, a failure must free what was made: `partial` does that on drop.
@@ -261,23 +314,24 @@ impl Decoder {
             dred: None,
         };
         // SAFETY: a valid pointer for the error code; checked for null.
-        let dred_decoder = unsafe { sys::opus_dred_decoder_create(&mut error) };
+        let dred_decoder = unsafe { sys::opus_dred_decoder_create(&raw mut error) };
         check(error)?;
         partial.dred_decoder =
             Some(NonNull::new(dred_decoder).ok_or(Error::Opus(sys::OPUS_ALLOC_FAIL))?);
         // SAFETY: a valid pointer for the error code; checked for null.
-        let dred = unsafe { sys::opus_dred_alloc(&mut error) };
+        let dred = unsafe { sys::opus_dred_alloc(&raw mut error) };
         check(error)?;
         partial.dred = Some(NonNull::new(dred).ok_or(Error::Opus(sys::OPUS_ALLOC_FAIL))?);
         partial.finish().ok_or(Error::Opus(sys::OPUS_ALLOC_FAIL))
     }
 
     /// How many channels it gives.
-    pub fn channels(&self) -> Channels {
+    #[must_use]
+    pub const fn channels(&self) -> Channels {
         self.channels
     }
 
-    fn check_output(&self, pcm: &[f32]) -> Result<(), Error> {
+    const fn check_output(&self, pcm: &[f32]) -> Result<(), Error> {
         if pcm.len() == self.channels.frame_len() {
             Ok(())
         } else {
@@ -305,11 +359,11 @@ impl Decoder {
                 data,
                 length,
                 pcm.as_mut_ptr(),
-                FRAME_SAMPLES as c_int,
+                FRAME,
                 c_int::from(fec),
             )
         };
-        if check(samples)? as usize == FRAME_SAMPLES {
+        if count(samples)? == FRAME_SAMPLES {
             Ok(())
         } else {
             // A packet that does not hold exactly one 20 ms frame is not one of ours.
@@ -318,6 +372,12 @@ impl Decoder {
     }
 
     /// Decode the frame in `packet` into `pcm`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::FrameLength`] if `pcm` is not exactly [`Channels::frame_len`] samples.
+    /// [`Error::TooLong`] if `packet` is longer than a C `int` can say.
+    /// [`Error::Opus`] if the packet is corrupt or does not hold exactly one 20 ms frame.
     pub fn decode(&mut self, packet: &[u8], pcm: &mut [f32]) -> Result<(), Error> {
         self.decode_raw(Some(packet), false, pcm)
     }
@@ -325,12 +385,21 @@ impl Decoder {
     /// The frame before `next_packet` was lost: rebuild it from the copy `next_packet`
     /// carries. If it carries none, libopus conceals instead. Decode `next_packet` itself
     /// afterwards with [`Decoder::decode`].
+    ///
+    /// # Errors
+    ///
+    /// As for [`Decoder::decode`].
     pub fn decode_fec(&mut self, next_packet: &[u8], pcm: &mut [f32]) -> Result<(), Error> {
         self.decode_raw(Some(next_packet), true, pcm)
     }
 
     /// How many whole frames back the DRED history in `packet` reaches; 0 if it carries
     /// none.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLong`] if `packet` is longer than a C `int` can say.
+    /// [`Error::Opus`] if libopus cannot parse the packet.
     pub fn dred_reach(&mut self, packet: &[u8]) -> Result<u32, Error> {
         let mut dred_end: c_int = 0;
         // SAFETY: both DRED states are live; `packet` is readable for the length given;
@@ -341,17 +410,22 @@ impl Decoder {
                 self.dred.as_ptr(),
                 packet.as_ptr(),
                 len(packet.len())?,
-                SAMPLE_RATE as i32,
-                SAMPLE_RATE as i32,
-                &mut dred_end,
+                RATE,
+                RATE,
+                &raw mut dred_end,
                 0,
             )
         };
-        Ok((check(available)? as usize / FRAME_SAMPLES) as u32)
+        Ok((check(available)? / FRAME).unsigned_abs())
     }
 
     /// Nothing to go on: produce a frame that continues the sound so far, fading out if it
     /// goes on.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::FrameLength`] if `pcm` is not exactly [`Channels::frame_len`] samples.
+    /// [`Error::Opus`] if libopus refuses.
     pub fn conceal(&mut self, pcm: &mut [f32]) -> Result<(), Error> {
         self.decode_raw(None, false, pcm)
     }
@@ -362,6 +436,12 @@ impl Decoder {
     ///
     /// How far a packet's history reaches is the encoder's choice, frame by frame, and is
     /// often much less than [`EncoderConfig::dred_frames`] allows: see [`Decoder::dred_reach`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::FrameLength`] if `pcm` is not exactly [`Channels::frame_len`] samples.
+    /// [`Error::TooLong`] if `later_packet` is longer than a C `int` can say.
+    /// [`Error::Opus`] if libopus cannot parse the packet or rebuild the frame.
     pub fn decode_dred(
         &mut self,
         later_packet: &[u8],
@@ -385,9 +465,9 @@ impl Decoder {
                 len(later_packet.len())?,
                 // Ask for all the history the packet has (up to a second); asking for only
                 // as much as is needed can come back a little short of it.
-                SAMPLE_RATE as i32,
-                SAMPLE_RATE as i32,
-                &mut dred_end,
+                RATE,
+                RATE,
+                &raw mut dred_end,
                 0,
             )
         };
@@ -402,10 +482,10 @@ impl Decoder {
                 self.dred.as_ptr(),
                 offset,
                 pcm.as_mut_ptr(),
-                FRAME_SAMPLES as c_int,
+                FRAME,
             )
         };
-        Ok(check(samples)? as usize == FRAME_SAMPLES)
+        Ok(count(samples)? == FRAME_SAMPLES)
     }
 }
 
@@ -459,6 +539,14 @@ impl Drop for Partial {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "test signals: sample counts and harmonic numbers far below 2^24"
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "one channel decoded as two must be bit-for-bit the same on both sides"
+)]
 mod tests {
     use super::*;
 
@@ -813,7 +901,7 @@ mod tests {
         }
         let averaged: Vec<f32> = pcm
             .chunks_exact(2)
-            .map(|pair| (pair[0] + pair[1]) / 2.0)
+            .map(|pair| f32::midpoint(pair[0], pair[1]))
             .collect();
         let settled = 20 * FRAME_SAMPLES;
         let ratio = energy(&out[settled..]) / energy(&averaged[settled..]);
@@ -880,11 +968,11 @@ mod tests {
 
     #[test]
     fn encoders_and_decoders_can_be_made_and_dropped_freely() {
+        fn is_send<T: Send>() {}
         for _ in 0..50 {
             let _encoder = Encoder::new(EncoderConfig::default()).unwrap();
             let _decoder = Decoder::new(Channels::Mono).unwrap();
         }
-        fn is_send<T: Send>() {}
         is_send::<Encoder>();
         is_send::<Decoder>();
     }

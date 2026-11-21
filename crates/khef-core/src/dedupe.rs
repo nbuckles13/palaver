@@ -23,6 +23,7 @@ pub struct Dedupe<K> {
 
 impl<K: Ord + Clone> Dedupe<K> {
     /// `window` is how many recent groups are remembered per track; at least one.
+    #[must_use]
     pub fn new(window: usize) -> Self {
         Self {
             window: window.max(1),
@@ -73,7 +74,8 @@ impl<K: Ord + Clone> Dedupe<K> {
     }
 
     /// How many objects have been refused as duplicates.
-    pub fn duplicates(&self) -> u64 {
+    #[must_use]
+    pub const fn duplicates(&self) -> u64 {
         self.duplicates
     }
 

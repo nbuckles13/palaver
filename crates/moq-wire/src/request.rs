@@ -41,7 +41,7 @@ pub struct SubscribeOk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestOk {
     pub params: Params,
-    /// Track properties as encoded key-value pairs; empty except when answering TRACK_STATUS.
+    /// Track properties as encoded key-value pairs; empty except when answering `TRACK_STATUS`.
     pub track_properties: Vec<u8>,
 }
 
@@ -66,13 +66,13 @@ pub struct RequestError {
 }
 
 /// Track properties run to the end of the message; check they parse, keep them encoded.
-pub(crate) fn track_properties(body: &mut Reader<'_>) -> Result<Vec<u8>> {
+pub fn track_properties(body: &mut Reader<'_>) -> Result<Vec<u8>> {
     decode_kvps(&mut body.clone())?;
     Ok(body.rest().to_vec())
 }
 
 /// A reason phrase (section 8.5): a length and up to 1024 bytes of text.
-pub(crate) fn encode_reason(reason: &str, out: &mut Vec<u8>) -> Result<()> {
+pub fn encode_reason(reason: &str, out: &mut Vec<u8>) -> Result<()> {
     if reason.len() > MAX_REASON_BYTES {
         return Err(Error::Violation("reason phrase exceeds 1024 bytes"));
     }
@@ -81,12 +81,15 @@ pub(crate) fn encode_reason(reason: &str, out: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn decode_reason(body: &mut Reader<'_>) -> Result<String> {
+pub fn decode_reason(body: &mut Reader<'_>) -> Result<String> {
     let len = body.vi64()?;
     if len > MAX_REASON_BYTES as u64 {
         return Err(Error::Violation("reason phrase exceeds 1024 bytes"));
     }
-    Ok(String::from_utf8_lossy(body.take(len as usize)?).into_owned())
+    Ok(
+        String::from_utf8_lossy(body.take(usize::try_from(len).unwrap_or(usize::MAX))?)
+            .into_owned(),
+    )
 }
 
 impl Subscribe {
@@ -201,6 +204,11 @@ pub enum Message {
 
 impl Message {
     /// Append the whole message, framing included.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`] if a field is over its length limit, a parameter is set
+    /// that the message does not allow, or the body is longer than 65535 bytes.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         let mut body = vec![];
         let ty = match self {
@@ -218,8 +226,13 @@ impl Message {
         encode_frame(ty, &body, out)
     }
 
-    /// Decode a framed message. An unknown message type is a violation: the draft allows no
-    /// control message to be ignored.
+    /// Decode a framed message.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`] if the body is malformed, ends early, or has bytes left
+    /// over. An unknown message type is also a violation: the draft allows no control message
+    /// to be ignored.
     pub fn decode(mut frame: Frame<'_>) -> Result<Self> {
         let message = match frame.ty {
             crate::SETUP => return Setup::decode(frame).map(Self::Setup),
@@ -296,7 +309,7 @@ mod tests {
             }),
             Message::RequestOk(RequestOk {
                 params: Params {
-                    expires: Some(Duration::from_millis(30_000)),
+                    expires: Some(Duration::from_secs(30)),
                     ..Params::default()
                 },
                 track_properties: vec![],

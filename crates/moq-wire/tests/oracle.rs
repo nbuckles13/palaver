@@ -1,4 +1,4 @@
-//! Cross-checks against an independent MoQ codec, moqtap-codec (draft 22).
+//! Cross-checks against an independent `MoQ` codec, moqtap-codec (draft 22).
 //!
 //! For each primitive: our bytes equal theirs, and each side decodes the other's bytes.
 

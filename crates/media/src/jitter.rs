@@ -191,6 +191,7 @@ fn micros(span: Duration) -> i64 {
 }
 
 impl<P: Clone> JitterBuffer<P> {
+    #[must_use]
     pub fn new(config: Config) -> Self {
         let target_frames = config.min_delay_frames.min(config.max_delay_frames);
         Self {
@@ -212,16 +213,19 @@ impl<P: Clone> JitterBuffer<P> {
         }
     }
 
-    pub fn stats(&self) -> Stats {
+    #[must_use]
+    pub const fn stats(&self) -> Stats {
         self.stats
     }
 
     /// The playout delay the buffer is aiming for.
-    pub fn target_delay(&self) -> Duration {
+    #[must_use]
+    pub const fn target_delay(&self) -> Duration {
         self.config.frame.saturating_mul(self.target_frames)
     }
 
     /// How many frames are waiting to be played.
+    #[must_use]
     pub fn depth(&self) -> usize {
         match self.next {
             Some(next) => self.buffer.range(next..).count(),
@@ -482,7 +486,7 @@ impl<P: Clone> JitterBuffer<P> {
         self.conceal(next)
     }
 
-    fn conceal(&mut self, seq: u64) -> Playout<P> {
+    const fn conceal(&mut self, seq: u64) -> Playout<P> {
         self.concealed_in_a_row = self.concealed_in_a_row.saturating_add(1);
         if self.concealed_in_a_row > self.config.max_conceal_frames {
             self.stats.silent = self.stats.silent.saturating_add(1);
@@ -631,10 +635,18 @@ mod tests {
     }
 
     /// A network where every tenth packet takes 150 ms longer than the rest.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "given to `Call::run`, which takes a network that may also lose packets"
+    )]
     fn spiky(seq: u64) -> Option<u64> {
         Some(if seq.is_multiple_of(10) { 180 } else { 30 })
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "given to `Call::run`, which takes a network that may also lose packets"
+    )]
     fn steady(_: u64) -> Option<u64> {
         Some(30)
     }

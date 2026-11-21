@@ -45,6 +45,7 @@ pub type TransactionId = [u8; 12];
 
 /// Whether `packet` is a STUN message and not a QUIC packet. A STUN message starts with
 /// two zero bits and carries the magic bytes; a QUIC packet has one of those two bits set.
+#[must_use]
 pub fn is_stun(packet: &[u8]) -> bool {
     packet.len() >= HEADER
         && packet.first().is_some_and(|first| first & 0xC0 == 0)
@@ -61,6 +62,7 @@ fn header(kind: u16, length: u16, id: &TransactionId) -> Vec<u8> {
 }
 
 /// The question: "what address does this come from?"
+#[must_use]
 pub fn binding_request(id: &TransactionId) -> Vec<u8> {
     header(BINDING_REQUEST, 0, id)
 }
@@ -75,6 +77,7 @@ fn mask(id: &TransactionId) -> [u8; 16] {
 }
 
 /// The answer a server gives: `address` is where the question came from.
+#[must_use]
 pub fn binding_response(id: &TransactionId, address: SocketAddr) -> Vec<u8> {
     let mask = mask(id);
     let (family, ip): (u8, Vec<u8>) = match address.ip() {
@@ -114,6 +117,7 @@ fn address_in(value: &[u8], mask: &[u8; 16]) -> Option<SocketAddr> {
 
 /// The id and the address in a server's answer. `None` for anything else, well formed
 /// or not.
+#[must_use]
 pub fn parse_binding_response(packet: &[u8]) -> Option<(TransactionId, SocketAddr)> {
     if !is_stun(packet) {
         return None;

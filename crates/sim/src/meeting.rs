@@ -1,6 +1,8 @@
-//! A whole meeting in the simulator: every node is a real [`palaver_node::Node`], which is
-//! the real khef and the real control logic driven together, and what crosses the simulated
-//! links is what would cross real ones: MoQ sessions on streams, and datagrams.
+//! A whole meeting in the simulator.
+//!
+//! Every node is a real [`palaver_node::Node`], which is the real khef and the real control
+//! logic driven together, and what crosses the simulated links is what would cross real
+//! ones: `MoQ` sessions on streams, and datagrams.
 //!
 //! The simulator supplies only what the network and the operating system would:
 //!
@@ -93,7 +95,7 @@ pub struct Stats {
     pub reports_published: u64,
     /// Control objects sent over links, each on a stream of its own.
     pub objects_sent: u64,
-    /// Bytes sent on streams: control objects and the MoQ messages around them.
+    /// Bytes sent on streams: control objects and the `MoQ` messages around them.
     pub bytes_sent: u64,
     /// Audio datagrams sent over links.
     pub audio_sent: u64,
@@ -107,7 +109,7 @@ pub struct Stats {
     pub links_made: u64,
     /// Dials that failed.
     pub dials_failed: u64,
-    /// MoQ sessions closed for a protocol error. Always a bug somewhere.
+    /// `MoQ` sessions closed for a protocol error. Always a bug somewhere.
     pub sessions_closed: u64,
 }
 
@@ -145,7 +147,7 @@ fn ordered(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
 }
 
 /// A stream as the other end of the connection names it.
-fn flipped(stream: StreamId) -> StreamId {
+const fn flipped(stream: StreamId) -> StreamId {
     match stream {
         StreamId::Ours(n) => StreamId::Theirs(n),
         StreamId::Theirs(n) => StreamId::Ours(n),
@@ -153,6 +155,7 @@ fn flipped(stream: StreamId) -> StreamId {
 }
 
 impl Meeting {
+    #[must_use]
     pub fn new(seed: u64) -> Option<Self> {
         let world = World::new(seed);
         let jitter = world.rng().derive(u64::MAX);
@@ -174,25 +177,39 @@ impl Meeting {
         })
     }
 
-    pub fn now(&self) -> Timestamp {
+    #[must_use]
+    pub const fn now(&self) -> Timestamp {
         self.world.now()
     }
 
     /// Fingerprint of everything that has happened; equal for equal seeds and inputs.
-    pub fn trace(&self) -> u64 {
+    #[must_use]
+    pub const fn trace(&self) -> u64 {
         self.world.trace()
     }
 
-    pub fn stats(&self) -> Stats {
+    #[must_use]
+    pub const fn stats(&self) -> Stats {
         self.stats
     }
 
     /// The participant id node `node` has, or would have.
+    #[must_use]
     pub fn id_of(node: NodeId) -> ParticipantId {
-        FakeVerifier.participant_id(&FakeIdentity(node as u8).public_key())
+        FakeVerifier.participant_id(&Self::identity(node).public_key())
+    }
+
+    /// The stand-in identity of node `node`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "nodes that can join are below MAX_NODES (256); a higher number has no node, and wraps as it always has"
+    )]
+    const fn identity(node: NodeId) -> FakeIdentity {
+        FakeIdentity(node as u8)
     }
 
     /// The microphone track every simulated node offers.
+    #[must_use]
     pub fn microphone() -> MediaTrack {
         MediaTrack {
             audio: true,
@@ -221,7 +238,7 @@ impl Meeting {
         self.nodes.insert(
             node,
             Member {
-                node: Node::new(config, FakeIdentity(node as u8), FakeVerifier),
+                node: Node::new(config, Self::identity(node), FakeVerifier),
                 links: BTreeMap::new(),
                 kinds: BTreeMap::new(),
                 control_streams: BTreeSet::new(),
@@ -306,15 +323,18 @@ impl Meeting {
     // --- What the tests look at ---
 
     /// The nodes that are running, in order.
+    #[must_use]
     pub fn live(&self) -> Vec<NodeId> {
         self.nodes.keys().copied().collect()
     }
 
+    #[must_use]
     pub fn plan_of(&self, node: NodeId) -> Option<&Plan> {
         self.nodes.get(&node)?.node.plan()
     }
 
     /// The nodes `node` holds a connection to, in order.
+    #[must_use]
     pub fn links_of(&self, node: NodeId) -> Vec<NodeId> {
         self.nodes
             .get(&node)
@@ -323,6 +343,7 @@ impl Meeting {
     }
 
     /// The audio frames `node`'s client was given to play, in order: (alias, frame).
+    #[must_use]
     pub fn heard_by(&self, node: NodeId) -> &[(u64, u64)] {
         self.nodes
             .get(&node)
@@ -331,24 +352,32 @@ impl Meeting {
     }
 
     /// The alias the plan `node` follows gives `speaker`'s microphone.
+    #[must_use]
     pub fn microphone_alias(&self, node: NodeId, speaker: NodeId) -> Option<u64> {
         self.plan_of(node)?
             .alias_of(&Self::microphone().of(Self::id_of(speaker)), &FakeVerifier)
     }
 
     /// The node with this participant id, if it ever joined.
+    #[must_use]
     pub fn node_of(&self, id: &ParticipantId) -> Option<NodeId> {
         self.by_id.get(id).copied()
     }
 
     /// Whether the meeting has settled: every running node follows the same plan, whose
     /// roster is exactly the running nodes; the connections held are exactly the plan's
-    /// peerings; and the audio overlay is one tree over everyone. `Err` says what is not so.
+    /// peerings; and the audio overlay is one tree over everyone.
+    ///
+    /// # Errors
+    ///
+    /// When the meeting has not settled. The message says what is not so.
     pub fn settled(&self) -> Result<&Plan, String> {
-        let mut plans = self
-            .nodes
-            .iter()
-            .map(|(node, member)| member.node.plan().ok_or(format!("node {node} has no plan")));
+        let mut plans = self.nodes.iter().map(|(node, member)| {
+            member
+                .node
+                .plan()
+                .ok_or_else(|| format!("node {node} has no plan"))
+        });
         let plan = plans.next().ok_or("nobody is running")??;
         for other in plans {
             let other = other?;
@@ -362,7 +391,7 @@ impl Meeting {
         let node_of = |id: &ParticipantId| {
             self.node_of(id)
                 .filter(|node| self.nodes.contains_key(node))
-                .ok_or(format!("the plan names {id:?}, which is not running"))
+                .ok_or_else(|| format!("the plan names {id:?}, which is not running"))
         };
         let mut roster = BTreeSet::new();
         for member in &plan.roster {

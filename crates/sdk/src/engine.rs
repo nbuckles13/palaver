@@ -209,7 +209,8 @@ impl Engine {
         }
     }
 
-    pub fn me(&self) -> &ParticipantId {
+    #[must_use]
+    pub const fn me(&self) -> &ParticipantId {
         &self.me
     }
 
@@ -249,6 +250,7 @@ impl Engine {
     }
 
     /// What the node knows of the meeting; changes can be awaited.
+    #[must_use]
     pub fn status(&self) -> watch::Receiver<Status> {
         self.status.clone()
     }
@@ -700,13 +702,12 @@ impl<E: Endpoint> Run<E> {
     }
 
     fn dial(&mut self, peer: ParticipantId) {
-        match self.whereabouts(&peer) {
-            Some(target) => self.attempt(peer, target, true),
-            None => {
-                // The plan names it, so word of where it is is on its way here.
-                let now = self.now();
-                self.awaiting.entry(peer).or_insert(now);
-            }
+        if let Some(target) = self.whereabouts(&peer) {
+            self.attempt(peer, target, true);
+        } else {
+            // The plan names it, so word of where it is is on its way here.
+            let now = self.now();
+            self.awaiting.entry(peer).or_insert(now);
         }
     }
 
@@ -936,7 +937,7 @@ impl<E: Endpoint> Run<E> {
     }
 }
 
-fn role_of(side: Side) -> Role {
+const fn role_of(side: Side) -> Role {
     match side {
         Side::Dialled => Role::Client,
         Side::Accepted => Role::Server,

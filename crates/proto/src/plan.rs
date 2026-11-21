@@ -35,13 +35,19 @@ pub struct PlanStamp {
 }
 
 impl PlanStamp {
-    /// The MoQ group id a plan with this stamp is sent in: term in the high half, so group
+    /// The `MoQ` group id a plan with this stamp is sent in: term in the high half, so group
     /// ids keep rising when the conductor, and so the track's publisher, changes.
+    #[must_use]
     pub fn group_id(self) -> u64 {
         u64::from(self.term) << 32 | u64::from(self.generation)
     }
 
-    pub fn from_group_id(group_id: u64) -> Self {
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "splits the id into its high and low 32 bits; nothing is lost"
+    )]
+    pub const fn from_group_id(group_id: u64) -> Self {
         Self {
             term: (group_id >> 32) as u32,
             generation: group_id as u32,
@@ -58,9 +64,11 @@ pub struct Member {
     pub tracks: Vec<AssignedTrack>,
 }
 
-/// A media track and the alias every khef uses for it: the short number that stands for its
-/// name in each of its objects. The conductor assigns it and nobody else changes it, so a
-/// khef forwards a datagram exactly as it arrived.
+/// A media track and the alias every khef uses for it.
+///
+/// The alias is the short number that stands for the track's name in each of its objects.
+/// The conductor assigns it and nobody else changes it, so a khef forwards a datagram exactly
+/// as it arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignedTrack {
     pub track: MediaTrack,
@@ -201,6 +209,12 @@ impl Plan {
     }
 
     /// Decode a payload. Fields with unknown numbers are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the payload is not well-formed fields, a required field is missing, a field
+    /// has a value that is not allowed, a list is over its limit, two tracks share an alias,
+    /// or an alias is not below the next one to give.
     pub fn decode(payload: &[u8]) -> Result<Self, DecodeError> {
         let (mut conductor, mut stamp, mut audio_top_n) = (None, None, None);
         let (mut next_small_alias, mut next_wide_alias) = (None, None);
@@ -215,13 +229,13 @@ impl Plan {
                 (NEXT_SMALL_ALIAS, Value::Int(v)) => next_small_alias = Some(v),
                 (NEXT_WIDE_ALIAS, Value::Int(v)) => next_wide_alias = Some(v),
                 (MEMBER, Value::Bytes(b)) => {
-                    push(&mut roster, Member::decode(b)?, "too many members")?
+                    push(&mut roster, Member::decode(b)?, "too many members")?;
                 }
                 (PEERING, Value::Bytes(b)) => {
-                    push(&mut peerings, Edge::decode(b)?, "too many peerings")?
+                    push(&mut peerings, Edge::decode(b)?, "too many peerings")?;
                 }
                 (AUDIO_LINK, Value::Bytes(b)) => {
-                    push(&mut audio_overlay, Edge::decode(b)?, "too many audio links")?
+                    push(&mut audio_overlay, Edge::decode(b)?, "too many audio links")?;
                 }
                 (SUCCESSOR, Value::Bytes(b)) => {
                     let id = ParticipantId::new(b).ok_or(DecodeError::Invalid("successor id"))?;
@@ -308,12 +322,16 @@ impl Plan {
         )
     }
 
-    /// Verify and decode an object received on the plan track in group `group_id`. Checks, in
-    /// order: the envelope and payload are well formed; the stamp is the group id; the
-    /// conductor is in the roster; the signature is by the conductor's key.
+    /// Verify and decode an object received on the plan track in group `group_id`.
     ///
     /// This shows the plan is what its conductor issued. Whether that node is entitled to be
     /// conductor is a separate question; see [`Plan::may_replace`].
+    ///
+    /// # Errors
+    ///
+    /// Fails on the first of these checks that does not hold, in order: the envelope and
+    /// payload are well formed; the stamp is the group id; the conductor is in the roster;
+    /// the signature is by the conductor's key.
     pub fn open(
         meeting: &MeetingTag,
         group_id: u64,
@@ -344,13 +362,15 @@ impl Plan {
     /// Whether this plan asks `node` to do anything `previous` did not: whether its own
     /// entries differ. A node for which they do applies the plan and says so at once; the
     /// conductor waits only for those nodes. Everyone else just notes the new plan.
-    pub fn changes_for(&self, previous: &Plan, node: &ParticipantId) -> bool {
+    #[must_use]
+    pub fn changes_for(&self, previous: &Self, node: &ParticipantId) -> bool {
         !self.entries_for(node).eq(previous.entries_for(node))
     }
 
     /// The nodes this plan asks something new of, compared with `previous`: every node at
     /// an end of an edge that was added or removed. Sorted, without duplicates.
-    pub fn changed_nodes(&self, previous: &Plan) -> Vec<ParticipantId> {
+    #[must_use]
+    pub fn changed_nodes(&self, previous: &Self) -> Vec<ParticipantId> {
         let mut out: Vec<ParticipantId> = Vec::new();
         for (new, old) in [
             (&self.peerings, &previous.peerings),
@@ -379,7 +399,8 @@ impl Plan {
     ///
     /// A node with no plan yet (a joiner) has nothing to check against and adopts the first
     /// verified plan it receives.
-    pub fn may_replace(&self, next: &Plan) -> bool {
+    #[must_use]
+    pub fn may_replace(&self, next: &Self) -> bool {
         if next.stamp.term == self.stamp.term {
             next.conductor == self.conductor && next.stamp.generation > self.stamp.generation
         } else if self.stamp.term.checked_add(1) == Some(next.stamp.term) {
@@ -527,7 +548,7 @@ mod tests {
         let envelope = plan.seal(&meeting(), &FakeIdentity(1));
         assert_eq!(
             Plan::open(&meeting(), group, &envelope, &FakeVerifier),
-            Ok(plan.clone())
+            Ok(plan)
         );
 
         let mut altered = envelope.clone();

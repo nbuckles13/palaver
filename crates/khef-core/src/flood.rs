@@ -100,12 +100,11 @@ impl<K: Ord + Clone, N: Ord + Clone> Flood<K, N> {
                 self.stale = self.stale.saturating_add(1);
                 return Offer::Stale;
             }
-            Some(_) => {}
             None if self.tracks.len() >= self.max_tracks && !self.make_room(now) => {
                 self.refused = self.refused.saturating_add(1);
                 return Offer::Full;
             }
-            None => {}
+            Some(_) | None => {}
         }
         let expires = (self.lifetime)(track).map(|lifetime| now.saturating_add(lifetime));
         self.tracks.insert(
@@ -188,17 +187,20 @@ impl<K: Ord + Clone, N: Ord + Clone> Flood<K, N> {
     }
 
     /// How many tracks are remembered, expired ones included; never more than the cap.
+    #[must_use]
     pub fn tracks(&self) -> usize {
         self.tracks.len()
     }
 
     /// How many offers were dropped as not newer.
-    pub fn stale(&self) -> u64 {
+    #[must_use]
+    pub const fn stale(&self) -> u64 {
         self.stale
     }
 
     /// How many offers were dropped for lack of room.
-    pub fn refused(&self) -> u64 {
+    #[must_use]
+    pub const fn refused(&self) -> u64 {
         self.refused
     }
 }

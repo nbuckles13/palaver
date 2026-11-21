@@ -183,7 +183,23 @@ ownership, which Palaver does not have. The families and the lessons transfer:
    `Serialize` and a `Debug` that prints a fixed placeholder, so structs holding one can still
    derive `Debug`; addresses and names live in a wrapper (`proto::Redacted`) that redacts by
    default. Reading either is an explicit call (`expose`, `reveal`), which is the audit surface.
-2. **Clippy configuration.** Deny `unwrap`/`expect`/`panic` outside tests, everywhere, including
+2. **Clippy configuration.** Nearly every lint clippy has is on: the `pedantic`, `nursery`
+   and `cargo` groups, as warnings, which CI turns into errors.
+   - *Off for the workspace*, each with its reason in `Cargo.toml`: `multiple_crate_versions`
+     (our dependencies' choice; `cargo deny` watches it), `option_if_let_else` (asks for
+     two closures where two branches read better), and `suboptimal_flops` and
+     `imprecise_flops` (they ask for `mul_add`, `hypot` and the like, whose results differ
+     by machine; the same input must give the same output everywhere). **Do not apply
+     clippy's automatic fixes for float arithmetic.**
+   - *Anywhere else* a lint is set aside, it is with `#[expect(..., reason = "...")]` on the
+     smallest item that needs it, never for a whole crate outside tests. `#[allow]` is
+     itself denied: an `expect` that no longer excuses anything is reported, so none
+     outlives its cause. Numeric casts are the usual case: a lossless or checked
+     conversion where one exists, an `expect` with the reason where the cast is the
+     intent.
+   - Code is formatted with `cargo fmt` before every commit; CI refuses anything else.
+
+   Further: Deny `unwrap`/`expect`/`panic` outside tests, everywhere, including
    crates that wrap C: every C return code becomes a `Result`. `unsafe` is forbidden outside
    those crates; inside them each `unsafe` block needs a safety comment, there is one small crate
    per C library exposing only a safe API, callbacks invoked from C catch panics, and the

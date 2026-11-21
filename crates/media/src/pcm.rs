@@ -19,12 +19,18 @@ use palaver_opus::{Channels, SAMPLE_RATE};
 use std::collections::VecDeque;
 
 /// A 16-bit sample as the pipeline's float, between -1 and 1.
+#[must_use]
 pub fn from_i16(sample: i16) -> f32 {
     f32::from(sample) / 32768.0
 }
 
 /// The pipeline's float as a 16-bit sample. Anything outside -1 to 1 is held at the end
 /// of the range rather than wrapped round.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "rounded and clamped to the range of i16 before the cast; not-a-number becomes 0"
+)]
 pub fn to_i16(sample: f32) -> i16 {
     (sample * 32768.0).round().clamp(-32768.0, 32767.0) as i16
 }
@@ -104,6 +110,7 @@ pub struct Capture {
 impl Capture {
     /// Frames of `channels` from a device of `format`. `None` if the format has no
     /// channels or no rate.
+    #[must_use]
     pub fn new(format: Format, channels: Channels) -> Option<Self> {
         if format.channels == 0 {
             return None;
@@ -118,6 +125,10 @@ impl Capture {
 
     /// Take what the device captured: its channels interleaved. A trailing part of a
     /// sample group is dropped.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a device's channel count, at most 65 535, is exact as an f32"
+    )]
     pub fn push(&mut self, interleaved: &[f32]) {
         let groups = interleaved.chunks_exact(self.device_channels);
         match self.lanes.as_mut_slice() {
@@ -154,6 +165,7 @@ impl Capture {
     }
 
     /// How much sound waits for a frame's worth to gather, in samples per channel.
+    #[must_use]
     pub fn waiting(&self) -> usize {
         self.ready.len() / self.channels.count()
     }
@@ -182,6 +194,7 @@ impl Playback {
     /// Frames of `channels` to a device of `format`. `limit_ms` is how much sound may
     /// wait for the device at the most; a frame that would take it past that pushes the
     /// oldest out. `None` if the format has no channels or no rate.
+    #[must_use]
     pub fn new(format: Format, channels: Channels, limit_ms: u32) -> Option<Self> {
         if format.channels == 0 || format.rate == 0 {
             return None;
@@ -236,7 +249,7 @@ impl Playback {
                 continue;
             };
             match group {
-                [only] => *only = (left + right) / 2.0,
+                [only] => *only = f32::midpoint(left, right),
                 [first, second, rest @ ..] => {
                     *first = left;
                     *second = right;
@@ -248,18 +261,28 @@ impl Playback {
     }
 
     /// How much sound waits for the device, in samples per channel at its rate.
+    #[must_use]
     pub fn waiting(&self) -> usize {
         self.ready.len() / self.channels.count()
     }
 
     /// Samples asked for that could not be given, and samples dropped for being late;
     /// both per channel.
-    pub fn starved_and_dropped(&self) -> (u64, u64) {
+    #[must_use]
+    pub const fn starved_and_dropped(&self) -> (u64, u64) {
         (self.starved, self.dropped)
     }
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "test samples are small whole numbers, exact as f32"
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "samples copied or converted exactly must come back bit for bit"
+)]
 mod tests {
     use super::*;
     use palaver_opus::FRAME_SAMPLES;

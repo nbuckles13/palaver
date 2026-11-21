@@ -17,12 +17,14 @@ pub const C_WRAPPERS: &[&str] = &["crates/opus/"];
 
 // Built in pieces so that this file does not contain what it searches for.
 const KEYWORD: &str = concat!("un", "safe");
-const ALLOW: &str = concat!("allow(un", "safe_code)");
+const ALLOW: &str = concat!("allow(un", "safe_code");
+const EXPECT: &str = concat!("expect(un", "safe_code");
 
-/// Whether a line of Rust uses the keyword or allows the lint. Comments do not count.
+/// Whether a line of Rust uses the keyword or sets the lint aside, with `allow` or with
+/// `expect`. Comments do not count.
 fn uses_it(line: &str) -> bool {
     let code = line.split("//").next().unwrap_or_default();
-    if code.contains(ALLOW) {
+    if code.contains(ALLOW) || code.contains(EXPECT) {
         return true;
     }
     // The keyword as a word of its own: `x_unsafe` and `unsafety` are not it.
@@ -40,6 +42,7 @@ fn uses_it(line: &str) -> bool {
 }
 
 /// `files` maps path to content. `wrappers` are the directories allowed to hold unsafe code.
+#[must_use]
 pub fn violations(files: &BTreeMap<String, String>, wrappers: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     for (path, text) in files {
@@ -107,13 +110,15 @@ mod tests {
     }
 
     #[test]
-    fn allowing_the_lint_outside_a_wrapper_is_caught() {
-        let text = format!("#![{ALLOW}]\n");
-        let f = files(&[
-            ("crates/opus/src/lib.rs", &block()),
-            ("crates/net/src/lib.rs", &text),
-        ]);
-        assert_eq!(violations(&f, &["crates/opus/"]).len(), 1);
+    fn setting_the_lint_aside_outside_a_wrapper_is_caught() {
+        for how in [ALLOW, EXPECT] {
+            let text = format!("#![{how}, reason = \"none\")]\n");
+            let f = files(&[
+                ("crates/opus/src/lib.rs", &block()),
+                ("crates/net/src/lib.rs", &text),
+            ]);
+            assert_eq!(violations(&f, &["crates/opus/"]).len(), 1, "{how}");
+        }
     }
 
     #[test]

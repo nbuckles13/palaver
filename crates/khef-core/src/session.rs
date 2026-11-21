@@ -1,4 +1,4 @@
-//! One MoQ session between two khefs: set-up and the requests that announce tracks.
+//! One `MoQ` session between two khefs: set-up and the requests that announce tracks.
 //!
 //! Sans-IO. The caller owns the connection and tells the session what arrives on which
 //! stream; the session says what to open, send and close ([`Action`]) and what happened
@@ -10,7 +10,7 @@
 //!
 //! The two requests khefs use with each other:
 //!
-//! - SUBSCRIBE_TRACKS: "announce to me every track under this prefix";
+//! - `SUBSCRIBE_TRACKS`: "announce to me every track under this prefix";
 //! - PUBLISH: "here is a track, and the alias its objects will carry". The alias is a
 //!   short number standing for the track's name on the wire. The khef supplies it, the same
 //!   one for a track on every link of the meeting.
@@ -53,7 +53,7 @@ pub enum CloseCode {
 pub const NOT_SUPPORTED: u64 = 0x3;
 pub const UNINTERESTED: u64 = 0x20;
 pub const PREFIX_OVERLAP: u64 = 0x30;
-/// PUBLISH_DONE status: the track is no longer being published (section 12.4).
+/// `PUBLISH_DONE` status: the track is no longer being published (section 12.4).
 pub const TRACK_ENDED: u64 = 0x2;
 
 /// Most bytes buffered for one stream while waiting for the rest of a message: the longest
@@ -169,9 +169,9 @@ pub enum DatagramIn<'a> {
 /// A request the peer made, by the stream it arrived on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Incoming {
-    /// SUBSCRIBE_TRACKS, not yet answered.
+    /// `SUBSCRIBE_TRACKS`, not yet answered.
     TracksPending { prefix: Namespace },
-    /// SUBSCRIBE_TRACKS, accepted.
+    /// `SUBSCRIBE_TRACKS`, accepted.
     Tracks { prefix: Namespace },
     /// PUBLISH, accepted: we receive the track.
     Track { alias: u64 },
@@ -197,7 +197,7 @@ struct Inbound {
     finished: bool,
 }
 
-/// One MoQ session.
+/// One `MoQ` session.
 #[derive(Debug)]
 pub struct Session {
     role: Role,
@@ -228,7 +228,8 @@ fn overlaps(a: &Namespace, b: &Namespace) -> bool {
 
 impl Session {
     /// `setup` is what this side announces about itself.
-    pub fn new(role: Role, setup: Setup) -> Self {
+    #[must_use]
+    pub const fn new(role: Role, setup: Setup) -> Self {
         Self {
             role,
             ours: setup,
@@ -263,15 +264,18 @@ impl Session {
     }
 
     /// Whether both SETUPs have been exchanged and the session is open.
-    pub fn is_ready(&self) -> bool {
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
         self.started && self.theirs.is_some() && !self.closed
     }
 
-    pub fn is_closed(&self) -> bool {
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
         self.closed
     }
 
     /// The Palaver extension version both sides speak, once ready.
+    #[must_use]
     pub fn palaver_version(&self) -> Option<u64> {
         negotiated_palaver_version(&self.ours, self.theirs.as_ref()?)
     }
@@ -608,7 +612,7 @@ impl Session {
         Some(stream)
     }
 
-    fn take_request_id(&mut self) -> u64 {
+    const fn take_request_id(&mut self) -> u64 {
         let id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(2);
         id

@@ -28,6 +28,7 @@ pub const MAX_AUDIO_DEGREE: usize = 4;
 /// Peerings every node is given where the graph allows.
 pub const MIN_PEERINGS: usize = 2;
 /// A node with this many peerings is passed over for extra ones while another will do.
+///
 /// Otherwise the node everyone joined through, to which they all hold a link that is up,
 /// would be everyone's second peering and carry the whole control flood.
 pub const BUSY_PEERINGS: usize = 6;
@@ -280,6 +281,7 @@ fn edges(pairs: BTreeSet<Pair>) -> Vec<Edge> {
 }
 
 /// Compute the peerings and the audio tree.
+#[must_use]
 pub fn wire(input: &Input) -> Wiring {
     let graph = Graph::new(input);
     let root = input
@@ -585,12 +587,7 @@ mod tests {
             ..Input::default()
         });
         // Node 2 is a child of the root with children of its own.
-        let children: Vec<&Edge> = before
-            .audio_overlay
-            .iter()
-            .filter(|e| e.0 == id(2))
-            .collect();
-        assert!(!children.is_empty());
+        assert!(before.audio_overlay.iter().any(|e| e.0 == id(2)));
         let left: Vec<ParticipantId> = members.into_iter().filter(|m| *m != id(2)).collect();
         let after = rewire(
             &before,

@@ -22,13 +22,16 @@
 //!   below full scale (speech is around -30 to -15; a quiet room around -60);
 //! - how many frames the microphone has given in all. Fifty a second is right. More means
 //!   the microphone runs faster than the clock, and what is played falls behind and loses
-//!   pieces (seen through WSLg: up to 55 a second);
+//!   pieces (seen through `WSLg`: up to 55 a second);
 //! - how the frames played were made, the jitter buffer's delay and its counts;
 //! - whether the speaker ran dry or fell behind.
 
 // This runs against real devices, which keep real time: the one place outside the e2e
 // crate where a real sleep is the right thing.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "this runs against real devices, which keep real time"
+)]
 
 use palaver_media::jitter::Config as JitterConfig;
 use palaver_media::level::audio_level;
@@ -61,7 +64,7 @@ fn say(what: &str, device: &Device) {
 
 /// `pcm` as a 16-bit WAV file.
 fn save(name: &str, pcm: &[f32], channels: Channels) -> Result<(), String> {
-    let count = channels.count() as u16;
+    let count = u16::try_from(channels.count()).unwrap_or(u16::MAX);
     let data = u32::try_from(pcm.len().saturating_mul(2)).map_err(|_| "too long to save")?;
     let mut bytes = Vec::with_capacity(pcm.len().saturating_mul(2).saturating_add(44));
     bytes.extend_from_slice(b"RIFF");
@@ -127,13 +130,12 @@ fn run(options: Options) -> Result<(), String> {
     let mut captured = vec![0.0; channels.frame_len()];
     let mut played = vec![0.0; channels.frame_len()];
     let (mut all_captured, mut all_cleaned, mut all_played) = (Vec::new(), Vec::new(), Vec::new());
-    let started = Instant::now();
+    let began = Instant::now();
     let (mut frames, mut sent) = (0u64, 0u64);
     let mut second = Second::default();
     for tick in 0..options.seconds.saturating_mul(50) {
-        let now = Timestamp::from_micros(
-            u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-        );
+        let now =
+            Timestamp::from_micros(u64::try_from(began.elapsed().as_micros()).unwrap_or(u64::MAX));
         // The microphone's clock is not this loop's: take whatever has gathered.
         while microphone.pop(&mut captured) {
             frames = frames.saturating_add(1);
@@ -192,7 +194,7 @@ fn run(options: Options) -> Result<(), String> {
             second = Second::default();
         }
         let next = FRAME.saturating_mul(u32::try_from(tick.saturating_add(1)).unwrap_or(u32::MAX));
-        std::thread::sleep(next.saturating_sub(started.elapsed()));
+        std::thread::sleep(next.saturating_sub(began.elapsed()));
     }
     if options.save {
         save("loopback-captured.wav", &all_captured, channels)?;

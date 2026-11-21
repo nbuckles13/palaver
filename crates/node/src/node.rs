@@ -56,7 +56,7 @@ struct LinkInfo {
 }
 
 /// How long the khef keeps the latest object of a control track.
-fn control_lifetime(track: &Track) -> Option<Duration> {
+const fn control_lifetime(track: &Track) -> Option<Duration> {
     match track {
         Track::Report { .. } => Some(REPORT_TIMEOUT),
         _ => None,
@@ -144,16 +144,16 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
     // --- What the caller can ask ---
 
     /// This node's participant id.
-    pub fn me(&self) -> &ParticipantId {
+    pub const fn me(&self) -> &ParticipantId {
         self.control.me()
     }
 
     /// The plan this node follows, once it has one.
-    pub fn plan(&self) -> Option<&Plan> {
+    pub const fn plan(&self) -> Option<&Plan> {
         self.control.plan()
     }
 
-    pub fn is_conductor(&self) -> bool {
+    pub const fn is_conductor(&self) -> bool {
         self.control.is_conductor()
     }
 
@@ -174,7 +174,7 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
             .map_or_else(BTreeSet::new, |plan| Self::planned_peers(plan, self.me()))
     }
 
-    pub fn counters(&self) -> Counters {
+    pub const fn counters(&self) -> Counters {
         self.counters
     }
 

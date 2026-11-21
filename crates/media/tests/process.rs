@@ -6,7 +6,11 @@
 //! from a steady pitch with harmonics it learns almost nothing (measured: 3 dB taken out,
 //! against 40 dB of this). Real voices are broadband.
 
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "test signals: sample counts, the sample rate and 24-bit noise are exact as f32"
+)]
 
 use palaver_media::process::{Processor, Settings, WrongLength};
 use palaver_media::synthetic::{Voice, hears, pitch_of, strength};

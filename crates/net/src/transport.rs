@@ -1,7 +1,7 @@
 //! The boundary every transport is written to.
 //!
 //! An [`Endpoint`] is a node's presence on a network: it dials others by key and accepts
-//! those who dial it. A [`Connection`] offers what MoQ asks of QUIC: one-way streams,
+//! those who dial it. A [`Connection`] offers what `MoQ` asks of QUIC: one-way streams,
 //! two-way streams, and datagrams. The shapes follow QUIC's so that the QUIC transport is a
 //! thin layer; the in-memory transport ([`crate::memory`]) keeps the same promises without
 //! a socket.
@@ -35,7 +35,8 @@ pub struct Peer {
 
 impl Peer {
     /// A peer known by key alone.
-    pub fn by_key(key: PublicKey) -> Self {
+    #[must_use]
+    pub const fn by_key(key: PublicKey) -> Self {
         Self {
             key,
             addresses: Vec::new(),
@@ -183,6 +184,11 @@ pub trait Connection: Clone + Send + Sync + 'static {
     fn accept_bidi(&self) -> impl Future<Output = Result<(Self::Send, Self::Recv), Closed>> + Send;
 
     /// Send a datagram. `Ok` means it was handed to the path, not that it will arrive.
+    ///
+    /// # Errors
+    ///
+    /// When the datagram is larger than [`Connection::max_datagram_size`], or the
+    /// connection is closed.
     fn send_datagram(&self, datagram: Bytes) -> Result<(), DatagramError>;
 
     /// The next datagram to arrive.

@@ -26,20 +26,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
-/// How often a node repeats its report when nothing has changed. A safety net only: changes
-/// are reported at once, and whether a node is still there is judged from its links, which
-/// its neighbours watch, not from this.
+/// How often a node repeats its report when nothing has changed.
+///
+/// A safety net only: changes are reported at once, and whether a node is still there is
+/// judged from its links, which its neighbours watch, not from this.
 pub const REPORT_REFRESH: Duration = Duration::from_secs(30);
-/// The least time between two reports from a node. A change is reported at once unless a
-/// report went out less than this long ago; then it waits, and several changes share one
-/// report. Without it every plan makes every node report at once, and each of those reports
-/// floods to every node.
+/// The least time between two reports from a node.
+///
+/// A change is reported at once unless a report went out less than this long ago; then it
+/// waits, and several changes share one report. Without it every plan makes every node report
+/// at once, and each of those reports floods to every node.
 pub const REPORT_MIN_GAP: Duration = Duration::from_millis(200);
 /// A report older than this is not believed any more: its node missed three refreshes. This
 /// catches a node whose connections are alive but which has stopped working.
 pub const REPORT_TIMEOUT: Duration = Duration::from_secs(100);
-/// How long the conductor keeps a node in the roster after it stops being reachable, so
-/// that a link which drops and comes straight back, or a node moving from one link to
+/// How long the conductor keeps a node in the roster after it stops being reachable.
+///
+/// With it, a link which drops and comes straight back, or a node moving from one link to
 /// another, does not cost two plans.
 pub const DROP_HOLD: Duration = Duration::from_millis(500);
 /// The term of a meeting's first conductor, its creator.
@@ -177,7 +180,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
     /// Become the conductor of a new meeting: this node created it. The first plan, term
     /// [`FIRST_TERM`] with a roster of one, comes from the next [`Node::poll`]. Returns
     /// `false`, and does nothing, if the node already follows a plan.
-    pub fn create_meeting(&mut self) -> bool {
+    pub const fn create_meeting(&mut self) -> bool {
         if self.plan.is_some() {
             return false;
         }
@@ -189,7 +192,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
     }
 
     /// Whether this node is the conductor.
-    pub fn is_conductor(&self) -> bool {
+    pub const fn is_conductor(&self) -> bool {
         self.conducting.is_some()
     }
 
@@ -209,19 +212,19 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         self.plan = Some(next);
     }
 
-    fn mark_stale(&mut self) {
+    const fn mark_stale(&mut self) {
         if let Some(conducting) = &mut self.conducting {
             conducting.stale = true;
         }
     }
 
     /// This node's participant id.
-    pub fn me(&self) -> &ParticipantId {
+    pub const fn me(&self) -> &ParticipantId {
         &self.me
     }
 
     /// The plan this node follows, once it has one.
-    pub fn plan(&self) -> Option<&Plan> {
+    pub const fn plan(&self) -> Option<&Plan> {
         self.plan.as_ref()
     }
 
@@ -349,7 +352,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             let mine: &[Link] = if *node == self.me {
                 &self.view.links
             } else {
-                reports.get(node).map(|r| r.links.as_slice()).unwrap_or(&[])
+                reports.get(node).map_or(&[], |r| r.links.as_slice())
             };
             mine.iter()
                 .map(|link| &link.peer)
@@ -398,6 +401,65 @@ impl<S: Signer, V: Verifier> Node<S, V> {
             self.lost.remove(&id);
             self.connected.remove(&id);
         }
+    }
+
+    /// Give every track on offer in `roster` an alias, and return the next small and the next
+    /// wide alias to give.
+    ///
+    /// A track keeps the alias it has; a new one takes the next: a small alias for audio,
+    /// whose packets are small, a wide one otherwise. An alias is never given twice, even
+    /// after its track or its member has gone.
+    fn assign_aliases(
+        &self,
+        roster: &mut [(ParticipantId, Member, Vec<MediaTrack>)],
+    ) -> (u64, u64) {
+        let held_tracks: BTreeMap<ParticipantId, &[AssignedTrack]> = self
+            .plan
+            .iter()
+            .flat_map(|held| &held.roster)
+            .map(|member| {
+                (
+                    self.verifier.participant_id(&member.key),
+                    member.tracks.as_slice(),
+                )
+            })
+            .collect();
+        let (mut next_small_alias, mut next_wide_alias) = match &self.plan {
+            Some(held) => (held.next_small_alias, held.next_wide_alias),
+            None => (0, WIDE_ALIAS_START),
+        };
+        for (id, member, offered) in roster {
+            let held = held_tracks.get(id).copied().unwrap_or(&[]);
+            for track in offered.iter() {
+                if member
+                    .tracks
+                    .iter()
+                    .any(|assigned| assigned.track == *track)
+                {
+                    continue; // offered twice
+                }
+                let alias =
+                    if let Some(assigned) = held.iter().find(|assigned| assigned.track == *track) {
+                        assigned.alias
+                    } else {
+                        // When the small ones run out, audio takes wide ones too.
+                        let small = track.audio && next_small_alias < WIDE_ALIAS_START;
+                        let next = if small {
+                            &mut next_small_alias
+                        } else {
+                            &mut next_wide_alias
+                        };
+                        let alias = *next;
+                        *next = next.saturating_add(1);
+                        alias
+                    };
+                member.tracks.push(AssignedTrack {
+                    track: track.clone(),
+                    alias,
+                });
+            }
+        }
+        (next_small_alias, next_wide_alias)
     }
 
     /// The plan the conductor would issue at `now`, with the stamp left for the caller: the
@@ -452,55 +514,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
         unreachable
             .retain(|pair| !self.lost.contains_key(&pair.0) && !self.lost.contains_key(&pair.1));
         roster.sort_by(|a, b| a.0.cmp(&b.0));
-        // Every track on offer gets an alias. A track keeps the one it has; a new one takes
-        // the next: a small alias for audio, whose packets are small, a wide one otherwise.
-        // An alias is never given twice, even after its track or its member has gone.
-        let held_tracks: BTreeMap<ParticipantId, &[AssignedTrack]> = self
-            .plan
-            .iter()
-            .flat_map(|held| &held.roster)
-            .map(|member| {
-                (
-                    self.verifier.participant_id(&member.key),
-                    member.tracks.as_slice(),
-                )
-            })
-            .collect();
-        let (mut next_small_alias, mut next_wide_alias) = match &self.plan {
-            Some(held) => (held.next_small_alias, held.next_wide_alias),
-            None => (0, WIDE_ALIAS_START),
-        };
-        for (id, member, offered) in &mut roster {
-            let held = held_tracks.get(id).copied().unwrap_or(&[]);
-            for track in offered.iter() {
-                if member
-                    .tracks
-                    .iter()
-                    .any(|assigned| assigned.track == *track)
-                {
-                    continue; // offered twice
-                }
-                let alias = match held.iter().find(|assigned| assigned.track == *track) {
-                    Some(assigned) => assigned.alias,
-                    None => {
-                        // When the small ones run out, audio takes wide ones too.
-                        let small = track.audio && next_small_alias < WIDE_ALIAS_START;
-                        let next = if small {
-                            &mut next_small_alias
-                        } else {
-                            &mut next_wide_alias
-                        };
-                        let alias = *next;
-                        *next = next.saturating_add(1);
-                        alias
-                    }
-                };
-                member.tracks.push(AssignedTrack {
-                    track: track.clone(),
-                    alias,
-                });
-            }
-        }
+        let (next_small_alias, next_wide_alias) = self.assign_aliases(&mut roster);
         let (previous_peerings, previous_audio_overlay) = match &self.plan {
             Some(held) => (held.peerings.clone(), held.audio_overlay.clone()),
             None => (Vec::new(), Vec::new()),
@@ -660,7 +674,7 @@ impl<S: Signer, V: Verifier> Node<S, V> {
     }
 
     /// This node's links and addresses, as last set.
-    pub fn view(&self) -> &LocalView {
+    pub const fn view(&self) -> &LocalView {
         &self.view
     }
 }
@@ -1386,9 +1400,9 @@ mod tests {
         let mut joined = vec![];
         for (i, seed) in (2..=12u8).enumerate() {
             let now = at(300 * (i as u64 + 1));
-            let mut joiner = node(seed);
-            links(&mut joiner, &[1]);
-            report(&mut joiner, &mut c, now);
+            let mut newcomer = node(seed);
+            links(&mut newcomer, &[1]);
+            report(&mut newcomer, &mut c, now);
             joined.push(seed);
             links(&mut c, &joined);
             let next = issued(c.poll(now));

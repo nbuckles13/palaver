@@ -13,9 +13,10 @@ const DEFAULT_PRIORITY: u64 = 0x08;
 const STATUS: u64 = 0x20;
 const KNOWN_FLAGS: u64 = PROPERTIES | END_OF_GROUP | ZERO_OBJECT_ID | DEFAULT_PRIORITY | STATUS;
 
-/// Our object property carrying the speech level of an audio frame, 0 (silent) to 127. It is
-/// in the range the draft reserves for applications (0x78 to 0x7F), and even, so its value is
-/// one integer. Top-N audio selection reads it.
+/// Our object property carrying the speech level of an audio frame, 0 (silent) to 127.
+///
+/// It is in the range the draft reserves for applications (0x78 to 0x7F), and even, so its
+/// value is one integer. Top-N audio selection reads it.
 pub const PROPERTY_AUDIO_LEVEL: u64 = 0x78;
 
 /// Why an object has no payload (section 11.1.1).
@@ -30,7 +31,7 @@ pub enum ObjectStatus {
 }
 
 impl ObjectStatus {
-    pub(crate) fn code(self) -> u64 {
+    pub(crate) const fn code(self) -> u64 {
         match self {
             Self::Normal => 0x0,
             Self::EndOfGroup => 0x3,
@@ -38,7 +39,7 @@ impl ObjectStatus {
         }
     }
 
-    pub(crate) fn from_code(code: u64) -> Result<Self> {
+    pub(crate) const fn from_code(code: u64) -> Result<Self> {
         match code {
             0x0 => Ok(Self::Normal),
             0x3 => Ok(Self::EndOfGroup),
@@ -85,6 +86,11 @@ impl<'a> Datagram<'a> {
     }
 
     /// Append everything except the payload. For a status datagram this is the whole thing.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`], appending nothing, if a status datagram is marked end
+    /// of group, or a status other than normal has properties.
     pub fn encode_header(&self, out: &mut Vec<u8>) -> Result<()> {
         self.check()?;
         let mut flags = 0;
@@ -123,6 +129,10 @@ impl<'a> Datagram<'a> {
     }
 
     /// Append the whole datagram.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Datagram::encode_header`] does.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         self.encode_header(out)?;
         if let ObjectBody::Payload(payload) = self.body {
@@ -131,8 +141,14 @@ impl<'a> Datagram<'a> {
         Ok(())
     }
 
-    /// Decode a whole datagram. A datagram is complete by definition, so running out of bytes
-    /// is a violation, never "need more".
+    /// Decode a whole datagram.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Error::Violation`] on an unknown datagram type, a status marked end of
+    /// group or followed by a payload, an unknown status, malformed or misplaced properties,
+    /// or a datagram that ends early. A datagram is complete by definition, so running out of
+    /// bytes is a violation, never "need more".
     pub fn decode(datagram: &'a [u8]) -> Result<Self> {
         let mut outer = Reader::new(datagram);
         let mut r = outer.sub(datagram.len())?;
@@ -193,6 +209,10 @@ impl<'a> Datagram<'a> {
 
 /// The value of the first integer property of type `ty` in encoded properties, without
 /// allocating. `Ok(None)` if there is none.
+///
+/// # Errors
+///
+/// Fails if a malformed pair is reached before the search ends.
 pub fn int_property(properties: &[u8], ty: u64) -> Result<Option<u64>> {
     let mut outer = Reader::new(properties);
     for pair in KvpIter::new(outer.sub(properties.len())?) {

@@ -1,4 +1,4 @@
-//! The khef: the MoQ relay inside every node.
+//! The khef: the `MoQ` relay inside every node.
 //!
 //! One [`Khef`] holds a [`Session`] and a [`LinkWatch`] for each neighbour and does three
 //! things across them:
@@ -140,6 +140,7 @@ pub struct Khef<N> {
 }
 
 impl<N: Ord + Clone> Khef<N> {
+    #[must_use]
     pub fn new(config: KhefConfig) -> Self {
         let control_prefix = config.meeting.control_prefix();
         let audio_prefix = config.meeting.audio_prefix(Source::Main);
@@ -168,6 +169,7 @@ impl<N: Ord + Clone> Khef<N> {
     }
 
     /// The latest object held for a control track.
+    #[must_use]
     pub fn latest_control(&self, track: &Track, now: Timestamp) -> Option<(u64, &[u8])> {
         self.flood.latest(track, now)
     }
@@ -175,6 +177,10 @@ impl<N: Ord + Clone> Khef<N> {
     // --- Links ---
 
     /// A connection to `peer` is up. `role` says which side dialled.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the khef keeps `peer` as the link's key, and callers in other crates pass it by value"
+    )]
     pub fn link_up(&mut self, peer: N, role: Role, now: Timestamp) {
         if self.links.contains_key(&peer) {
             return;
@@ -264,6 +270,7 @@ impl<N: Ord + Clone> Khef<N> {
     }
 
     /// When to call [`Khef::poll`] next if nothing else happens. `None` with no links.
+    #[must_use]
     pub fn next_wake(&self) -> Option<Timestamp> {
         self.links.values().map(|link| link.watch.next_wake()).min()
     }
@@ -292,6 +299,10 @@ impl<N: Ord + Clone> Khef<N> {
     }
 
     /// Send a control object to `peer`, announcing its track first if need be.
+    #[expect(
+        clippy::set_contains_or_insert,
+        reason = "the alias is recorded only after the announcement is sent; the early returns between must leave it out"
+    )]
     fn send_control(&mut self, peer: &N, track: &Track, group: u64, payload: &[u8]) {
         let Some(link) = self.links.get_mut(peer) else {
             return;

@@ -1,4 +1,4 @@
-//! The encoding of control-plane structures: numbered fields as MoQ key-value pairs.
+//! The encoding of control-plane structures: numbered fields as `MoQ` key-value pairs.
 //!
 //! An even field number carries an integer, an odd one carries bytes; a nested structure is a
 //! bytes field holding more pairs; a repeated field is the same number several times. A reader
@@ -27,7 +27,7 @@ pub enum DecodeError {
 /// Collects fields and encodes them in ascending number order, keeping repeats in the order
 /// they were added.
 #[derive(Default)]
-pub(crate) struct Writer<'a> {
+pub struct Writer<'a> {
     pairs: Vec<Kvp<'a>>,
 }
 
@@ -61,14 +61,14 @@ impl<'a> Writer<'a> {
 }
 
 /// Iterate the fields of an encoded structure.
-pub(crate) fn fields(bytes: &[u8]) -> impl Iterator<Item = Result<Kvp<'_>, DecodeError>> {
+pub fn fields(bytes: &[u8]) -> impl Iterator<Item = Result<Kvp<'_>, DecodeError>> {
     let mut outer = Reader::new(bytes);
     let region = outer.sub(bytes.len()).unwrap_or_else(|_| Reader::new(&[]));
     KvpIter::new(region).map(|pair| pair.map_err(|_| DecodeError::Malformed))
 }
 
 /// Push onto a repeated field, refusing more than [`MAX_ENTRIES`].
-pub(crate) fn push<T>(list: &mut Vec<T>, item: T, what: &'static str) -> Result<(), DecodeError> {
+pub fn push<T>(list: &mut Vec<T>, item: T, what: &'static str) -> Result<(), DecodeError> {
     if list.len() >= MAX_ENTRIES {
         return Err(DecodeError::Invalid(what));
     }

@@ -54,7 +54,8 @@ pub enum Network {
 
 impl Network {
     /// The address to give others beyond the node's own, if there is one.
-    pub fn public_address(&self) -> Option<SocketAddr> {
+    #[must_use]
+    pub const fn public_address(&self) -> Option<SocketAddr> {
         match self {
             Self::Open(address) | Self::BehindRouter(address) => Some(*address),
             Self::PerDestination | Self::Unknown => None,
@@ -64,6 +65,7 @@ impl Network {
 
 /// Whether `ip` can be reached from anywhere on the internet, as far as its number
 /// tells: not private, not shared by a carrier, not this machine or this link.
+#[must_use]
 pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {

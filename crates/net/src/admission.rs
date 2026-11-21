@@ -1,7 +1,7 @@
 //! Admission: only a node that holds the meeting secret gets a connection.
 //!
 //! The transport proves which key is at the other end. Admission proves that the holder of
-//! that key also holds the meeting secret, in both directions, before a single MoQ message
+//! that key also holds the meeting secret, in both directions, before a single `MoQ` message
 //! is sent. It runs on the first two-way stream of a connection:
 //!
 //! ```text
@@ -56,6 +56,7 @@ const ADMITTED_QUEUE: usize = 16;
 pub struct AdmissionKey(Secret<[u8; 32]>);
 
 impl AdmissionKey {
+    #[must_use]
     pub fn from_meeting_secret(secret: &Secret<[u8; SECRET_BYTES]>) -> Option<Self> {
         let mut key = [0u8; 32];
         Hkdf::<Sha256>::new(None, secret.expose())
@@ -108,6 +109,12 @@ pub enum AdmissionError {
 
 /// Run the handshake on a new connection, as the end `connection` says we are. On any
 /// failure the connection is closed.
+///
+/// # Errors
+///
+/// When the other end does not prove it holds the admission key, does not speak this
+/// handshake, or does not finish it within the time allowed; when the connection ends
+/// first; or when the operating system gives no random bytes.
 pub async fn admit<C: Connection>(
     connection: &C,
     us: PublicKey,
@@ -229,7 +236,7 @@ struct Buffered<R> {
 }
 
 impl<R: RecvStream> Buffered<R> {
-    fn new(recv: R) -> Self {
+    const fn new(recv: R) -> Self {
         Self {
             recv,
             held: Vec::new(),
@@ -258,14 +265,14 @@ impl<R: RecvStream> Buffered<R> {
 pub struct Admitted<E: Endpoint> {
     inner: Arc<E>,
     key: AdmissionKey,
-    admitted: AsyncMutex<mpsc::Receiver<E::Connection>>,
+    passed: AsyncMutex<mpsc::Receiver<E::Connection>>,
     accepting: JoinHandle<()>,
 }
 
 impl<E: Endpoint> Admitted<E> {
     pub fn new(inner: E, key: AdmissionKey) -> Self {
         let inner = Arc::new(inner);
-        let (pass, admitted) = mpsc::channel(ADMITTED_QUEUE);
+        let (pass, passed) = mpsc::channel(ADMITTED_QUEUE);
         let accepting = {
             let (inner, key) = (Arc::clone(&inner), key.clone());
             tokio::spawn(async move {
@@ -283,7 +290,7 @@ impl<E: Endpoint> Admitted<E> {
         Self {
             inner,
             key,
-            admitted: AsyncMutex::new(admitted),
+            passed: AsyncMutex::new(passed),
             accepting,
         }
     }
@@ -317,7 +324,7 @@ impl<E: Endpoint> Endpoint for Admitted<E> {
     }
 
     async fn accept(&self) -> Option<E::Connection> {
-        self.admitted.lock().await.recv().await
+        self.passed.lock().await.recv().await
     }
 
     fn close(&self) {

@@ -1,5 +1,9 @@
 //! Two sessions joined back to back.
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test may stop where it stands"
+)]
 
 use palaver_khef_core::session::{NOT_SUPPORTED, PREFIX_OVERLAP, UNINTERESTED};
 use palaver_khef_core::{Action, CloseCode, Event, Role, Session, StreamId, StreamKind};
@@ -82,7 +86,7 @@ struct End {
 }
 
 impl End {
-    fn new(role: Role, setup: Setup) -> Self {
+    const fn new(role: Role, setup: Setup) -> Self {
         Self {
             session: Session::new(role, setup),
             kinds: vec![],
@@ -107,7 +111,7 @@ impl End {
                 }
                 Action::Send { stream, bytes, fin } => {
                     let kind = match stream {
-                        StreamId::Ours(n) => self.kinds[n as usize],
+                        StreamId::Ours(n) => self.kinds[usize::try_from(n).unwrap()],
                         StreamId::Theirs(_) => StreamKind::Bidi,
                     };
                     out.push(Wire::Data {
@@ -680,7 +684,7 @@ fn a_padding_stream_is_read_and_thrown_away() {
     palaver_moq_wire::put_vi64(&mut padding, palaver_moq_wire::PADDING_STREAM);
     padding.extend([0; 100]);
     b.feed(10, StreamKind::Uni, &padding);
-    b.feed(10, StreamKind::Uni, &[7; 100_000]);
+    b.feed(10, StreamKind::Uni, &vec![7; 100_000]);
     assert_eq!(b.flush(), []);
     assert_eq!(b.closed, None);
 }
@@ -1057,6 +1061,10 @@ fn arbitrary_bytes_never_panic_and_a_close_is_always_announced() {
                 StreamKind::Bidi
             };
             let len = (next() % 40) as usize;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "takes the low byte of a random number"
+            )]
             let bytes: Vec<u8> = (0..len).map(|_| next() as u8).collect();
             b.session.on_data(stream, kind, &bytes, next() % 8 == 0);
             if next() % 16 == 0 {

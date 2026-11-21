@@ -1,4 +1,4 @@
-//! MoQT draft 22 message and object codec for the Palaver profile, including our extensions.
+//! `MoQT` draft 22 message and object codec for the Palaver profile, including our extensions.
 //!
 //! Sans-IO and allocation-light: decoding reads from a byte slice through [`Reader`], encoding
 //! appends to a `Vec<u8>`. Section numbers in comments refer to draft-ietf-moq-transport-22.

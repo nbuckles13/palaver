@@ -25,6 +25,10 @@ pub fn limit(out: &mut [f32]) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::float_cmp,
+    reason = "adding to silence gives the samples back exactly"
+)]
 mod tests {
     use super::*;
 

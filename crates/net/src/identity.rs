@@ -41,6 +41,10 @@ impl core::fmt::Debug for Identity {
 
 impl Identity {
     /// A new key from the operating system's random source.
+    ///
+    /// # Errors
+    ///
+    /// When the operating system gives no random bytes.
     pub fn generate() -> Result<Self, NoRandomness> {
         let mut seed = [0u8; 32];
         getrandom::fill(&mut seed).map_err(|_| NoRandomness)?;
@@ -48,6 +52,7 @@ impl Identity {
     }
 
     /// The key pair that belongs to a stored secret key.
+    #[must_use]
     pub fn from_secret(secret: &Secret<[u8; 32]>) -> Self {
         Self {
             key: SigningKey::from_bytes(secret.expose()),
@@ -55,10 +60,12 @@ impl Identity {
     }
 
     /// The secret key, to hand to a transport that must prove it holds this key.
+    #[must_use]
     pub fn secret(&self) -> Secret<[u8; 32]> {
         Secret::new(self.key.to_bytes())
     }
 
+    #[must_use]
     pub fn participant_id(&self) -> ParticipantId {
         participant_id(&self.public_key())
     }
@@ -95,6 +102,7 @@ impl Verifier for Ed25519 {
 }
 
 /// The participant id that belongs to `key`.
+#[must_use]
 pub fn participant_id(key: &PublicKey) -> ParticipantId {
     let hash = Sha256::digest(key.0);
     let mut id = [0u8; 16];
@@ -105,6 +113,7 @@ pub fn participant_id(key: &PublicKey) -> ParticipantId {
 }
 
 /// The tag that names a meeting on the wire, from its secret.
+#[must_use]
 pub fn meeting_tag(secret: &Secret<[u8; SECRET_BYTES]>) -> Option<MeetingTag> {
     let mut tag = [0u8; MEETING_TAG_BYTES];
     Hkdf::<Sha256>::new(None, secret.expose())

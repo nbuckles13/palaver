@@ -4,7 +4,11 @@
 //! Time is tokio's paused clock, which jumps ahead whenever every task is waiting, so
 //! these run in milliseconds and the same way every time.
 
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test may stop where it stands"
+)]
 
 use bytes::Bytes;
 use palaver_khef_core::LinkWatchConfig;
@@ -61,7 +65,7 @@ impl Member {
     }
 
     /// Wait until what this node knows of the meeting satisfies `test`.
-    async fn until(&self, what: &str, test: impl Fn(&Status) -> bool) -> Status {
+    async fn until(&self, what: &str, test: impl Fn(&Status) -> bool + Send + Sync) -> Status {
         let mut status = self.engine.status();
         let seen = timeout(PATIENCE, status.wait_for(|s| test(s))).await;
         match seen {
@@ -74,7 +78,7 @@ impl Member {
     }
 
     /// Wait until this node's plan lists exactly these members.
-    async fn until_roster(&self, members: &[&Member]) -> Status {
+    async fn until_roster(&self, members: &[&Self]) -> Status {
         let mut want: Vec<ParticipantId> = members.iter().map(|m| m.id()).collect();
         want.sort();
         self.until("the roster", |status| {
@@ -248,7 +252,7 @@ async fn a_joiner_nobody_can_answer_gets_in_once_a_member_reaches_for_it() {
     joiner
         .until("nobody answers", |status| status.nobody_answers)
         .await;
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_mins(1)).await;
     assert!(joiner.engine.status().borrow().links.is_empty());
     assert!(joiner.engine.status().borrow().nobody_answers);
 

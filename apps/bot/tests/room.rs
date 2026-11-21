@@ -3,7 +3,7 @@
 //!
 //! Time is tokio's paused clock, so a few seconds of meeting take a fraction of one.
 
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use palaver_bot::{Bot, FRAME, Script};
 use palaver_net::memory::MemoryNetwork;
@@ -13,6 +13,10 @@ use tokio::time::timeout;
 
 /// A room: the first bot creates the meeting, the rest join through it. Returns once
 /// every bot's plan lists them all.
+#[expect(
+    clippy::future_not_send,
+    reason = "a bot holds Opus coders, which are not `Sync`; the tests run on a current-thread runtime"
+)]
 async fn room(scripts: &[Script]) -> Vec<Bot> {
     let network = MemoryNetwork::new();
     let secret = Secret::new([7; 32]);
@@ -29,12 +33,11 @@ async fn room(scripts: &[Script]) -> Vec<Bot> {
         let mut status = bot.engine().status();
         let settled = status
             .wait_for(|s| s.roster.len() == scripts.len() && s.microphones.len() == scripts.len());
-        if timeout(Duration::from_secs(30), settled).await.is_err() {
-            panic!(
-                "the room never formed: {:?}",
-                *bot.engine().status().borrow()
-            );
-        }
+        assert!(
+            timeout(Duration::from_secs(30), settled).await.is_ok(),
+            "the room never formed: {:?}",
+            *bot.engine().status().borrow()
+        );
     }
     bots
 }

@@ -6,7 +6,8 @@
 use crate::{Reader, Result};
 
 /// Bytes the shortest encoding of `v` takes.
-pub fn vi64_len(v: u64) -> usize {
+#[must_use]
+pub const fn vi64_len(v: u64) -> usize {
     match v {
         0..=0x7f => 1,
         0x80..=0x3fff => 2,
@@ -30,7 +31,7 @@ pub fn put_vi64(out: &mut Vec<u8>, v: u64) {
         return;
     }
     // n - 1 leading ones, then a zero: 0x00, 0x80, 0xc0, ... 0xfe.
-    let prefix = (0xff00u16 >> (n - 1)) as u8;
+    let prefix = !(0xffu8 >> (n - 1));
     let start = out.len();
     out.extend_from_slice(&be[8 - n..]);
     if let Some(first) = out.get_mut(start) {
@@ -40,6 +41,10 @@ pub fn put_vi64(out: &mut Vec<u8>, v: u64) {
 
 impl Reader<'_> {
     /// Decode one variable-length integer. Longer-than-needed encodings are valid.
+    ///
+    /// # Errors
+    ///
+    /// Fails, consuming nothing, if the integer runs past the end of the reader.
     pub fn vi64(&mut self) -> Result<u64> {
         let mut probe = self.clone();
         let first = probe.u8()?;
@@ -50,7 +55,7 @@ impl Reader<'_> {
         let mut v = u64::from_be_bytes(be);
         if extra < 8 {
             // The first byte keeps 7 - extra value bits (none when extra is 7).
-            let mask = (0xffu16 >> (extra + 1)) as u8;
+            let mask = 0x7fu8 >> extra;
             v |= u64::from(first & mask) << (8 * extra);
         }
         *self = probe;
@@ -109,11 +114,7 @@ mod tests {
     fn zero_decodes_from_any_length() {
         for n in 1..=9usize {
             let mut bytes = vec![0u8; n];
-            bytes[0] = if n == 9 {
-                0xff
-            } else {
-                (0xff00u16 >> (n - 1)) as u8
-            };
+            bytes[0] = if n == 9 { 0xff } else { !(0xffu8 >> (n - 1)) };
             assert_eq!(dec(&bytes), Ok(0), "{n} bytes");
         }
     }
@@ -127,7 +128,7 @@ mod tests {
                 assert_eq!(bytes.len(), vi64_len(v));
                 assert_eq!(dec(&bytes), Ok(v));
                 // shortest: the value needs more bits than one byte fewer can hold
-                let fewer_bits = 7 * (bytes.len() as u32 - 1);
+                let fewer_bits = 7 * (bytes.len() - 1);
                 assert!(
                     bytes.len() == 1 || v >> fewer_bits != 0,
                     "{v} in {} bytes",

@@ -2,7 +2,10 @@
 //! selector from `khef-core`.
 
 // Helpers in an integration test file are test code, but clippy only exempts `#[test]` functions.
-#![allow(clippy::unwrap_used)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "test arithmetic on frame counts and node numbers, all far below the narrower type's range"
+)]
 
 use palaver_khef_core::TopNConfig;
 use palaver_proto::Timestamp;
@@ -19,7 +22,7 @@ const FAR: NodeId = 15;
 const FRAME_MS: u64 = 20;
 
 /// How many whole packet intervals fit in `span`.
-fn frames(span: Duration) -> u64 {
+const fn frames(span: Duration) -> u64 {
     (span.as_micros() / PACKET_INTERVAL.as_micros()) as u64
 }
 
@@ -204,7 +207,7 @@ fn a_talker_that_crashes_mid_speech_does_not_block_later_speakers() {
         spurt(22, 6400, 1000),
     ];
     let run = run_with(true, script, 8, |_, voices| {
-        voices.crashed.push((10, Timestamp::from_millis(2000)))
+        voices.crashed.push((10, Timestamp::from_millis(2000)));
     });
     for s in &run.script[3..] {
         assert_eq!(heard(&run, s), (50, 50, 0), "{s:?}");
@@ -215,7 +218,7 @@ fn a_talker_that_crashes_mid_speech_does_not_block_later_speakers() {
 fn with_loss_on_every_hop_speech_still_gets_through_and_nothing_gets_stuck() {
     let seconds = 20;
     let run = run_with(false, meeting(seconds), seconds, |overlay, _| {
-        overlay.loss_per_million = 20_000
+        overlay.loss_per_million = 20_000;
     });
     let mut reached = 0u64;
     let mut possible = 0u64;
@@ -237,7 +240,7 @@ fn with_loss_on_every_hop_speech_still_gets_through_and_nothing_gets_stuck() {
 fn the_same_seed_gives_the_same_run() {
     let go = |loss| {
         let run = run_with(false, meeting(10), 10, |overlay, _| {
-            overlay.loss_per_million = loss
+            overlay.loss_per_million = loss;
         });
         (
             run.overlay.trace(),

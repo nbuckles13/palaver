@@ -53,6 +53,7 @@ pub struct AudioOverlay {
 
 impl AudioOverlay {
     /// `edges` must form a tree over nodes `0..nodes`.
+    #[must_use]
     pub fn new(nodes: u32, edges: &[(NodeId, NodeId)], config: TopNConfig, seed: u64) -> Self {
         let world = World::new(seed);
         let loss = world.rng().derive(u64::MAX);
@@ -82,12 +83,14 @@ impl AudioOverlay {
         }
     }
 
-    pub fn now(&self) -> Timestamp {
+    #[must_use]
+    pub const fn now(&self) -> Timestamp {
         self.world.now()
     }
 
     /// Fingerprint of everything that has happened; equal for equal seeds and inputs.
-    pub fn trace(&self) -> u64 {
+    #[must_use]
+    pub const fn trace(&self) -> u64 {
         self.world.trace()
     }
 
@@ -151,6 +154,7 @@ impl AudioOverlay {
     }
 
     /// What became of the speech packet `track` sent at `sent_at`.
+    #[must_use]
     pub fn delivery(&self, track: NodeId, sent_at: Timestamp) -> Delivery {
         self.deliveries
             .get(&(track, sent_at))
@@ -159,11 +163,13 @@ impl AudioOverlay {
     }
 
     /// The most packets any one link direction has carried.
+    #[must_use]
     pub fn busiest_link_packets(&self) -> u64 {
         self.link_packets.values().copied().max().unwrap_or(0)
     }
 
     /// How many times client selectors have replaced a track, summed over all nodes.
+    #[must_use]
     pub fn client_switches(&self) -> u64 {
         self.nodes.iter().map(|n| n.client.switches()).sum()
     }
@@ -177,9 +183,10 @@ pub struct Spurt {
     pub len: Duration,
 }
 
-/// Turns a script of speech into packets, the way an Opus sender behaves: a packet every
-/// 20 ms while speaking (varying in level, with dips between syllables), a few quiet packets
-/// after speech ends, then a quiet packet every 400 ms.
+/// Turns a script of speech into packets, the way an Opus sender behaves.
+///
+/// That is a packet every 20 ms while speaking (varying in level, with dips between
+/// syllables), a few quiet packets after speech ends, then a quiet packet every 400 ms.
 ///
 /// Levels are on the scale of design section 8 (127 is full scale, a step is a decibel):
 /// speech between 83 and 118, a quiet room between 50 and 70.
@@ -193,13 +200,14 @@ pub struct Voices {
 }
 
 impl Voices {
+    #[must_use]
     pub fn new(participants: u32, seed: u64) -> Self {
         let mut rng = Rng::new(seed);
         let base = (0..participants)
-            .map(|_| 95 + rng.below(16) as u8)
+            .map(|_| 95 + u8::try_from(rng.below(16)).unwrap_or(0))
             .collect();
         let floor = (0..participants)
-            .map(|_| 50 + rng.below(21) as u8)
+            .map(|_| 50 + u8::try_from(rng.below(21)).unwrap_or(0))
             .collect();
         Self {
             rng,
@@ -213,7 +221,9 @@ impl Voices {
     /// Emit this tick's packets into `overlay`. Call once per packet interval.
     pub fn tick(&mut self, overlay: &mut AudioOverlay, script: &[Spurt]) {
         let now = overlay.now();
-        for who in 0..self.base.len() as u32 {
+        // `base` has one entry per participant, and their number came in as a `u32`.
+        let participants = u32::try_from(self.base.len()).unwrap_or(u32::MAX);
+        for who in 0..participants {
             if self
                 .crashed
                 .iter()
@@ -227,7 +237,7 @@ impl Voices {
                 .iter()
                 .find(|s| s.who == who && now >= s.start && now < s.start + s.len);
             if let Some(spurt) = spurt {
-                let wobble = self.rng.below(17) as u8;
+                let wobble = u8::try_from(self.rng.below(17)).unwrap_or(0);
                 let level = if now == spurt.start {
                     base - 12 // a word's first frame is weaker
                 } else if self.rng.chance(120_000) {
@@ -240,7 +250,8 @@ impl Voices {
             } else {
                 let just_stopped =
                     self.last_speech[i].is_some_and(|at| now - at <= PACKET_INTERVAL * 3);
-                let tick = now.as_micros() / PACKET_INTERVAL.as_micros() as u64;
+                let interval = u64::try_from(PACKET_INTERVAL.as_micros()).unwrap_or(u64::MAX);
+                let tick = now.as_micros() / interval;
                 let dtx_slot = (tick + u64::from(who) * 7).is_multiple_of(20);
                 if just_stopped || dtx_slot {
                     overlay.publish(who, floor, false);
@@ -252,6 +263,7 @@ impl Voices {
 
 /// Eight transit khefs joined as a tree (`chain` false: longest path 7 hops between leaves)
 /// or in a line (`chain` true: 9 hops), with the remaining nodes attached to them in turn.
+#[must_use]
 pub fn transit_topology(nodes: u32, chain: bool) -> Vec<(NodeId, NodeId)> {
     let mut edges: Vec<(NodeId, NodeId)> = if chain {
         (0..7).map(|i| (i, i + 1)).collect()

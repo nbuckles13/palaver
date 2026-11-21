@@ -1,6 +1,6 @@
 //! Meetings forming and re-forming: the real control logic, flood and wiring rule on every
 //! node, over simulated links.
-#![allow(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use palaver_proto::{Edge, PlanStamp, Timestamp};
 use palaver_sim::meeting::Meeting;
