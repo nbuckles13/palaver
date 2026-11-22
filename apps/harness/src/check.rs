@@ -7,6 +7,7 @@
 
 use palaver_media::Channels;
 use palaver_media::level::audio_level;
+use palaver_media::pcm::to_i16;
 use palaver_sound::Microphone;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -91,8 +92,10 @@ pub struct Ear {
 impl Ear {
     /// Hear one frame, as the device gave it.
     pub fn hear(&mut self, frame: &[f32]) {
-        // Exact silence is the sign looked for: a gate gives noughts, a room never does.
-        let silent = frame.iter().all(|sample| *sample == 0.0);
+        // Dead silence is the sign looked for: under half a step of 16 bits (-96 dB), as
+        // it was measured. A gate leaves that; a microphone open to a room never does.
+        // Not exact noughts: what a gate leaves may be dither, or a filter's tail.
+        let silent = frame.iter().all(|sample| to_i16(*sample) == 0);
         self.heard.push_back((!silent).then(|| audio_level(frame)));
         self.silent = self.silent.saturating_add(usize::from(silent));
         if self.heard.len() > WINDOW && self.heard.pop_front() == Some(None) {
@@ -284,6 +287,18 @@ mod tests {
         assert_eq!(heard(&[(100, 0.0)]).finding(), Finding::NoSignal);
         // A few silent frames as the device starts are not a sign of anything.
         assert_eq!(heard(&[(3, 0.0), (100, VOICE)]).finding(), Finding::Good);
+    }
+
+    #[test]
+    fn silence_is_what_would_round_to_nothing_in_16_bits_and_not_only_exact_noughts() {
+        // -100 dB: what a gate may leave behind.
+        let residue = 0.00001;
+        assert_eq!(heard(&[(100, residue)]).finding(), Finding::NoSignal);
+        let gated = [(30, residue), (20, FAINT), (30, residue), (20, FAINT)];
+        assert_eq!(heard(&gated).finding(), Finding::Processed);
+        // The same faint voice over a room's hiss is only faint.
+        let open = [(30, ROOM), (20, FAINT), (30, ROOM), (20, FAINT)];
+        assert_eq!(heard(&open).finding(), Finding::Faint);
     }
 
     #[test]

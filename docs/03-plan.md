@@ -161,8 +161,8 @@ faintest of these by only 17 dB in thirty seconds, where it brings a voice at an
 level to its target within seconds.
 
 - Done: the microphone check notices it, before a meeting and during one, by the sound
-  alone (exact silence between sounds; nothing but exact silence; a voice that stays
-  faint), which works the same on every system, and says where to look on the system it
+  alone (dead silence between sounds, meaning under one step of 16 bits, which is how
+  the recordings above were kept; nothing but dead silence; a voice that stays faint), which works the same on every system, and says where to look on the system it
   is on.
 - To do, and particular to each system: ask the system itself instead of inferring it.
   Whether its voice effects are on for this device and whether the app is allowed the
