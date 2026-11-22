@@ -4,7 +4,7 @@
 #![expect(clippy::unwrap_used, reason = "a test may stop where it stands")]
 
 use palaver_harness::voice::{Sink, Source, Voice as Live};
-use palaver_media::process::Settings;
+use palaver_media::process::{NoiseStrength, Settings};
 use palaver_media::synthetic::{Voice, hears, pitch_of};
 use palaver_media::{Channels, FRAME_SAMPLES};
 use palaver_net::memory::MemoryNetwork;
@@ -186,4 +186,30 @@ async fn cleaning_and_two_channels_of_playout_go_together() {
     assert!(hears(&left[left.len() - 48_000..], pitch_of(2)));
     a.into_call().stop().await;
     b.into_call().stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_noisy_microphone_has_its_noise_turned_down_harder_if_the_ear_is_let_decide() {
+    let network = MemoryNetwork::new();
+    let secret = Secret::new([7; 32]);
+    let cleaning = Some(Settings::default());
+    // Both microphones give sound that never lets up: loud between words, to the ear.
+    let (first, mut by_ear) = member(&network, &secret, Some(2), cleaning, Channels::Mono);
+    let (second, as_given) = member(&network, &secret, Some(3), cleaning, Channels::Mono);
+    first.create_meeting().await;
+    second.join(vec![first.address().clone()]).await;
+    by_ear.set_noise_by_ear(true);
+    assert_eq!(by_ear.noise_strength(), Some(NoiseStrength::Moderate));
+
+    let mut members = vec![by_ear, as_given];
+    // The ear wants five seconds, and is asked once a second.
+    run(&mut members, 4, FRAME_SAMPLES).await;
+    assert_eq!(members[0].noise_strength(), Some(NoiseStrength::Moderate));
+    run(&mut members, 3, FRAME_SAMPLES).await;
+    assert_eq!(members[0].noise_strength(), Some(NoiseStrength::High));
+    // Left as it was given where the ear is not let decide.
+    assert_eq!(members[1].noise_strength(), Some(NoiseStrength::Moderate));
+    for member in members {
+        member.into_call().stop().await;
+    }
 }

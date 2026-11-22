@@ -10,7 +10,7 @@
 
 use crate::check::{Ear, Finding};
 use palaver_media::level::audio_level;
-use palaver_media::process::{Processor, Settings};
+use palaver_media::process::{NoiseStrength, Processor, Settings};
 use palaver_media::{Channels, CodecError};
 use palaver_sdk::{Call, VoiceGauge};
 use palaver_sound::{Microphone, Speaker};
@@ -18,6 +18,9 @@ use palaver_sound::{Microphone, Speaker};
 /// The most frames made for the speaker in one turn. A speaker that never fills (a broken
 /// device, or a test's) must not hold the turn for ever.
 const MOST_FRAMES_A_TURN: usize = 25;
+
+/// How many frames pass between askings of the ear: one second.
+const ASK_EVERY: u32 = 50;
 
 /// Where captured sound comes from.
 pub trait Source {
@@ -82,6 +85,10 @@ pub struct Voice<M, S> {
     muted: bool,
     /// Judges the microphone by what it gives, before any cleaning here.
     ear: Ear,
+    /// Whether noise is turned down harder for a microphone the ear finds noisy.
+    noise_by_ear: bool,
+    /// Frames captured since the ear was last asked.
+    since_asked: u32,
 }
 
 impl<M: Source, S: Sink> Voice<M, S> {
@@ -106,6 +113,8 @@ impl<M: Source, S: Sink> Voice<M, S> {
             played: vec![0.0; playout.frame_len()],
             muted: false,
             ear: Ear::default(),
+            noise_by_ear: false,
+            since_asked: 0,
         }
     }
 
@@ -129,6 +138,7 @@ impl<M: Source, S: Sink> Voice<M, S> {
         turn.waiting = self.speaker.waiting();
         while self.microphone.pop(&mut self.captured) {
             self.ear.hear(&self.captured);
+            self.heed_the_ear();
             if let Some(processor) = &mut self.processor {
                 processor
                     .captured(&mut self.captured)
@@ -147,6 +157,31 @@ impl<M: Source, S: Sink> Voice<M, S> {
     #[must_use]
     pub fn gauges(&self) -> Vec<VoiceGauge> {
         self.call.gauges()
+    }
+
+    /// Let the ear decide how hard noise is turned down: harder, from then on, once it
+    /// finds the microphone noisy. Without this the strength stays as it was given.
+    pub const fn set_noise_by_ear(&mut self, by_ear: bool) {
+        self.noise_by_ear = by_ear;
+    }
+
+    /// Once a second, ask the ear whether the microphone is noisy, and if so turn its
+    /// noise down harder for the rest of the call: a microphone does not get quieter.
+    fn heed_the_ear(&mut self) {
+        self.since_asked = self.since_asked.saturating_add(1);
+        if !self.noise_by_ear || self.since_asked < ASK_EVERY {
+            return;
+        }
+        self.since_asked = 0;
+        if let (true, Some(processor)) = (self.ear.noisy(), &mut self.processor) {
+            processor.set_noise_strength(NoiseStrength::High);
+        }
+    }
+
+    /// How hard the microphone's steady noise is being turned down, if it is at all.
+    #[must_use]
+    pub fn noise_strength(&self) -> Option<NoiseStrength> {
+        self.processor.as_ref().and_then(Processor::noise_strength)
     }
 
     /// What the last few seconds say of the microphone, as the device gives it.

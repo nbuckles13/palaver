@@ -261,6 +261,11 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
     assert!(desk.shows(
         "Cy: heard 90 ms after arriving (buffer 40 ms) · played 0 · rebuilt 0 · lost 0 · skipped 0 · late 0 · not playing now"
     ));
+    // Harder noise suppression is said only when it is on.
+    let harder = words::noise_line(true).unwrap();
+    assert!(!desk.shows(harder));
+    desk.show(|view| view.sound.noise_high = true);
+    assert!(desk.shows(harder));
     // And they close again.
     desk.click("Details");
     assert!(!desk.shows(voice));

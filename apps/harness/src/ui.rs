@@ -78,6 +78,9 @@ pub struct Window {
     ticket: String,
     came_back: String,
     ask_outside: bool,
+    /// Whether the strength of the noise suppression is left to the ear, so that a
+    /// noisy microphone will be given more.
+    noise_by_ear: bool,
     /// The meter falls slowly from its last peak, so that it can be read.
     meter: f32,
     copied: Option<&'static str>,
@@ -144,6 +147,7 @@ impl Window {
                 .unwrap_or_default(),
             came_back: String::new(),
             ask_outside: true,
+            noise_by_ear: setup.tuning.noise.is_none(),
             meter: 0.0,
             copied: None,
             // Closed until asked for; open in a picture, so that the picture shows them.
@@ -236,12 +240,17 @@ impl Window {
 
         ui.add_space(8.0);
         ui.label(RichText::new("MICROPHONE").small().color(ember::DIM));
-        let (found, level, finding) = self
-            .check
-            .as_ref()
-            .map_or((Found::Opening, 0, Finding::TooSoon), |check| {
-                (check.found(), check.loudest(), check.finding())
-            });
+        let (found, level, finding, noisy) =
+            self.check
+                .as_ref()
+                .map_or((Found::Opening, 0, Finding::TooSoon, false), |check| {
+                    (
+                        check.found(),
+                        check.loudest(),
+                        check.finding(),
+                        check.noisy(),
+                    )
+                });
         match found {
             Found::Opening => {
                 ui.label(RichText::new("opening…").color(ember::QUIET));
@@ -261,6 +270,9 @@ impl Window {
                         .color(colour),
                 );
                 settings_link(ui, finding, &device);
+                if let Some(hint) = words::noisy_hint(noisy, self.noise_by_ear) {
+                    ui.label(RichText::new(hint).small().color(ember::QUIET));
+                }
             }
             Found::Failed(why) => {
                 ui.label(RichText::new(why).color(ember::EMBER));
@@ -487,6 +499,9 @@ impl Window {
             view.sound.dropped,
         )));
         ui.label(small(words::network_line(view.details.network_late)));
+        if let Some(line) = words::noise_line(view.sound.noise_high) {
+            ui.label(small(String::from(line)));
+        }
         plot(
             ui,
             "sound thread's longest wait, ms",
