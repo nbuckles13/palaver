@@ -12,7 +12,7 @@
     reason = "test signals: sample counts, the sample rate and 24-bit noise are exact as f32"
 )]
 
-use palaver_media::process::{Processor, Settings, WrongLength};
+use palaver_media::process::{NoiseStrength, Processor, Settings, WrongLength};
 use palaver_media::synthetic::{Voice, hears, pitch_of, strength};
 use palaver_media::{Channels, FRAME_SAMPLES, SAMPLE_RATE};
 use std::collections::VecDeque;
@@ -110,6 +110,7 @@ fn energy_after(pcm: &[f32], from: usize) -> f32 {
 const ECHO_ONLY: Settings = Settings {
     echo: true,
     noise: false,
+    noise_strength: NoiseStrength::Moderate,
     level: false,
 };
 
@@ -229,11 +230,23 @@ fn steady_noise_is_turned_down_and_a_voice_in_it_is_kept() {
         echo: false,
         level: false,
         noise: true,
+        noise_strength: NoiseStrength::Moderate,
     };
-    let heard = room(only_noise, Channels::Mono, 4, silence, hiss());
-    let left = energy(Heard::after(&heard.clean, 2)) / energy(Heard::after(&heard.raw, 2));
+    let left_at = |noise_strength| {
+        let settings = Settings {
+            noise_strength,
+            ..only_noise
+        };
+        let heard = room(settings, Channels::Mono, 4, silence, hiss());
+        energy(Heard::after(&heard.clean, 2)) / energy(Heard::after(&heard.raw, 2))
+    };
+    let left = left_at(NoiseStrength::Moderate);
     // Ten decibels down, or more.
     assert!(left < 0.1, "{left} of the noise is left");
+    // And further down the harder it is asked for: by half again, or more, at "high".
+    let (low, high) = (left_at(NoiseStrength::Low), left_at(NoiseStrength::High));
+    assert!(low > left && high < left / 2.0, "{low}, {left}, {high}");
+    assert!(left_at(NoiseStrength::VeryHigh) <= high);
 
     let (mut noise, mut voice) = (hiss(), talking(3));
     let heard = room(only_noise, Channels::Mono, 4, silence, |frame| {
@@ -252,6 +265,7 @@ fn a_quiet_voice_is_brought_up_and_nothing_goes_past_full_scale() {
         echo: false,
         noise: false,
         level: true,
+        ..Settings::default()
     };
     let mut quiet = Voice::new(pitch_of(4), 0.02);
     let heard = room(only_level, Channels::Mono, 3, silence, move |_| {

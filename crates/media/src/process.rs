@@ -16,19 +16,35 @@
 
 use palaver_opus::{Channels, FRAME_SAMPLES, SAMPLE_RATE};
 use sonora::config::{
-    AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression, Pipeline,
-    TransparentModeType,
+    AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression,
+    NoiseSuppressionLevel, Pipeline, TransparentModeType,
 };
 use sonora::{AudioProcessing, Config, StreamConfig};
 
 /// The processor works on 10 ms at a time: half a frame.
 const CHUNK: usize = FRAME_SAMPLES / 2;
 
+/// How hard steady noise is turned down. The more, the more a voice is coloured by it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NoiseStrength {
+    /// About 6 dB.
+    Low,
+    /// About 12 dB: enough for an ordinary microphone in an ordinary room.
+    #[default]
+    Moderate,
+    /// About 18 dB: for a microphone with much noise of its own.
+    High,
+    /// About 21 dB.
+    VeryHigh,
+}
+
 /// Which kinds of cleaning are on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     pub echo: bool,
     pub noise: bool,
+    /// How hard, when `noise` is on.
+    pub noise_strength: NoiseStrength,
     pub level: bool,
 }
 
@@ -38,6 +54,7 @@ impl Default for Settings {
         Self {
             echo: true,
             noise: true,
+            noise_strength: NoiseStrength::Moderate,
             level: true,
         }
     }
@@ -117,6 +134,7 @@ pub struct Processor {
 impl Processor {
     /// For a microphone whose frames have `captured` channels beside a speaker whose
     /// frames have `played`.
+    #[must_use]
     pub fn new(settings: Settings, captured: Channels, played: Channels) -> Self {
         let config = Config {
             pipeline: Pipeline {
@@ -134,7 +152,15 @@ impl Processor {
                 transparent_mode: TransparentModeType::Hmm,
                 ..EchoCanceller::default()
             }),
-            noise_suppression: settings.noise.then(NoiseSuppression::default),
+            noise_suppression: settings.noise.then(|| NoiseSuppression {
+                level: match settings.noise_strength {
+                    NoiseStrength::Low => NoiseSuppressionLevel::Low,
+                    NoiseStrength::Moderate => NoiseSuppressionLevel::Moderate,
+                    NoiseStrength::High => NoiseSuppressionLevel::High,
+                    NoiseStrength::VeryHigh => NoiseSuppressionLevel::VeryHigh,
+                },
+                ..NoiseSuppression::default()
+            }),
             gain_controller2: settings.level.then(|| GainController2 {
                 // The part that follows the voice's level; without it the controller
                 // only limits.

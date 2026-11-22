@@ -7,7 +7,7 @@
 use crate::check::Finding;
 use crate::voice::{Turn, Voice};
 use palaver_media::Channels;
-use palaver_media::process::Settings;
+use palaver_media::process::{NoiseStrength, Settings};
 use palaver_sdk::{Call, VoiceGauge};
 use palaver_sound::{Device, Microphone, SoundError, Speaker};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -27,6 +27,8 @@ pub struct Tuning {
     pub margin_frames: u32,
     /// How much sound is kept waiting for the speaker, in milliseconds.
     pub lead_ms: u32,
+    /// How hard the microphone's steady noise is turned down.
+    pub noise: NoiseStrength,
 }
 
 impl Default for Tuning {
@@ -37,6 +39,7 @@ impl Default for Tuning {
             floor_frames: 0,
             margin_frames: 0,
             lead_ms: AHEAD_MS,
+            noise: NoiseStrength::default(),
         }
     }
 }
@@ -51,6 +54,15 @@ impl Tuning {
         jitter.min_delay_frames = self.floor_frames;
         jitter.margin_frames = self.margin_frames;
         jitter
+    }
+
+    /// Every kind of cleaning, with noise turned down as hard as this tuning says.
+    #[must_use]
+    pub fn cleaning(self) -> Settings {
+        Settings {
+            noise_strength: self.noise,
+            ..Settings::default()
+        }
     }
 }
 /// How long a turn waits for the speaker before looking at the microphone anyway.
