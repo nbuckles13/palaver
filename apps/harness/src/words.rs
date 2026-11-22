@@ -88,6 +88,35 @@ pub const fn microphone_warning(finding: Finding, system: System) -> Option<&'st
     }
 }
 
+/// A way into the system's own settings: what the link says, and the address the system
+/// opens them by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsLink {
+    pub label: &'static str,
+    pub address: &'static str,
+}
+
+/// Where in the system's settings a microphone found wanting can be put right, where
+/// the system has an address for it. `None` for a microphone with nothing wrong, and on
+/// systems with no one place for it.
+#[must_use]
+pub const fn settings_for(finding: Finding, system: System) -> Option<SettingsLink> {
+    match (finding, system) {
+        (Finding::NoSignal | Finding::Processed | Finding::Faint, System::Windows) => {
+            Some(SettingsLink {
+                label: "Open the sound settings",
+                address: "ms-settings:sound",
+            })
+        }
+        // The Mac's Voice Isolation is in its menu bar, which has no address.
+        (Finding::NoSignal | Finding::Faint, System::Mac) => Some(SettingsLink {
+            label: "Open the sound settings",
+            address: "x-apple.systempreferences:com.apple.preference.sound?input",
+        }),
+        _ => None,
+    }
+}
+
 /// Whether a finding is of something wrong, to be shown as a warning.
 #[must_use]
 pub const fn is_trouble(finding: Finding) -> bool {
@@ -331,6 +360,24 @@ mod tests {
             Finding::Good,
         ] {
             assert_eq!(microphone_warning(finding, here), None);
+        }
+    }
+
+    #[test]
+    fn a_way_into_the_systems_settings_is_offered_where_there_is_one() {
+        for finding in [Finding::NoSignal, Finding::Processed, Finding::Faint] {
+            let link = settings_for(finding, System::Windows).unwrap();
+            assert_eq!(link.address, "ms-settings:sound");
+            assert_eq!(settings_for(finding, System::Other), None);
+        }
+        assert!(
+            settings_for(Finding::Faint, System::Mac)
+                .is_some_and(|link| link.address.starts_with("x-apple.systempreferences:"))
+        );
+        assert_eq!(settings_for(Finding::Processed, System::Mac), None);
+        // Nothing wrong, nothing to open.
+        for finding in [Finding::TooSoon, Finding::NothingSaid, Finding::Good] {
+            assert_eq!(settings_for(finding, System::Windows), None);
         }
     }
 

@@ -242,6 +242,7 @@ impl Window {
                         .small()
                         .color(colour),
                 );
+                settings_link(ui, finding);
             }
             Found::Failed(why) => {
                 ui.label(RichText::new(why).color(ember::EMBER));
@@ -371,6 +372,7 @@ impl Window {
         if let Some(warning) = words::microphone_warning(view.sound.microphone, words::System::HERE)
         {
             ui.label(RichText::new(warning).small().color(ember::EMBER));
+            settings_link(ui, view.sound.microphone);
         }
 
         ui.horizontal(|ui| {
@@ -427,6 +429,25 @@ impl Window {
                 ui.label(small(String::from("no voices are being played")));
             }
         });
+    }
+}
+
+/// A link into the system's settings for a microphone found wanting, where the system
+/// has an address for them.
+fn settings_link(ui: &mut Ui, finding: Finding) {
+    let Some(link) = words::settings_for(finding, words::System::HERE) else {
+        return;
+    };
+    if ui.link(RichText::new(link.label).small()).clicked() {
+        // The system's own opener, given one of the addresses above and nothing else.
+        let opener = match words::System::HERE {
+            words::System::Windows => "explorer.exe",
+            words::System::Mac => "open",
+            words::System::Other => return,
+        };
+        if let Err(error) = std::process::Command::new(opener).arg(link.address).spawn() {
+            eprintln!("{opener}: {error}");
+        }
     }
 }
 

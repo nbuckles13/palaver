@@ -186,6 +186,12 @@ fn in_a_meeting_a_microphone_that_gives_nothing_usable_is_said_under_the_meter()
     assert!(!desk.shows(processed));
     desk.show(|view| view.sound.microphone = Finding::Processed);
     assert!(desk.shows(processed));
+    // With a way into the system's settings, on a system that has an address for them.
+    let link = words::settings_for(Finding::Processed, words::System::HERE);
+    assert_eq!(
+        link.is_some(),
+        link.is_some_and(|link| desk.shows(link.label))
+    );
     // A faint voice is not: it would come and go with each word.
     desk.show(|view| view.sound.microphone = Finding::Faint);
     assert!(!desk.shows(words::microphone_hint(Finding::Faint, words::System::HERE)));
