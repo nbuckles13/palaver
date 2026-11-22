@@ -3,14 +3,21 @@
 //! The window draws and takes clicks; it must never wait. So the node, its network and
 //! its sound live on a thread of their own, which takes [`Order`]s and keeps a [`View`]
 //! up to date for the window to draw.
+//!
+//! What a session stands on is behind two traits: a [`World`] makes the node and starts
+//! its sound, and a [`Sound`] is the sound once started. The window's session uses the
+//! real ones (QUIC, the system's devices); the tests give it an in-memory network and
+//! sound that only says it is there, so that everything the session decides is tested
+//! without a network or a sound card.
 
 use crate::live::{Live, Reading};
 use palaver_media::Channels;
 use palaver_media::process::Settings;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
+use palaver_proto::SECRET_BYTES;
 use palaver_proto::{Secret, Ticket};
-use palaver_sdk::{Options, Participant, Status, entry_points};
+use palaver_sdk::{Call, Options, Participant, Status, entry_points};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -75,6 +82,97 @@ pub struct View {
     pub since: Option<Instant>,
 }
 
+/// The sound of a meeting, once started.
+pub trait Sound {
+    /// The names of the microphone and the speaker.
+    fn devices(&self) -> (String, String);
+    fn set_muted(&self, muted: bool);
+    /// Whether it is still carrying sound.
+    fn running(&self) -> bool;
+    fn reading(&self) -> Reading;
+    /// Stop, and give the call back to be stopped; `None` if it was lost.
+    fn stop(self) -> Option<Call>;
+}
+
+/// The sound could not be started.
+pub struct NoSound {
+    /// What to tell the user.
+    pub why: String,
+    /// The call, unused, to be stopped; `None` if it was lost.
+    pub call: Option<Call>,
+}
+
+/// What a session stands on: where nodes come from, and how their sound is started.
+pub trait World {
+    type Sound: Sound;
+
+    /// A node for the meeting with `secret`, and its call.
+    ///
+    /// # Errors
+    ///
+    /// With what to tell the user, when the node cannot be started.
+    fn node(
+        &mut self,
+        secret: &Secret<[u8; SECRET_BYTES]>,
+        options: Options,
+    ) -> Result<(Participant, Call), String>;
+
+    /// Start carrying `call` on a microphone and a speaker.
+    ///
+    /// # Errors
+    ///
+    /// When the sound cannot start.
+    fn sound(&mut self, call: Call, playout: Channels) -> Result<Self::Sound, Box<NoSound>>;
+}
+
+impl Sound for Live {
+    fn devices(&self) -> (String, String) {
+        (self.microphone().name.clone(), self.speaker().name.clone())
+    }
+
+    fn set_muted(&self, muted: bool) {
+        Self::set_muted(self, muted);
+    }
+
+    fn running(&self) -> bool {
+        Self::running(self)
+    }
+
+    fn reading(&self) -> Reading {
+        self.meter().read()
+    }
+
+    fn stop(self) -> Option<Call> {
+        Self::stop(self)
+    }
+}
+
+/// The real thing: nodes over QUIC, sound on the system's devices.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Real;
+
+impl World for Real {
+    type Sound = Live;
+
+    fn node(
+        &mut self,
+        secret: &Secret<[u8; SECRET_BYTES]>,
+        options: Options,
+    ) -> Result<(Participant, Call), String> {
+        Participant::on_quic(QuicOptions::default(), Vec::new(), secret, options)
+            .map_err(|error| format!("Could not start: {error:?}"))
+    }
+
+    fn sound(&mut self, call: Call, playout: Channels) -> Result<Live, Box<NoSound>> {
+        Live::start(call, Some(Settings::default()), playout).map_err(|failed| {
+            Box::new(NoSound {
+                why: format!("Sound: {}", failed.error),
+                call: failed.call,
+            })
+        })
+    }
+}
+
 /// The thread, and the two ways to it.
 pub struct Session {
     orders: UnboundedSender<Order>,
@@ -107,8 +205,15 @@ impl Session {
                 });
                 return;
             };
-            runtime.block_on(run(taken, &shown));
+            runtime.block_on(run(taken, &shown, Real));
         });
+        Self { orders, view }
+    }
+
+    /// A session over ways that already exist: whoever holds the other ends takes the
+    /// orders and sets the view. For tests of the window.
+    #[must_use]
+    pub const fn over(orders: UnboundedSender<Order>, view: Arc<Mutex<View>>) -> Self {
         Self { orders, view }
     }
 
@@ -132,7 +237,8 @@ fn set(view: &Mutex<View>, change: impl FnOnce(&mut View)) {
     }
 }
 
-async fn run(mut orders: UnboundedReceiver<Order>, view: &Mutex<View>) {
+/// Take orders until there is nobody left to give them, keeping `view` up to date.
+pub async fn run<W: World>(mut orders: UnboundedReceiver<Order>, view: &Mutex<View>, mut world: W) {
     while let Some(order) = orders.recv().await {
         if let Order::Start {
             name,
@@ -146,7 +252,12 @@ async fn run(mut orders: UnboundedReceiver<Order>, view: &Mutex<View>) {
                     ..View::default()
                 };
             });
-            let ended = meeting(&name, ticket.as_deref(), ask_outside, &mut orders, view).await;
+            let asked = Asked {
+                name: &name,
+                ticket: ticket.as_deref(),
+                ask_outside,
+            };
+            let ended = meeting(asked, &mut orders, view, &mut world).await;
             set(view, |view| {
                 *view = View {
                     error: ended.err(),
@@ -162,7 +273,7 @@ fn refresh(
     view: &Mutex<View>,
     participant: &Participant,
     invitation: Option<&Ticket>,
-    live: &Live,
+    sound: Reading,
     status: &Status,
 ) {
     let me = participant.control().me().clone();
@@ -183,7 +294,6 @@ fn refresh(
         }
         _ => None,
     };
-    let sound = live.meter().read();
     set(view, |view| {
         if !people.is_empty() {
             view.reply = None;
@@ -198,46 +308,56 @@ fn refresh(
     });
 }
 
+/// The secret of the meeting an invitation is for, or a new one for a new meeting.
+fn secret_for(invitation: Option<&Ticket>) -> Result<Secret<[u8; SECRET_BYTES]>, String> {
+    match invitation {
+        Some(ticket) => Ok(Secret::new(*ticket.secret.expose())),
+        None => Ok(palaver_net::identity::Identity::generate()
+            .map_err(|_| "The system gave no random bytes for a meeting secret.")?
+            .secret()),
+    }
+}
+
+/// What a meeting is started with.
+#[derive(Debug, Clone, Copy)]
+struct Asked<'a> {
+    name: &'a str,
+    ticket: Option<&'a str>,
+    ask_outside: bool,
+}
+
 /// One meeting, from starting the node to leaving. `Err` says why it ended, if it was
 /// not by leaving.
-async fn meeting(
-    name: &str,
-    ticket: Option<&str>,
-    ask_outside: bool,
+async fn meeting<W: World>(
+    asked: Asked<'_>,
     orders: &mut UnboundedReceiver<Order>,
     view: &Mutex<View>,
+    world: &mut W,
 ) -> Result<(), String> {
-    let invitation = match ticket {
+    let invitation = match asked.ticket {
         Some(text) => Some(
             Ticket::parse(text.trim())
                 .map_err(|error| format!("That is not a ticket: {error:?}"))?,
         ),
         None => None,
     };
-    let secret = match &invitation {
-        Some(ticket) => Secret::new(*ticket.secret.expose()),
-        None => palaver_net::identity::Identity::generate()
-            .map_err(|_| "The system gave no random bytes for a meeting secret.")?
-            .secret(),
-    };
+    let secret = secret_for(invitation.as_ref())?;
     let playout = Channels::Stereo;
     let options = Options {
         playout,
-        ..Options::named(name)
+        ..Options::named(asked.name)
     };
-    let (mut participant, call) =
-        Participant::on_quic(QuicOptions::default(), Vec::new(), &secret, options)
-            .map_err(|error| format!("Could not start: {error:?}"))?;
-    let live = match Live::start(call, Some(Settings::default()), playout) {
+    let (mut participant, call) = world.node(&secret, options)?;
+    let live = match world.sound(call, playout) {
         Ok(live) => live,
         Err(failed) => {
             if let Some(call) = failed.call {
                 call.stop().await;
             }
-            return Err(format!("Sound: {}", failed.error));
+            return Err(failed.why);
         }
     };
-    let names: Vec<String> = if ask_outside {
+    let names: Vec<String> = if asked.ask_outside {
         DEFAULT_STUN_SERVERS.map(String::from).to_vec()
     } else {
         Vec::new()
@@ -256,8 +376,7 @@ async fn meeting(
     set(view, |view| {
         view.stage = Stage::In;
         view.since = Some(Instant::now());
-        view.microphone.clone_from(&live.microphone().name);
-        view.speaker.clone_from(&live.speaker().name);
+        (view.microphone, view.speaker) = live.devices();
         view.network = network;
         view.ticket = handing_on;
     });
@@ -301,7 +420,13 @@ async fn meeting(
                 view.reply = Some(reply);
             });
         }
-        refresh(view, &participant, invitation.as_ref(), &live, &status);
+        refresh(
+            view,
+            &participant,
+            invitation.as_ref(),
+            live.reading(),
+            &status,
+        );
     };
     if let Some(call) = live.stop() {
         call.stop().await;
