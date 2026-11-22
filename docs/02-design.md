@@ -924,8 +924,13 @@ What there is so far, in three layers:
   `join <ticket>`.
 - **What the window costs.** `eframe` brings the app from 103 packages to 221 on Linux
   (95 to 173 on Windows); the bot and everything under it are untouched. The OpenGL
-  renderer was chosen over the default (wgpu) because it is fewer packages; video may
-  change that. Three licences come with it and are allowed only for the crates that
+  renderer was chosen over the default (wgpu) because it is fewer packages.
+  **Decided 2026-11-21: OpenGL while the window has no video; expect wgpu when it
+  does.** wgpu draws with what each system supports best (Metal, DirectX 12, Vulkan;
+  Apple has deprecated OpenGL), and it can take a frame from a hardware decoder
+  without a copy through the processor, which twenty-five tiles of video will want.
+  The change is a feature flag and the drawing of video tiles, which does not exist
+  yet. To be settled by measuring, with real video. Three licences come with it and are allowed only for the crates that
   carry them (`deny.toml`): the Boost licence for the Windows clipboard, and two font
   licences for egui's built-in fonts.
 

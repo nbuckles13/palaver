@@ -6,6 +6,7 @@
 
 use crate::check::{Found, MicCheck};
 use crate::session::{Order, Person, Session, Stage, View};
+use crate::words;
 use eframe::egui::{
     self, Align2, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
@@ -30,11 +31,6 @@ mod ember {
 
 /// How often the window is drawn again when nothing is touched: the meters move.
 const REDRAW: Duration = Duration::from_millis(100);
-
-/// The quietest and the loudest level the meter shows, on the scale of
-/// [`palaver_media::level`]: above the hiss of a quiet room, and close to full scale.
-const METER_FLOOR: u8 = 72;
-const METER_TOP: u8 = 120;
 
 /// A picture of the window to take by itself: for looking at the window without a person
 /// at it (a developer's tool, and the way these screens are checked).
@@ -84,7 +80,8 @@ pub struct Window {
 }
 
 impl Window {
-    fn new(context: &egui::Context, setup: Setup) -> Self {
+    /// Give `context` the Ember look.
+    pub fn dress(context: &egui::Context) {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = ember::GROUND;
         visuals.window_fill = ember::PANEL;
@@ -110,9 +107,19 @@ impl Window {
             style.spacing.item_spacing = Vec2::new(10.0, 10.0);
             style.spacing.button_padding = Vec2::new(14.0, 7.0);
         });
+    }
+
+    fn new(context: &egui::Context, setup: Setup) -> Self {
+        Self::dress(context);
+        Self::over(Session::start(), Some(MicCheck::start()), setup)
+    }
+
+    /// A window over a session that already exists, listening to the microphone or not.
+    #[must_use]
+    pub fn over(session: Session, check: Option<MicCheck>, setup: Setup) -> Self {
         Self {
-            session: Session::start(),
-            check: Some(MicCheck::start()),
+            session,
+            check,
             name: setup.name.unwrap_or_default(),
             // A ticket left in the file is put in the field, to join by.
             ticket: setup
@@ -182,11 +189,9 @@ impl Window {
         }
     }
 
-    /// A level as a share of the meter, with a slow fall from the last peak.
+    /// Where the meter stands now that the level is `level`.
     fn metered(&mut self, level: u8) -> f32 {
-        let span = f32::from(METER_TOP.saturating_sub(METER_FLOOR));
-        let now = f32::from(level.saturating_sub(METER_FLOOR)) / span;
-        self.meter = now.clamp(0.0, 1.0).max(self.meter - 0.06);
+        self.meter = words::meter_after(self.meter, level);
         self.meter
     }
 
@@ -204,8 +209,10 @@ impl Window {
         );
         ui.add_space(18.0);
 
-        ui.label(RichText::new("YOUR NAME").small().color(ember::DIM));
-        ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(320.0));
+        // The field is named by its label, for those who are read the screen.
+        let label = ui.label(RichText::new("YOUR NAME").small().color(ember::DIM));
+        ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(320.0))
+            .labelled_by(label.id);
 
         ui.add_space(8.0);
         ui.label(RichText::new("MICROPHONE").small().color(ember::DIM));
@@ -332,17 +339,11 @@ impl Window {
     fn inside(&mut self, ui: &mut Ui, view: &View) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("PALAVER").size(20.0).strong());
-            let here = view.people.len().max(1);
             let elapsed = view.since.map_or(0, |since| since.elapsed().as_secs());
             ui.label(
-                RichText::new(format!(
-                    "{here:02} here · {:02}:{:02}:{:02}",
-                    elapsed / 3600,
-                    elapsed / 60 % 60,
-                    elapsed % 60
-                ))
-                .monospace()
-                .color(ember::QUIET),
+                RichText::new(words::header(view.people.len(), elapsed))
+                    .monospace()
+                    .color(ember::QUIET),
             );
         });
         ui.separator();
@@ -352,15 +353,7 @@ impl Window {
             .min((ui.available_height() - 210.0).max(160.0));
         circle(ui, side, &view.people, view.sound.voices);
 
-        let mut line = match view.links {
-            0 => String::from("no links yet · no server"),
-            1 => String::from("1 link · direct · no server"),
-            links => format!("{links} links · direct · no server"),
-        };
-        if let Some(network) = view.network.filter(|network| *network != "unknown") {
-            line.push_str(" · ");
-            line.push_str(network);
-        }
+        let line = words::links_line(view.links, view.network);
         ui.label(RichText::new(line).small().monospace().color(ember::DIM));
 
         let share = self.metered(if view.muted { 0 } else { view.sound.loudest });
@@ -409,18 +402,6 @@ fn meter(ui: &mut Ui, share: f32) {
     painter.rect_filled(lit, CornerRadius::same(2), ember::EMBER);
 }
 
-/// The first two letters of a name, as they stand on a person's disc.
-fn initials(name: &str) -> String {
-    let mut letters = name.trim().chars();
-    let first: String = letters
-        .next()
-        .into_iter()
-        .flat_map(char::to_uppercase)
-        .collect();
-    let second: String = letters.next().into_iter().collect();
-    format!("{first}{second}")
-}
-
 /// The people in a circle round the fire, which burns higher the more voices are heard.
 #[expect(
     clippy::cast_precision_loss,
@@ -449,10 +430,8 @@ fn circle(ui: &mut Ui, side: f32, people: &[Person], voices: usize) {
         return;
     }
     for (place, person) in people.iter().enumerate() {
-        // The first sits at the top; the rest go round clockwise.
-        let angle = std::f32::consts::TAU * place as f32 / people.len() as f32
-            - std::f32::consts::FRAC_PI_2;
-        let at = Pos2::new(centre.x + ring * angle.cos(), centre.y + ring * angle.sin());
+        let (across, down) = words::seat(place, people.len());
+        let at = Pos2::new(centre.x + ring * across, centre.y + ring * down);
         let edge = if person.me {
             Stroke::new(2.0, ember::EMBER)
         } else if person.linked {
@@ -464,7 +443,7 @@ fn circle(ui: &mut Ui, side: f32, people: &[Person], voices: usize) {
         painter.text(
             at,
             Align2::CENTER_CENTER,
-            initials(&person.name),
+            words::initials(&person.name),
             FontId::proportional(disc * 0.7),
             ember::TEXT,
         );
@@ -492,8 +471,9 @@ fn circle(ui: &mut Ui, side: f32, people: &[Person], voices: usize) {
     }
 }
 
-impl eframe::App for Window {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+impl Window {
+    /// Draw the window as things stand, and act on what was clicked.
+    pub fn draw(&mut self, ui: &mut Ui) {
         let view = self.session.view();
         self.leave_ticket(&view);
         let frame = egui::Frame::new()
@@ -506,6 +486,13 @@ impl eframe::App for Window {
             });
         });
         self.picture(ui.ctx());
+    }
+}
+
+impl eframe::App for Window {
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+        // The meters move whether or not anything is touched.
         ui.ctx().request_repaint_after(REDRAW);
     }
 }

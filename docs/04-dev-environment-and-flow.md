@@ -61,6 +61,27 @@ counts as failed; flaky tests are never retried; on failure, print where the log
 | **T6 native media** | Real cameras, microphones, speakers, echo cancellation, GPU rendering, UI | Windows host and the MacBook | GUI harness; scripted where possible, otherwise a short manual checklist per milestone | per milestone |
 | Fuzz / soak | Parsers survive hostile input; long meetings with chaos stay healthy | Linux | `cargo fuzz`; bots with random leave/crash/throttle | nightly |
 
+### Testing the app and its window
+
+The app is tested in layers, so that what needs a person is only what a person alone
+can judge.
+
+| Layer | What is checked | How | Tier |
+|---|---|---|---|
+| The call on devices (`harness::voice`) | What is said at one microphone comes out of another's speaker; the speaker keeps time | Made-up devices over the in-memory network | T1 |
+| The meeting behind the window (`harness::session`) | Every order and what the window is then shown: start, join by ticket, the ticket coming back, mute, leave, each way of failing | The session is given its node and its sound through two traits; tests give it the in-memory network and sound that only says it is there | T1 |
+| What the window says (`harness::words`) | The wording of each line, the meter, the initials, where people sit | Plain functions, unit tests | T1 |
+| The window itself (`harness::ui`) | What is shown in each state, and what each button asks the session for | `egui_kittest`: finds a widget by its label and clicks it, with no display. It also refuses a widget with no name for a screen reader | T1 |
+| How it looks | Layout, colour, type | `palaver-harness shot <file.png> [name]` takes a picture of the window, to be looked at. Pictures are not compared by machine: every font and driver difference would fail | by eye |
+| Real devices | That it sounds right | By hand, with `loopback` and its `other` mode for echo, and the numbers the window shows | T6 |
+
+Rules that keep it this way:
+
+- The window decides nothing. A decision goes in `words` or in the session, where it is
+  tested; the drawing code chooses colours and layout.
+- Nothing the window draws goes without a name. What is painted by hand (the circle of
+  people) is not yet reachable by the click tests or by a screen reader; that is a gap.
+
 ### Time budgets
 
 Test time is a first-class constraint, enforced by configuration rather than goodwill.
