@@ -14,7 +14,6 @@ use crate::history::{Heard, History, Linked, Past};
 pub use crate::history::{LinkLine, VoiceLine};
 use crate::live::{Live, Reading, Tuning};
 use palaver_media::Channels;
-use palaver_media::process::Settings;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
 use palaver_proto::SECRET_BYTES;
@@ -251,7 +250,7 @@ impl World for Real {
     }
 
     fn sound(&mut self, call: Call, playout: Channels) -> Result<Live, Box<NoSound>> {
-        let cleaning = Some(Settings::default());
+        let cleaning = Some(self.tuning.cleaning());
         Live::start(call, cleaning, playout, self.tuning.lead_ms).map_err(|failed| {
             Box::new(NoSound {
                 why: format!("Sound: {}", failed.error),

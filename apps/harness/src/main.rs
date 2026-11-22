@@ -3,6 +3,8 @@
 //! ```text
 //! palaver-harness                           the window
 //! palaver-harness window [--name <name>] [--ticket-file <path>]
+//!                        [--floor <frames>] [--margin <frames>] [--lead <ms>]
+//!                        [--noise <strength>]
 //!                                           the window, with the name filled in, and a
 //!                                           file that carries the ticket: written when
 //!                                           a meeting is started, read into the join
@@ -26,6 +28,8 @@
 //!   --margin <frames>       what the jitter buffer adds to the lateness it has seen
 //!                           (default 0)
 //!   --lead <ms>             how much sound is kept waiting for the speaker (default 20)
+//!   --noise <strength>      how hard the microphone's steady noise is turned down: low,
+//!                           moderate (the default), high or veryhigh
 //!   --seconds <n>           how long to stay (default: until stopped)
 //! ```
 //!
@@ -43,7 +47,7 @@
 use palaver_harness::live::{Live, Tuning};
 use palaver_harness::ui::{Setup, Shot};
 use palaver_media::Channels;
-use palaver_media::process::Settings;
+use palaver_media::process::NoiseStrength;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
 use palaver_proto::{Secret, Ticket};
@@ -61,7 +65,8 @@ struct Asked {
     advertise: Vec<SocketAddr>,
     stun: bool,
     ticket_file: Option<String>,
-    cleaning: Option<Settings>,
+    /// Send the microphone as it is.
+    raw: bool,
     tuning: Tuning,
     seconds: Option<u64>,
 }
@@ -82,7 +87,7 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
         advertise: Vec::new(),
         stun: true,
         ticket_file: None,
-        cleaning: Some(Settings::default()),
+        raw: false,
         tuning: Tuning::default(),
         seconds: None,
     };
@@ -98,9 +103,9 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
             "--advertise" => asked.advertise.push(address(value("an address")?)?),
             "--no-stun" => asked.stun = false,
             "--ticket-file" => asked.ticket_file = Some(value("a path")?),
-            "--raw" => asked.cleaning = None,
-            "--floor" | "--margin" | "--lead" => {
-                tune(&mut asked.tuning, &arg, &value("a number")?)?;
+            "--raw" => asked.raw = true,
+            "--floor" | "--margin" | "--lead" | "--noise" => {
+                tune(&mut asked.tuning, &arg, &value("a setting")?)?;
             }
             "--seconds" => {
                 let text = value("a number")?;
@@ -112,9 +117,19 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
     Ok(asked)
 }
 
-/// Set one of the delays being tried: `--floor` and `--margin` in frames of 20 ms,
-/// `--lead` in milliseconds.
+/// Set one of the things being tried: `--floor` and `--margin` in frames of 20 ms,
+/// `--lead` in milliseconds, `--noise` by name.
 fn tune(tuning: &mut Tuning, option: &str, text: &str) -> Result<(), String> {
+    if option == "--noise" {
+        tuning.noise = match text {
+            "low" => NoiseStrength::Low,
+            "moderate" => NoiseStrength::Moderate,
+            "high" => NoiseStrength::High,
+            "veryhigh" => NoiseStrength::VeryHigh,
+            _ => return Err(format!("not low, moderate, high or veryhigh: {text}")),
+        };
+        return Ok(());
+    }
     let number: u32 = text.parse().map_err(|_| format!("not a number: {text}"))?;
     match option {
         "--floor" => tuning.floor_frames = number.min(25),
@@ -169,7 +184,8 @@ async fn run(asked: Asked) -> Result<(), String> {
         Vec::new()
     };
 
-    let live = match Live::start(call, asked.cleaning, playout, asked.tuning.lead_ms) {
+    let cleaning = (!asked.raw).then(|| asked.tuning.cleaning());
+    let live = match Live::start(call, cleaning, playout, asked.tuning.lead_ms) {
         Ok(live) => live,
         Err(failed) => {
             if let Some(call) = failed.call {
@@ -292,8 +308,8 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
         let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what}"));
         match arg.as_str() {
             "--name" => setup.name = Some(value("a name")?),
-            "--floor" | "--margin" | "--lead" => {
-                tune(&mut setup.tuning, &arg, &value("a number")?)?;
+            "--floor" | "--margin" | "--lead" | "--noise" => {
+                tune(&mut setup.tuning, &arg, &value("a setting")?)?;
             }
             "--ticket-file" => setup.ticket_file = Some(value("a path")?),
             other => return Err(format!("unknown option: {other}")),
