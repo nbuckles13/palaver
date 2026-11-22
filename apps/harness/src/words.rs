@@ -67,13 +67,13 @@ pub const fn microphone_hint(finding: Finding, system: System) -> &'static str {
             "Nothing at all is coming from this microphone. It may be muted or switched off, on the device or in the system's sound settings."
         }
         (Finding::Processed, System::Windows) => {
-            "Windows is cleaning this microphone before Palaver gets it (Voice Focus or Voice Clarity). You may be heard faintly and cut off between words; turning that off usually sounds better."
+            "Windows is cleaning this microphone before Palaver gets it (Voice Focus or Voice Clarity). You may be heard faintly and cut off between words; turning that off often sounds better. If the microphone then hisses, turn it back on."
         }
         (Finding::Processed, System::Mac) => {
-            "The system is cleaning this microphone before Palaver gets it (Voice Isolation, under Mic Mode in the menu bar). You may be heard faintly and cut off between words; Standard usually sounds better."
+            "The system is cleaning this microphone before Palaver gets it (Voice Isolation, under Mic Mode in the menu bar). You may be heard faintly and cut off between words; Standard often sounds better."
         }
         (Finding::Processed, System::Other) => {
-            "Something is cleaning this microphone before Palaver gets it (noise suppression in the system or the device). You may be heard faintly and cut off between words; turning that off usually sounds better."
+            "Something is cleaning this microphone before Palaver gets it (noise suppression in the system or the device). You may be heard faintly and cut off between words; turning that off often sounds better. If the microphone then hisses, turn it back on."
         }
     }
 }
@@ -252,6 +252,117 @@ pub fn link_line(name: &str, rtt: Duration, sent: u64, lost: u64) -> String {
         tenths / 10,
         tenths % 10
     )
+}
+
+/// A voice's line, with a word added when it is not being played and the line is of how
+/// it last was.
+#[must_use]
+pub fn resting(line: String, playing: bool) -> String {
+    if playing {
+        line
+    } else {
+        format!("{line} · not playing now")
+    }
+}
+
+/// The top of a plot's scale: the least of 1, 2 or 5 times a power of ten that holds
+/// everything in `past`, and `least` too, so that small numbers are not drawn large.
+#[must_use]
+pub fn plot_top(past: &[Option<u32>], least: u32) -> u32 {
+    let most = past.iter().flatten().copied().max().unwrap_or(0).max(least);
+    let mut ten = 1u32;
+    loop {
+        for step in [1u32, 2, 5] {
+            let top = ten.saturating_mul(step);
+            if top >= most || top == u32::MAX {
+                return top;
+            }
+        }
+        ten = ten.saturating_mul(10);
+    }
+}
+
+/// The lines of a plot, in a square from (0, 0) at the top left to (1, 1).
+///
+/// One run of points for each unbroken stretch of values, the newest at the right edge,
+/// and a full `kept` of them reaching the left.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a few hundred values and what they measure, as places on the screen"
+)]
+pub fn plot_runs(past: &[Option<u32>], top: u32, kept: usize) -> Vec<Vec<(f32, f32)>> {
+    let across = kept.saturating_sub(1).max(1) as f32;
+    let first = kept.saturating_sub(past.len());
+    let mut runs = Vec::new();
+    let mut run = Vec::new();
+    for (place, value) in past.iter().enumerate() {
+        match value {
+            Some(value) => {
+                let x = (first.saturating_add(place)) as f32 / across;
+                let y = 1.0 - (*value as f32 / top.max(1) as f32).clamp(0.0, 1.0);
+                run.push((x.clamp(0.0, 1.0), y));
+            }
+            None => {
+                if !run.is_empty() {
+                    runs.push(std::mem::take(&mut run));
+                }
+            }
+        }
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    runs
+}
+
+/// What stands over a plot: what it is of, its value now, and the most it has been.
+#[must_use]
+pub fn plot_caption(what: &str, past: &[Option<u32>]) -> String {
+    let now = past
+        .last()
+        .copied()
+        .flatten()
+        .map_or_else(|| String::from("–"), |now| now.to_string());
+    let most = past.iter().flatten().copied().max().unwrap_or(0);
+    format!("{what} · now {now} · most {most}")
+}
+
+/// The value of a plot under a pointer `across` its width (0 at the left edge, 1 at the
+/// right), and how many values ago it was. `None` where nothing is drawn.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a place among a few hundred values, from a share of a width kept within 0 and 1"
+)]
+pub fn plot_at(past: &[Option<u32>], kept: usize, across: f32) -> Option<(u32, usize)> {
+    let last = kept.saturating_sub(1);
+    let slot = (across.clamp(0.0, 1.0) * last as f32).round() as usize;
+    let place = slot.checked_sub(kept.saturating_sub(past.len()))?;
+    let value = past.get(place).copied().flatten()?;
+    Some((value, last.saturating_sub(slot)))
+}
+
+/// What is said of the value under the pointer: a value is taken each second.
+#[must_use]
+pub fn plot_pointed(value: u32, ago: usize) -> String {
+    match ago {
+        0 => format!("{value} · now"),
+        ago => format!("{value} · {ago} s ago"),
+    }
+}
+
+/// How wide the window should become to hold something `extra` wide beside what it shows.
+///
+/// `None` if it should stay as it is and give up some of its own room: when it already
+/// fills the screen, or would not fit on it.
+#[must_use]
+pub fn grown_width(inner: f32, extra: f32, screen: Option<f32>, fills_screen: bool) -> Option<f32> {
+    let wanted = inner + extra;
+    let fits = screen.is_none_or(|screen| wanted <= screen);
+    (!fills_screen && fits).then_some(wanted)
 }
 
 /// The first two letters of a name, as they stand on a person's disc.
@@ -443,6 +554,74 @@ mod tests {
                 "Say something. The bar should move."
             );
         }
+    }
+
+    #[test]
+    fn a_plots_scale_is_a_round_number_that_holds_everything() {
+        assert_eq!(plot_top(&[Some(3), None, Some(7)], 0), 10);
+        assert_eq!(plot_top(&[Some(11)], 0), 20);
+        assert_eq!(plot_top(&[Some(21)], 0), 50);
+        assert_eq!(plot_top(&[Some(500)], 0), 500);
+        assert_eq!(plot_top(&[Some(501)], 0), 1000);
+        // Nothing to draw, or only small numbers, and the least still stands.
+        assert_eq!(plot_top(&[], 5), 5);
+        assert_eq!(plot_top(&[Some(1)], 50), 50);
+        assert_eq!(plot_top(&[None], 0), 1);
+        assert_eq!(plot_top(&[Some(u32::MAX)], 0), u32::MAX);
+    }
+
+    #[test]
+    fn a_plot_is_drawn_from_the_right_and_broken_where_there_was_nothing() {
+        // Five kept, three known: they stand in the last three places.
+        let runs = plot_runs(&[Some(0), Some(5), Some(10)], 10, 5);
+        assert_eq!(runs, [vec![(0.5, 1.0), (0.75, 0.5), (1.0, 0.0)]]);
+        // A gap makes two runs; what is over the top is drawn at the top.
+        let runs = plot_runs(&[Some(10), None, None, Some(0), Some(30)], 10, 5);
+        assert_eq!(runs, [vec![(0.0, 0.0)], vec![(0.75, 1.0), (1.0, 0.0)]]);
+        assert!(plot_runs(&[None, None], 10, 5).is_empty());
+    }
+
+    #[test]
+    fn a_plots_caption_gives_now_and_the_most() {
+        assert_eq!(
+            plot_caption("round trip, ms", &[Some(7), Some(12), Some(9)]),
+            "round trip, ms · now 9 · most 12"
+        );
+        assert_eq!(
+            plot_caption("heard after, ms", &[Some(70), None]),
+            "heard after, ms · now – · most 70"
+        );
+        assert_eq!(
+            resting(String::from("Bo: heard"), false),
+            "Bo: heard · not playing now"
+        );
+        assert_eq!(resting(String::from("Bo: heard"), true), "Bo: heard");
+    }
+
+    #[test]
+    fn the_value_under_the_pointer_is_found_by_how_far_across_it_is() {
+        // Five kept, three known: they stand in the last three places.
+        let past = [Some(4), None, Some(9)];
+        assert_eq!(plot_at(&past, 5, 1.0), Some((9, 0)));
+        assert_eq!(plot_at(&past, 5, 0.5), Some((4, 2)));
+        // A gap, and the places before anything was kept, have nothing under them.
+        assert_eq!(plot_at(&past, 5, 0.75), None);
+        assert_eq!(plot_at(&past, 5, 0.0), None);
+        // The nearest value is the one meant, and the edges are not overrun.
+        assert_eq!(plot_at(&past, 5, 0.9), Some((9, 0)));
+        assert_eq!(plot_at(&past, 5, 7.0), Some((9, 0)));
+        assert_eq!(plot_pointed(9, 0), "9 · now");
+        assert_eq!(plot_pointed(4, 2), "4 · 2 s ago");
+    }
+
+    #[test]
+    fn the_window_grows_for_the_details_only_where_there_is_room() {
+        assert_eq!(grown_width(520.0, 400.0, Some(1920.0), false), Some(920.0));
+        assert_eq!(grown_width(520.0, 400.0, None, false), Some(920.0));
+        // A window that fills its screen, or would run off it, keeps its size.
+        assert_eq!(grown_width(1280.0, 400.0, Some(1280.0), false), None);
+        assert_eq!(grown_width(1000.0, 400.0, Some(1280.0), false), None);
+        assert_eq!(grown_width(520.0, 400.0, Some(1920.0), true), None);
     }
 
     #[test]

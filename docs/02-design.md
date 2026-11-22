@@ -908,14 +908,19 @@ What there is so far, in three layers:
   keeping a view up to date. The window only draws the view and sends orders, so it
   never waits on the network.
 - `check::MicCheck` listens to the microphone outside a meeting, for the meter on the
-  first screen.
+  first screen. `check::Ear` judges what a microphone gives (nothing, cleaned by the
+  system first, faint, good) by its sound alone; the check runs one, and so does the
+  sound thread during a meeting.
+- `history::History` keeps the voices and links as they are and two minutes of the
+  numbers worth watching, one value a second, for the details to draw over time.
 - **The window** (`ui`, egui through `eframe`, drawn with OpenGL): run the program with
   no arguments. Outside a meeting: a name, the microphone and its meter, start a
   meeting, or paste a ticket and join. Inside: the people in a circle round a fire that
   burns higher the more voices are heard, mute, "bring someone in" (a ticket to the
-  clipboard), leave, and both ends of the ticket coming back. The colours are the
-  "Ember" look. Still to come from the designs: the grid and the map, the fonts, the
-  details drawer, who is talking.
+  clipboard), leave, both ends of the ticket coming back, and the details, which slide
+  out beside the meeting: this machine, each link and each voice, as numbers and as
+  lines over time. The colours are the "Ember" look. Still to come from the designs:
+  the grid and the map, the fonts, who is talking.
 - **Threads.** What runs where in the app, and what each may wait on:
 
   | Thread | What it does | Waits on |

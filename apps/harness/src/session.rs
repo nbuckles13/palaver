@@ -10,9 +10,10 @@
 //! sound that only says it is there, so that everything the session decides is tested
 //! without a network or a sound card.
 
+use crate::history::{Heard, History, Linked, Past};
+pub use crate::history::{LinkLine, VoiceLine};
 use crate::live::{Live, Reading, Tuning};
 use palaver_media::Channels;
-use palaver_media::jitter::Stats as JitterStats;
 use palaver_media::process::Settings;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
@@ -92,25 +93,6 @@ impl<T: Ord + Copy + Default> Worst<T> {
     }
 }
 
-/// How one voice being played is faring.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VoiceLine {
-    pub name: String,
-    /// The playout delay its jitter buffer is aiming for.
-    pub delay: Duration,
-    pub stats: JitterStats,
-}
-
-/// One connection to another participant, as the details show it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinkLine {
-    pub name: String,
-    pub rtt: Duration,
-    /// Packets sent on it, and how many of them were lost.
-    pub sent: u64,
-    pub lost: u64,
-}
-
 /// The numbers behind how the meeting sounds, each the worst of the last five seconds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Details {
@@ -122,6 +104,9 @@ pub struct Details {
     pub network_late: Duration,
     /// The most sound that waited for the speaker.
     pub speaker_lead: Duration,
+    /// The sound thread's longest wait in each of the last seconds, in milliseconds.
+    pub sound_gap_past: Past,
+    /// Every voice played in the last two minutes.
     pub voices: Vec<VoiceLine>,
     /// The connections this node has, as they are now.
     pub links: Vec<LinkLine>,
@@ -135,16 +120,21 @@ struct Gauges {
     speaker_lead: Worst<Duration>,
     /// The latest the pulse has been since the last refresh.
     late_now: Duration,
+    history: History,
+    /// When the meeting's sound began, by the session's clock.
+    began: tokio::time::Instant,
 }
 
 impl Gauges {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             sound_gap: Worst::of_last(REMEMBERED),
             sound_burst: Worst::of_last(REMEMBERED),
             network_late: Worst::of_last(REMEMBERED),
             speaker_lead: Worst::of_last(REMEMBERED),
             late_now: Duration::ZERO,
+            history: History::default(),
+            began: tokio::time::Instant::now(),
         }
     }
 }
@@ -384,41 +374,49 @@ fn refresh(
             .and_then(|place| status.names.get(place))
             .map_or_else(|| String::from("someone"), |name| name.reveal().clone())
     };
-    let links = links
+    let linked = links
         .into_iter()
-        .map(|link| LinkLine {
+        .map(|link| Linked {
             name: name_of(&link.peer),
+            peer: link.peer,
             rtt: link.rtt,
             sent: link.sent,
             lost: link.lost,
         })
         .collect();
     // Whose voice each alias is, by the plan.
-    let voices = sound
+    let heard = sound
         .gauges
         .iter()
-        .map(|gauge| {
-            let name = status
+        .map(|gauge| Heard {
+            alias: gauge.alias,
+            name: status
                 .microphones
                 .iter()
                 .find(|(alias, _)| *alias == gauge.alias)
-                .map_or_else(|| String::from("someone"), |(_, id)| name_of(id));
-            VoiceLine {
-                name,
-                delay: gauge.delay,
-                stats: gauge.stats,
-            }
+                .map_or_else(|| String::from("someone"), |(_, id)| name_of(id)),
+            delay: gauge.delay,
+            stats: gauge.stats,
         })
         .collect();
+    let speaker_lead = gauges.speaker_lead.after(sound.lead);
+    gauges.history.note(
+        gauges.began.elapsed(),
+        sound.longest_gap,
+        speaker_lead,
+        heard,
+        linked,
+    );
     let details = Details {
         sound_gap: gauges.sound_gap.after(sound.longest_gap),
         sound_burst: gauges.sound_burst.after(sound.largest_burst),
         network_late: gauges
             .network_late
             .after(std::mem::take(&mut gauges.late_now)),
-        speaker_lead: gauges.speaker_lead.after(sound.lead),
-        voices,
-        links,
+        speaker_lead,
+        sound_gap_past: gauges.history.sound_gap(),
+        voices: gauges.history.voices(),
+        links: gauges.history.links(),
     };
     let me = participant.control().me().clone();
     let people: Vec<Person> = status

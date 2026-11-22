@@ -170,6 +170,20 @@ level to its target within seconds.
   setting the device's input level, so that a faint microphone can be raised from here;
   and choosing a microphone other than the default. To be checked on a Mac: what an app
   refused the microphone is given (silence, or an error on opening).
+- Seen on a handheld's built-in microphone (2026-11-22; its choices are Off, Device
+  Default Effects and Voice Clarity): with them off, the far end heard a pulsing hiss
+  all the time, which a headset on another machine does not give. Not yet recorded or
+  measured. The likely cause is that microphone's own noise, which the maker's effects
+  were hiding, lifted by our level control because its voice is faint, with the pulse
+  being the level control or the noise suppression hunting, or sending starting and
+  stopping. A first recording, made with `loopback` through the handheld's own speaker,
+  shows only that speaker feeding its microphone (a 9 kHz ring every 196 ms, the round
+  trip of the loop) and settles nothing; between rings the microphone as it is sits at
+  about -52 dB, and -60 dB or lower after our cleaning. To be recorded again with the
+  speaker silent. So the advice cannot be "always turn the system's cleaning off": the check
+  now says it often sounds better and to turn it back on if the microphone hisses. To
+  do: record it (`loopback save` on that machine) and find which of ours is pulsing;
+  stronger noise suppression when the level control is lifting a faint microphone.
 - To find out: whether the level control can be made to climb faster for a faint voice
   (its settings, or a first guess at the gain from the first seconds of speech), without
   bringing up the noise of a quiet room when nobody is talking.
@@ -297,17 +311,40 @@ target where it was when the lateness is a trend and not a scatter, and shed soo
 
 ### The statistics panel
 
-The details are a list of lines under the meeting for now. To become a panel that slides
-out, organised by what it is about (this machine's sound, each link, each voice), with:
+A first pass is in: the details slide out beside the meeting (the window grows by their
+width), in three parts: this machine, each direct link, each voice. Each has its numbers
+as they stand and, for the ones worth watching, a line over the last two minutes, one
+value a second: the sound thread's longest wait; a link's round trip and packets lost a
+second; a voice's delay from arriving to being heard and its frames lost or late a
+second. The history is kept by the session and only read by the window. A voice that
+stops stays listed, with a gap in its line, until it has been silent two minutes.
 
-- the present value of each number as a gauge or a counter, as now;
-- for the ones that matter, a line drawn over time that moves as the call goes on: each
-  voice's delay and what was lost or late, each link's round trip and loss, the sound
-  thread's waits. A history of a minute or two, kept by the session and only read by
-  the window.
+Each plot has a scale down its side and says the value under the pointer. In a window
+that fills its screen the details take their width from the meeting; otherwise the
+window grows for them.
 
-Names to settle there too: a link line is for a direct connection, and a voice line for
-a voice however many hops it came.
+To decide: a voice's plots stop when its sender is muted or silent, because nothing is
+sent then and there is nothing to measure. A small packet now and then through silence
+(Opus makes one every 400 ms; we drop it today) would keep the measurements going and
+the far end's jitter buffer warm, for a little traffic from every silent participant.
+
+To do:
+
+- Gauges for the numbers as they stand, in place of sentences; the sentences are a
+  developer's.
+- A plot's line only says its scale in words. Marks along its edge, and the value under
+  the pointer.
+- More to draw as it comes: the speaker's lead, what the microphone sends, the plan's
+  changes, each hop of a voice that came by more than one.
+- Names: a link line is for a direct connection, and a voice line for a voice however
+  many hops it came. To be made plain on the page.
+
+### What stands for someone whose camera is off
+
+To settle when video comes: what a tile shows for a participant with no picture (camera
+off, or none sent to this node). Candidates: the name, initials on a disc as in the
+circle today, an icon, a picture the participant chose. A chosen picture has to be
+carried to everyone, which the others do not.
 
 ### Bots that say words
 

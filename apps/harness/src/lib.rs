@@ -5,6 +5,7 @@
 //! The program in `main.rs` is a call from the command line; the window comes next.
 
 pub mod check;
+pub mod history;
 pub mod live;
 pub mod png;
 pub mod session;

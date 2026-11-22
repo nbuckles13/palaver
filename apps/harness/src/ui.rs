@@ -59,6 +59,16 @@ pub struct Setup {
 /// How long the window is left to settle before its picture is taken.
 const SETTLE: Duration = Duration::from_secs(3);
 
+/// Whether the details stand beside the meeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drawer {
+    Shut,
+    /// Open in the window as it was, taking their width from the meeting.
+    Open,
+    /// Open, in a window made wider for them, to be made narrower again.
+    OpenWider,
+}
+
 /// The window's own state: what has been typed, and what is being listened to.
 pub struct Window {
     session: Session,
@@ -72,6 +82,8 @@ pub struct Window {
     meter: f32,
     copied: Option<&'static str>,
     shot: Option<Shot>,
+    /// Whether the details stand beside the meeting.
+    details: Drawer,
     ticket_file: Option<String>,
     /// The ticket last written to the file, so that it is written once.
     written: Option<String>,
@@ -134,6 +146,12 @@ impl Window {
             ask_outside: true,
             meter: 0.0,
             copied: None,
+            // Closed until asked for; open in a picture, so that the picture shows them.
+            details: if setup.shot.is_some() {
+                Drawer::Open
+            } else {
+                Drawer::Shut
+            },
             shot: setup.shot,
             ticket_file: setup.ticket_file,
             written: None,
@@ -389,7 +407,13 @@ impl Window {
                     self.copied = Some("The ticket is on the clipboard. Send it to them.");
                 }
             }
+            if ui.button("Details").clicked() {
+                self.toggle_details(ui.ctx());
+            }
             if ui.button("Leave").clicked() {
+                if self.details != Drawer::Shut {
+                    self.toggle_details(ui.ctx());
+                }
                 self.session.order(Order::Leave);
                 self.copied = None;
                 self.check = Some(MicCheck::start());
@@ -400,35 +424,197 @@ impl Window {
         }
 
         self.getting_in(ui, view);
-        // Closed until asked for; open in a picture, so that the picture shows them.
-        let details = egui::CollapsingHeader::new("Details").default_open(self.shot.is_some());
-        details.show(ui, |ui| {
-            let small = |text: String| RichText::new(text).small().monospace().color(ember::QUIET);
-            ui.label(small(format!("{} → {}", view.microphone, view.speaker)));
-            ui.label(small(words::sound_line(
-                view.details.sound_gap,
-                view.details.sound_burst,
-                view.sound.starved,
-                view.sound.dropped,
-            )));
-            ui.label(small(words::network_line(view.details.network_late)));
-            for link in &view.details.links {
-                ui.label(small(words::link_line(
-                    &link.name, link.rtt, link.sent, link.lost,
-                )));
-            }
-            for voice in &view.details.voices {
-                ui.label(small(words::voice_line(
-                    &voice.name,
-                    voice.delay,
-                    view.details.speaker_lead,
-                    &voice.stats,
-                )));
-            }
-            if view.details.voices.is_empty() {
-                ui.label(small(String::from("no voices are being played")));
-            }
+    }
+
+    /// Open the details beside the meeting, or close them. Where there is room on the
+    /// screen the window grows by their width, so that the meeting keeps its own, and
+    /// shrinks again; where there is not, they take their width from the meeting.
+    fn toggle_details(&mut self, context: &egui::Context) {
+        let opening = self.details == Drawer::Shut;
+        let grew = std::mem::replace(
+            &mut self.details,
+            if opening { Drawer::Open } else { Drawer::Shut },
+        ) == Drawer::OpenWider;
+        let (inner, screen, fills) = context.input(|input| {
+            let viewport = input.viewport();
+            (
+                viewport.inner_rect,
+                viewport.monitor_size.map(|size| size.x),
+                viewport.maximized.unwrap_or(false) || viewport.fullscreen.unwrap_or(false),
+            )
         });
+        let Some(inner) = inner else {
+            return;
+        };
+        let width = if opening {
+            let grown = words::grown_width(inner.width(), DETAILS_WIDTH, screen, fills);
+            if grown.is_some() {
+                self.details = Drawer::OpenWider;
+            }
+            grown
+        } else {
+            grew.then(|| (inner.width() - DETAILS_WIDTH).max(MIN_WIDTH))
+        };
+        if let Some(width) = width {
+            context.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                width,
+                inner.height(),
+            )));
+        }
+    }
+
+    /// The details: this machine, each link and each voice, as they are now and as they
+    /// have been over the last two minutes.
+    fn details(ui: &mut Ui, view: &View) {
+        let small = |text: String| RichText::new(text).small().monospace().color(ember::QUIET);
+        let heading = |ui: &mut Ui, text: &str| {
+            ui.add_space(6.0);
+            ui.label(RichText::new(text).small().color(ember::DIM));
+        };
+        ui.label(RichText::new("DETAILS").strong().color(ember::TEXT));
+        ui.label(
+            RichText::new("Each line is drawn over the last two minutes.")
+                .small()
+                .color(ember::DIM),
+        );
+
+        heading(ui, "THIS MACHINE");
+        ui.label(small(format!("{} → {}", view.microphone, view.speaker)));
+        ui.label(small(words::sound_line(
+            view.details.sound_gap,
+            view.details.sound_burst,
+            view.sound.starved,
+            view.sound.dropped,
+        )));
+        ui.label(small(words::network_line(view.details.network_late)));
+        plot(
+            ui,
+            "sound thread's longest wait, ms",
+            &view.details.sound_gap_past,
+            50,
+        );
+
+        heading(ui, "LINKS");
+        for link in &view.details.links {
+            ui.label(small(words::link_line(
+                &link.name, link.rtt, link.sent, link.lost,
+            )));
+            plot(ui, "round trip, ms", &link.rtt_past, 50);
+            plot(ui, "packets lost a second", &link.lost_past, 5);
+        }
+        if view.details.links.is_empty() {
+            ui.label(small(String::from("no links yet")));
+        }
+
+        heading(ui, "VOICES");
+        for voice in &view.details.voices {
+            let line = words::voice_line(
+                &voice.name,
+                voice.delay,
+                view.details.speaker_lead,
+                &voice.stats,
+            );
+            ui.label(small(words::resting(line, voice.playing)));
+            plot(ui, "heard after arriving, ms", &voice.delay_past, 100);
+            plot(ui, "frames lost or late a second", &voice.trouble_past, 5);
+        }
+        if view.details.voices.is_empty() {
+            ui.label(small(String::from("no voices are being played")));
+        }
+    }
+}
+
+/// How wide the details are, beside the meeting.
+const DETAILS_WIDTH: f32 = 400.0;
+/// The least width the window is given.
+const MIN_WIDTH: f32 = 420.0;
+
+/// How much of a plot's width is kept for the numbers of its scale.
+const SCALE_WIDTH: f32 = 34.0;
+
+/// One number over the last two minutes: a caption, and under it a line against a scale,
+/// with the value under the pointer said beside it. `least` is the least the top of the
+/// scale may be, so that a small number is not drawn as a large one.
+fn plot(ui: &mut Ui, what: &str, past: &[Option<u32>], least: u32) {
+    let top = words::plot_top(past, least);
+    ui.label(
+        RichText::new(words::plot_caption(what, past))
+            .small()
+            .color(ember::DIM),
+    );
+    let size = Vec2::new(ui.available_width().min(360.0), 44.0);
+    let (area, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter();
+    // A little room above and below, so that a line at either edge is seen whole.
+    let field = Rect::from_min_max(
+        Pos2::new(area.left() + SCALE_WIDTH, area.top()),
+        area.right_bottom(),
+    );
+    let inner = field.shrink2(Vec2::new(2.0, 4.0));
+    painter.rect_filled(field, CornerRadius::same(2), ember::GROUND);
+    // The scale: its top, its middle and nought, each with a faint line across.
+    let font = FontId::monospace(9.0);
+    // The middle of an odd top is not a whole number, and is left unmarked.
+    let middle = top.is_multiple_of(2).then_some(top / 2);
+    for (share, mark) in [(0.0, Some(top)), (0.5, middle), (1.0, Some(0))] {
+        let y = inner.top() + share * inner.height();
+        if let Some(mark) = mark {
+            painter.text(
+                Pos2::new(field.left() - 5.0, y),
+                Align2::RIGHT_CENTER,
+                mark.to_string(),
+                font.clone(),
+                ember::QUIET,
+            );
+        }
+        painter.line_segment(
+            [Pos2::new(inner.left(), y), Pos2::new(inner.right(), y)],
+            Stroke::new(1.0, ember::PANEL),
+        );
+    }
+    let place = |(x, y): (f32, f32)| {
+        Pos2::new(
+            inner.left() + x * inner.width(),
+            inner.top() + y * inner.height(),
+        )
+    };
+    let runs = words::plot_runs(past, top, crate::history::KEPT);
+    for run in &runs {
+        let points: Vec<Pos2> = run.iter().copied().map(place).collect();
+        match points.as_slice() {
+            [alone] => {
+                painter.circle_filled(*alone, 1.5, ember::EMBER);
+            }
+            _ => {
+                painter.line(points, Stroke::new(1.5, ember::EMBER));
+            }
+        }
+    }
+    // Under the pointer: a line down the plot, and the value there, written beside the
+    // line on whichever side has the room.
+    let pointed = ui
+        .ctx()
+        .pointer_hover_pos()
+        .filter(|at| field.contains(*at) && ui.rect_contains_pointer(field))
+        .and_then(|at| {
+            let across = (at.x - inner.left()) / inner.width().max(1.0);
+            words::plot_at(past, crate::history::KEPT, across).map(|found| (at.x, found))
+        });
+    if let Some((x, (value, ago))) = pointed {
+        painter.line_segment(
+            [Pos2::new(x, inner.top()), Pos2::new(x, inner.bottom())],
+            Stroke::new(1.0, ember::QUIET),
+        );
+        let (anchor, beside) = if x > field.center().x {
+            (Align2::RIGHT_TOP, x - 5.0)
+        } else {
+            (Align2::LEFT_TOP, x + 5.0)
+        };
+        let words = words::plot_pointed(value, ago);
+        let said = painter.layout_no_wrap(words, FontId::monospace(10.0), ember::TEXT);
+        let at = anchor.anchor_size(Pos2::new(beside, field.top() + 2.0), said.size());
+        painter.rect_filled(at.expand(2.0), CornerRadius::same(2), ember::PANEL);
+        painter.galley(at.min, said, ember::TEXT);
     }
 }
 
@@ -551,6 +737,22 @@ impl Window {
         let frame = egui::Frame::new()
             .fill(ember::GROUND)
             .inner_margin(egui::Margin::symmetric(28, 20));
+        if self.details != Drawer::Shut && view.stage == Stage::In {
+            let beside = egui::Frame::new()
+                .fill(ember::PANEL)
+                .inner_margin(egui::Margin::symmetric(16, 20));
+            // In a window that could not grow for them, they leave the meeting some room.
+            let width = DETAILS_WIDTH.min((ui.available_width() - 240.0).max(200.0));
+            egui::Panel::right("details")
+                .exact_size(width)
+                .resizable(false)
+                .frame(beside)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("details")
+                        .show(ui, |ui| Self::details(ui, &view));
+                });
+        }
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| match view.stage {
                 Stage::Out | Stage::Starting => self.outside(ui, &view),
@@ -578,13 +780,17 @@ impl eframe::App for Window {
 /// With a shot in `setup`, the window takes a picture of itself after a few seconds and
 /// closes.
 pub fn run(setup: Setup) -> Result<(), String> {
-    // A picture shows the details open, and is taller to hold them.
-    let height = if setup.shot.is_some() { 900.0 } else { 720.0 };
+    // A picture shows the details open, and is wider to hold them.
+    let width = if setup.shot.is_some() {
+        520.0 + DETAILS_WIDTH
+    } else {
+        520.0
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Palaver")
-            .with_inner_size([520.0, height])
-            .with_min_inner_size([420.0, 560.0]),
+            .with_inner_size([width, 720.0])
+            .with_min_inner_size([MIN_WIDTH, 560.0]),
         ..eframe::NativeOptions::default()
     };
     eframe::run_native(
