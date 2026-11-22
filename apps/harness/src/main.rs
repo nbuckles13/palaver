@@ -34,7 +34,7 @@
 //!
 //! ```text
 //! second 3: roster 2, links 1, hears 1 voice; microphone -28 dB, 150 frames, 97 sent;
-//!     speaker 148 frames, starved 0, dropped 0
+//!     speaker 148 frames, dry 0 ms, behind 0 ms
 //! ```
 //!
 //! A joiner nobody can answer prints a `reply` ticket to send back to whoever invited
@@ -264,15 +264,15 @@ async fn stay(participant: &mut Participant, live: &Live, asked: &Asked, names: 
         let sound = live.meter().read();
         println!(
             "second {second}: roster {roster}, links {connected}, hears {} voice{}; \
-             microphone {} dB, {} frames, {} sent; speaker {} frames, starved {}, dropped {}",
+             microphone {} dB, {} frames, {} sent; speaker {} frames, dry {} ms, behind {} ms",
             sound.voices,
             if sound.voices == 1 { "" } else { "s" },
             decibels(sound.loudest),
             sound.captured,
             sound.sent,
             sound.played,
-            sound.starved,
-            sound.dropped
+            sound.starved.as_millis(),
+            sound.dropped.as_millis()
         );
     }
 }

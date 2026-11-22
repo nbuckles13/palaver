@@ -60,14 +60,18 @@ pub fn millis(time: Duration) -> String {
     format!("{} ms", time.as_millis())
 }
 
-/// How the sound thread is keeping up: its longest wait between turns and the most
-/// frames the microphone had waiting at once, then what the speaker went short of and
-/// was too slow to take.
+/// How the sound thread is keeping up.
+///
+/// Its longest wait between turns and the most frames the microphone had waiting at
+/// once; then how much sound the speaker wanted and did not get since the meeting's
+/// sound began, and how much it was too slow to take.
 #[must_use]
-pub fn sound_line(gap: Duration, burst: usize, starved: u64, dropped: u64) -> String {
+pub fn sound_line(gap: Duration, burst: usize, starved: Duration, dropped: Duration) -> String {
     format!(
-        "sound thread: longest wait {} · most frames at once {burst} · speaker short {starved} · dropped {dropped}",
-        millis(gap)
+        "sound thread: longest wait {} · most frames at once {burst} · speaker ran dry for {} · fell behind by {}",
+        millis(gap),
+        millis(starved),
+        millis(dropped)
     )
 }
 
@@ -191,8 +195,13 @@ mod tests {
     #[test]
     fn the_details_say_how_the_threads_and_each_voice_are_faring() {
         assert_eq!(
-            sound_line(Duration::from_micros(14_900), 2, 960, 0),
-            "sound thread: longest wait 14 ms · most frames at once 2 · speaker short 960 · dropped 0"
+            sound_line(
+                Duration::from_micros(14_900),
+                2,
+                Duration::from_millis(20),
+                Duration::ZERO
+            ),
+            "sound thread: longest wait 14 ms · most frames at once 2 · speaker ran dry for 20 ms · fell behind by 0 ms"
         );
         assert_eq!(
             network_line(Duration::from_millis(3)),

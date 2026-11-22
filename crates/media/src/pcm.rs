@@ -183,8 +183,11 @@ pub struct Playback {
     /// The most to hold, in samples per channel. A device that asks for less than it is
     /// given would otherwise fall ever further behind the present.
     limit: usize,
-    /// Samples (per channel) the device asked for and there were none to give.
+    /// Samples (per channel) the device asked for and there were none to give, once it
+    /// had been given its first. Before that it is only waiting for things to begin.
     starved: u64,
+    /// Whether anything has been given yet.
+    begun: bool,
     /// Samples (per channel) thrown away because the device was not asking for them
     /// fast enough.
     dropped: u64,
@@ -207,12 +210,14 @@ impl Playback {
             ready: VecDeque::new(),
             limit: usize::try_from(limit).unwrap_or(usize::MAX),
             starved: 0,
+            begun: false,
             dropped: 0,
         })
     }
 
     /// Give one frame to be played, in the pipeline's channels.
     pub fn push(&mut self, frame: &[f32]) {
+        self.begun = true;
         match self.lanes.as_mut_slice() {
             [one] => {
                 one.given.clear();
@@ -244,7 +249,7 @@ impl Playback {
                 Channels::Stereo => self.ready.pop_front(),
             };
             let (Some(left), Some(right)) = (first, second) else {
-                self.starved = self.starved.saturating_add(1);
+                self.starved = self.starved.saturating_add(u64::from(self.begun));
                 group.fill(0.0);
                 continue;
             };
@@ -363,7 +368,8 @@ mod tests {
         let mut out = [9.0; 8];
         playback.fill(&mut out);
         assert_eq!(out, [0.0; 8]);
-        assert_eq!(playback.starved_and_dropped(), (4, 0));
+        // Silence before anything was given is waiting to begin, and not counted.
+        assert_eq!(playback.starved_and_dropped(), (0, 0));
 
         let frame: Vec<f32> = (0..FRAME_SAMPLES).map(|n| n as f32).collect();
         playback.push(&frame);

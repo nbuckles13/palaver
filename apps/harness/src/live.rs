@@ -67,6 +67,7 @@ pub struct Meter {
     captured: AtomicU64,
     sent: AtomicU64,
     played: AtomicU64,
+    /// In microseconds of sound.
     starved: AtomicU64,
     dropped: AtomicU64,
     /// The longest stretch between two turns, in microseconds, since the last reading.
@@ -90,9 +91,10 @@ pub struct Reading {
     pub captured: u64,
     pub sent: u64,
     pub played: u64,
-    /// Samples the speaker wanted and did not get, and samples it was too slow to take.
-    pub starved: u64,
-    pub dropped: u64,
+    /// How much sound the speaker wanted and did not get since it was first given some,
+    /// and how much it was too slow to take.
+    pub starved: Duration,
+    pub dropped: Duration,
     /// The longest the sound thread went between two turns since the last reading. It
     /// should be about how often the speaker takes sound (10 ms); much more means the
     /// thread was kept waiting for the processor.
@@ -149,8 +151,8 @@ impl Meter {
             captured: self.captured.load(Ordering::Relaxed),
             sent: self.sent.load(Ordering::Relaxed),
             played: self.played.load(Ordering::Relaxed),
-            starved: self.starved.load(Ordering::Relaxed),
-            dropped: self.dropped.load(Ordering::Relaxed),
+            starved: Duration::from_micros(self.starved.load(Ordering::Relaxed)),
+            dropped: Duration::from_micros(self.dropped.load(Ordering::Relaxed)),
             longest_gap: Duration::from_micros(self.longest_gap.swap(0, Ordering::Relaxed)),
             largest_burst: self.largest_burst.swap(0, Ordering::Relaxed),
             gauges: self
@@ -226,11 +228,12 @@ impl Live {
                 last = now;
                 voice.set_muted(muting.load(Ordering::Relaxed));
                 let Ok(turn) = voice.turn() else { break };
-                metering.note(turn, voice.speaker().starved_and_dropped());
+                // Samples at the speaker's rate, as microseconds of sound.
+                let micros = |samples: u64| samples.saturating_mul(1_000_000) / rate.max(1);
+                let (starved, dropped) = voice.speaker().starved_and_dropped();
+                metering.note(turn, (micros(starved), micros(dropped)));
                 let waiting = u64::try_from(turn.waiting).unwrap_or(u64::MAX);
-                metering.note_lead(Duration::from_micros(
-                    waiting.saturating_mul(1_000_000) / rate.max(1),
-                ));
+                metering.note_lead(Duration::from_micros(micros(waiting)));
                 turns = turns.wrapping_add(1);
                 if turns.is_multiple_of(GAUGE_EVERY) {
                     metering.note_gauges(voice.gauges());
