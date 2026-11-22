@@ -250,6 +250,21 @@ Not pursued: Windows runs timers about 15 ms late unless asked for finer ones (s
 the details on both machines). Nothing on the sound's way is driven by a timer, and the
 jitter buffer takes up what it adds elsewhere. To revisit only if a gauge points at it.
 
+### Remembering each participant's delay
+
+There is one jitter buffer and one decoder per voice received, kept by the track's alias,
+which is the same for a track across the whole meeting and which every packet carries;
+the plan says whose track it is. A voice silent for five seconds is forgotten, buffer and
+all, and one that speaks again starts from the starting delay.
+
+To do: keep the delay each participant's voice had reached (and how settled it was) after
+the voice is dropped, whether for silence or because it left the loudest few, and start
+from that when it comes back, adjusting from there. A participant never heard before
+starts from the defaults, never from what another voice's buffer has reached. To settle:
+keep it by participant and not by alias, should an alias ever be given to another track;
+and how long a remembered delay is worth trusting, since the path to that participant
+may have changed in the meantime.
+
 ### A sender whose clock runs fast
 
 The jitter buffer takes a steady surplus of frames for network jitter: its target delay
