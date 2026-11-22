@@ -145,7 +145,13 @@ pub struct Stats {
     pub played: u64,
     pub recovered_fec: u64,
     pub recovered_dred: u64,
+    /// Frames the decoder had to guess, for any reason. Most are not losses: when a
+    /// talker pauses nothing is sent, and the first few frames of the pause are guessed
+    /// (they fade out).
     pub concealed: u64,
+    /// Frames that were lost and could not be rebuilt: guessed while later packets were
+    /// already waiting. These are the guesses a listener may hear.
+    pub lost: u64,
     pub silent: u64,
     /// Frames skipped to shorten the delay.
     pub skipped: u64,
@@ -483,6 +489,8 @@ impl<P: Clone> JitterBuffer<P> {
                 frames_back: u32::try_from(frames_back).unwrap_or(u32::MAX),
             };
         }
+        // Lost, with nothing to rebuild it from.
+        self.stats.lost = self.stats.lost.saturating_add(1);
         self.conceal(next)
     }
 
@@ -738,6 +746,9 @@ mod tests {
         let mut call = Call::new(config);
         call.run(0..100, |seq| (seq != 40).then_some(30));
         assert_eq!(call.repairs(), [("conceal", 40)]);
+        // It is counted as lost: guessed while the packets after it were waiting.
+        let stats = call.buffer.stats();
+        assert_eq!((stats.lost, stats.concealed), (1, 1));
     }
 
     #[test]
@@ -890,6 +901,8 @@ mod tests {
         call.run(0..300, |seq| (!(100..200).contains(&seq)).then_some(30));
         let stats = call.buffer.stats();
         assert_eq!((stats.concealed, stats.silent), (5, 95), "{stats:?}");
+        // A pause is guessed through (it fades out) and nothing was lost.
+        assert_eq!(stats.lost, 0);
         assert_eq!(
             (stats.late, stats.skipped, stats.held),
             (0, 0, 0),

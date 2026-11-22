@@ -400,6 +400,7 @@ impl Window {
                 ui.label(small(words::voice_line(
                     &voice.name,
                     voice.delay,
+                    view.details.speaker_lead,
                     &voice.stats,
                 )));
             }

@@ -187,6 +187,7 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
             sound_gap: Duration::from_millis(11),
             sound_burst: 1,
             network_late: Duration::from_millis(2),
+            speaker_lead: Duration::from_millis(40),
             voices: vec![VoiceLine {
                 name: String::from("Bo"),
                 delay: Duration::from_millis(60),
@@ -197,7 +198,7 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
             }],
         };
     });
-    let voice = "Bo: buffer 60 ms · played 500 · rebuilt 0 · guessed 0 · skipped 0 · late 0";
+    let voice = "Bo: heard 110 ms after arriving (buffer 60 ms) · played 500 · rebuilt 0 · lost 0 · skipped 0 · late 0";
     assert!(!desk.shows(voice));
     desk.click("Details");
     assert!(desk.shows(voice));

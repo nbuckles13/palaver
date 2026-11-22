@@ -61,6 +61,8 @@ pub struct Turn {
     pub sent: usize,
     /// The loudest of them after cleaning, on the scale of [`palaver_media::level`].
     pub loudest: u8,
+    /// How much waited for the speaker once it was topped up, in its samples per channel.
+    pub waiting: usize,
 }
 
 /// A call, a microphone and a speaker.
@@ -120,6 +122,7 @@ impl<M: Source, S: Sink> Voice<M, S> {
             self.speaker.push(&self.played);
             turn.played = turn.played.saturating_add(1);
         }
+        turn.waiting = self.speaker.waiting();
         while self.microphone.pop(&mut self.captured) {
             if let Some(processor) = &mut self.processor {
                 processor

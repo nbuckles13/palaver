@@ -38,6 +38,9 @@ pub struct Meter {
     /// The most frames the microphone had waiting at one turn, since the last reading.
     largest_burst: AtomicUsize,
     voices_now: Mutex<Vec<VoiceGauge>>,
+    /// The most that waited for the speaker, in microseconds of sound, since the last
+    /// reading.
+    lead: AtomicU64,
 }
 
 /// A reading of the [`Meter`].
@@ -64,6 +67,9 @@ pub struct Reading {
     pub largest_burst: usize,
     /// How each voice being played is faring.
     pub gauges: Vec<VoiceGauge>,
+    /// The most sound that waited for the speaker since the last reading: how long
+    /// after a frame is made it is played.
+    pub lead: Duration,
 }
 
 impl Meter {
@@ -80,6 +86,11 @@ impl Meter {
         self.dropped.store(starved_and_dropped.1, Ordering::Relaxed);
         self.largest_burst
             .fetch_max(turn.captured, Ordering::Relaxed);
+    }
+
+    fn note_lead(&self, lead: Duration) {
+        let micros = u64::try_from(lead.as_micros()).unwrap_or(u64::MAX);
+        self.lead.fetch_max(micros, Ordering::Relaxed);
     }
 
     fn note_gap(&self, gap: Duration) {
@@ -111,6 +122,7 @@ impl Meter {
                 .lock()
                 .map(|now| now.clone())
                 .unwrap_or_default(),
+            lead: Duration::from_micros(self.lead.swap(0, Ordering::Relaxed)),
         }
     }
 }
@@ -178,6 +190,10 @@ impl Live {
                 voice.set_muted(muting.load(Ordering::Relaxed));
                 let Ok(turn) = voice.turn() else { break };
                 metering.note(turn, voice.speaker().starved_and_dropped());
+                let waiting = u64::try_from(turn.waiting).unwrap_or(u64::MAX);
+                metering.note_lead(Duration::from_micros(
+                    waiting.saturating_mul(1_000_000) / rate.max(1),
+                ));
                 turns = turns.wrapping_add(1);
                 if turns.is_multiple_of(GAUGE_EVERY) {
                     metering.note_gauges(voice.gauges());
