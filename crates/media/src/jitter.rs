@@ -37,6 +37,9 @@ pub struct Config {
     pub frame: Duration,
     /// Least and most playout delay, in frames.
     pub min_delay_frames: u32,
+    /// How many frames are added to what the lateness seen calls for: room for what has
+    /// not been seen yet.
+    pub margin_frames: u32,
     pub max_delay_frames: u32,
     /// How many recent arrivals the delay is estimated from.
     pub history: usize,
@@ -69,6 +72,7 @@ impl Default for Config {
         Self {
             frame: Duration::from_millis(20),
             min_delay_frames: 2,
+            margin_frames: 1,
             max_delay_frames: 25,
             history: 150,
             decrease_after: Duration::from_secs(2),
@@ -315,7 +319,7 @@ impl<P: Clone> JitterBuffer<P> {
         let frames = spread.saturating_add(frame.saturating_sub(1)) / frame;
         let wanted = u32::try_from(frames)
             .unwrap_or(u32::MAX)
-            .saturating_add(1)
+            .saturating_add(self.config.margin_frames)
             .clamp(
                 self.config.min_delay_frames,
                 self.config
@@ -734,6 +738,51 @@ mod tests {
             later: packet(44).payload,
             frames_back: 2
         }));
+    }
+
+    #[test]
+    fn on_an_even_network_the_delay_can_be_brought_down_to_one_frame_or_none() {
+        // Every packet takes the same 30 ms: nothing is ever late.
+        for (floor, margin, delay_ms) in [(2, 1, 40), (1, 1, 20), (0, 1, 20), (0, 0, 0)] {
+            let config = Config {
+                min_delay_frames: floor,
+                margin_frames: margin,
+                ..Config::default()
+            };
+            let mut call = Call::new(config);
+            call.run(0..200, |_| Some(30));
+            assert_eq!(
+                call.buffer.target_delay(),
+                ms(delay_ms),
+                "floor {floor}, margin {margin}"
+            );
+            // And at any of them, on such a network, nothing is lost or guessed.
+            let stats = call.buffer.stats();
+            assert_eq!(
+                (stats.lost, stats.late, stats.concealed),
+                (0, 0, 0),
+                "floor {floor}, margin {margin}: {stats:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_floor_the_delay_still_rises_at_once_when_packets_come_late() {
+        let config = Config {
+            min_delay_frames: 0,
+            margin_frames: 0,
+            ..Config::default()
+        };
+        let mut call = Call::new(config);
+        // Even at first, then every fifth packet 50 ms later than the rest.
+        call.run(0..100, |_| Some(30));
+        assert_eq!(call.buffer.target_delay(), ms(0));
+        call.run(100..200, |seq| Some(if seq % 5 == 0 { 80 } else { 30 }));
+        assert!(
+            call.buffer.target_delay() >= ms(60),
+            "{:?}",
+            call.buffer.target_delay()
+        );
     }
 
     #[test]

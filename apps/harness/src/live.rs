@@ -14,8 +14,44 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// How much sound is kept waiting for the speaker.
+/// How much sound is kept waiting for the speaker, unless told otherwise.
 pub const AHEAD_MS: u32 = 40;
+
+/// What can be tried at different settings, to find how little delay a network allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tuning {
+    /// The least delay each voice's jitter buffer may aim for, in frames of 20 ms.
+    pub floor_frames: u32,
+    /// How many frames the jitter buffer adds to what the lateness seen calls for.
+    pub margin_frames: u32,
+    /// How much sound is kept waiting for the speaker, in milliseconds.
+    pub lead_ms: u32,
+}
+
+impl Default for Tuning {
+    /// Two frames at the least and one of margin in the jitter buffer; 40 ms waiting
+    /// for the speaker.
+    fn default() -> Self {
+        Self {
+            floor_frames: 2,
+            margin_frames: 1,
+            lead_ms: AHEAD_MS,
+        }
+    }
+}
+
+impl Tuning {
+    /// `jitter` with this tuning's floor and margin.
+    #[must_use]
+    pub const fn applied(
+        self,
+        mut jitter: palaver_media::jitter::Config,
+    ) -> palaver_media::jitter::Config {
+        jitter.min_delay_frames = self.floor_frames;
+        jitter.margin_frames = self.margin_frames;
+        jitter
+    }
+}
 /// How long a turn waits for the speaker before looking at the microphone anyway.
 const PATIENCE: Duration = Duration::from_millis(20);
 
@@ -155,6 +191,7 @@ impl Live {
         call: Call,
         cleaning: Option<Settings>,
         playout: Channels,
+        lead_ms: u32,
     ) -> Result<Self, Box<Failed>> {
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(false));
@@ -176,7 +213,7 @@ impl Live {
             };
             let _ = opened.send(Ok((microphone.device().clone(), speaker.device().clone())));
             let rate = u64::from(speaker.device().format.rate);
-            let ahead = usize::try_from(rate.saturating_mul(u64::from(AHEAD_MS)) / 1000)
+            let ahead = usize::try_from(rate.saturating_mul(u64::from(lead_ms)) / 1000)
                 .unwrap_or(usize::MAX);
             let mut voice = Voice::new(call, microphone, speaker, cleaning, playout, ahead);
             let mut last = Instant::now();

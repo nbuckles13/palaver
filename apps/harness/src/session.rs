@@ -10,7 +10,7 @@
 //! sound that only says it is there, so that everything the session decides is tested
 //! without a network or a sound card.
 
-use crate::live::{Live, Reading};
+use crate::live::{Live, Reading, Tuning};
 use palaver_media::Channels;
 use palaver_media::jitter::Stats as JitterStats;
 use palaver_media::process::Settings;
@@ -228,7 +228,9 @@ impl Sound for Live {
 
 /// The real thing: nodes over QUIC, sound on the system's devices.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Real;
+pub struct Real {
+    pub tuning: Tuning,
+}
 
 impl World for Real {
     type Sound = Live;
@@ -238,12 +240,17 @@ impl World for Real {
         secret: &Secret<[u8; SECRET_BYTES]>,
         options: Options,
     ) -> Result<(Participant, Call), String> {
+        let options = Options {
+            jitter: self.tuning.applied(options.jitter),
+            ..options
+        };
         Participant::on_quic(QuicOptions::default(), Vec::new(), secret, options)
             .map_err(|error| format!("Could not start: {error:?}"))
     }
 
     fn sound(&mut self, call: Call, playout: Channels) -> Result<Live, Box<NoSound>> {
-        Live::start(call, Some(Settings::default()), playout).map_err(|failed| {
+        let cleaning = Some(Settings::default());
+        Live::start(call, cleaning, playout, self.tuning.lead_ms).map_err(|failed| {
             Box::new(NoSound {
                 why: format!("Sound: {}", failed.error),
                 call: failed.call,
@@ -270,7 +277,7 @@ const fn name_of(network: Network) -> &'static str {
 impl Session {
     /// Start the thread. It ends when the session is dropped.
     #[must_use]
-    pub fn start() -> Self {
+    pub fn start(tuning: Tuning) -> Self {
         let (orders, taken) = unbounded_channel();
         let view = Arc::new(Mutex::new(View::default()));
         let shown = Arc::clone(&view);
@@ -284,7 +291,7 @@ impl Session {
                 });
                 return;
             };
-            runtime.block_on(run(taken, &shown, Real));
+            runtime.block_on(run(taken, &shown, Real { tuning }));
         });
         Self { orders, view }
     }

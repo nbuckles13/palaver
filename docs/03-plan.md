@@ -220,6 +220,27 @@ Not yet measured: speakers, where there is an echo to remove. Until it is, keep 
 the ways out if it disappoints: tuning the canceller, turning it off when the output is
 headphones (where the system can say), and a switch for the user.
 
+### How little delay
+
+Read on a call between two Windows machines on one home network (2026-11-21): each
+voice's jitter buffer at 40 to 60 ms, nothing late, under 1% lost and nearly all of that
+rebuilt. The delay we add is then mostly two waits that do overlapping work: the jitter
+buffer's floor (two frames, 40 ms) and the sound kept waiting for the speaker (40 ms). A
+frame decoded and waiting for the speaker is already safe from a late packet behind it.
+
+- Both can be tried lower: `--floor` and `--margin` (frames) and `--lead` (ms) on
+  `palaver-harness`. With no floor and no margin the buffer runs at nothing on an even
+  network and still rises at once when packets come late (tested).
+- To do: try them on real machines, reading "lost", "late" and "speaker short" in the
+  details, and set the defaults from that. A floor of nothing with a lead of 20 ms would
+  take about 60 ms off.
+- Further off: frames of 10 ms, which halve the wait to fill a frame and let the buffer
+  move in smaller steps, for more packets a second.
+
+Not pursued: Windows runs timers about 15 ms late unless asked for finer ones (seen in
+the details on both machines). Nothing on the sound's way is driven by a timer, and the
+jitter buffer takes up what it adds elsewhere. To revisit only if a gauge points at it.
+
 ### A sender whose clock runs fast
 
 The jitter buffer takes a steady surplus of frames for network jitter: its target delay
