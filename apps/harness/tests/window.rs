@@ -205,7 +205,7 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
     assert!(desk.shows("a microphone → a speaker"));
     assert!(desk.shows("network thread: timers up to 2 ms late"));
     assert!(desk.shows(
-        "sound thread: longest wait 11 ms · most frames at once 1 · speaker short 0 · dropped 0"
+        "sound thread: longest wait 11 ms · most frames at once 1 · speaker ran dry for 0 ms · fell behind by 0 ms"
     ));
 }
 
