@@ -213,19 +213,32 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
             sound_burst: 1,
             network_late: Duration::from_millis(2),
             speaker_lead: Duration::from_millis(40),
-            voices: vec![VoiceLine {
-                name: String::from("Bo"),
-                delay: Duration::from_millis(60),
-                stats: Stats {
-                    played: 500,
-                    ..Stats::default()
+            sound_gap_past: vec![Some(11), Some(12)],
+            voices: vec![
+                VoiceLine {
+                    name: String::from("Bo"),
+                    delay: Duration::from_millis(60),
+                    stats: Stats {
+                        played: 500,
+                        ..Stats::default()
+                    },
+                    playing: true,
+                    delay_past: vec![Some(110), Some(90)],
+                    trouble_past: vec![Some(0), Some(2)],
                 },
-            }],
+                VoiceLine {
+                    name: String::from("Cy"),
+                    delay: Duration::from_millis(40),
+                    ..VoiceLine::default()
+                },
+            ],
             links: vec![LinkLine {
                 name: String::from("Bo"),
                 rtt: Duration::from_millis(7),
                 sent: 2000,
                 lost: 3,
+                rtt_past: vec![Some(7), Some(9)],
+                lost_past: vec![Some(0), Some(1)],
             }],
         };
     });
@@ -239,6 +252,18 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
     assert!(desk.shows(
         "sound thread: longest wait 11 ms · most frames at once 1 · speaker ran dry for 0 ms · fell behind by 0 ms"
     ));
+    // Each number that is drawn over time says what it is and where it stands.
+    assert!(desk.shows("sound thread's longest wait, ms · now 12 · most 12"));
+    assert!(desk.shows("round trip, ms · now 9 · most 9"));
+    assert!(desk.shows("packets lost a second · now 1 · most 1"));
+    assert!(desk.shows("frames lost or late a second · now 2 · most 2"));
+    // A voice heard in the last two minutes and silent now is still there, and says so.
+    assert!(desk.shows(
+        "Cy: heard 90 ms after arriving (buffer 40 ms) · played 0 · rebuilt 0 · lost 0 · skipped 0 · late 0 · not playing now"
+    ));
+    // And they close again.
+    desk.click("Details");
+    assert!(!desk.shows(voice));
 }
 
 #[test]

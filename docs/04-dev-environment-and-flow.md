@@ -70,7 +70,8 @@ can judge.
 |---|---|---|---|
 | The call on devices (`harness::voice`) | What is said at one microphone comes out of another's speaker; the speaker keeps time | Made-up devices over the in-memory network | T1 |
 | The meeting behind the window (`harness::session`) | Every order and what the window is then shown: start, join by ticket, the ticket coming back, mute, leave, each way of failing | The session is given its node and its sound through two traits; tests give it the in-memory network and sound that only says it is there | T1 |
-| What the window says (`harness::words`) | The wording of each line, the meter, the initials, where people sit | Plain functions, unit tests | T1 |
+| What the window says (`harness::words`) | The wording of each line, the meter, the initials, where people sit, the scale and the points of each plot | Plain functions, unit tests | T1 |
+| What the details remember (`harness::history`) and how a microphone is judged (`harness::check::Ear`) | One value a second, gaps where a voice stopped, what is forgotten and when; each finding from made-up sound | Plain logic told what is so, unit tests | T1 |
 | The window itself (`harness::ui`) | What is shown in each state, and what each button asks the session for | `egui_kittest`: finds a widget by its label and clicks it, with no display. It also refuses a widget with no name for a screen reader | T1 |
 | How it looks | Layout, colour, type | `palaver-harness shot <file.png> [name]` takes a picture of the window, to be looked at. Pictures are not compared by machine: every font and driver difference would fail | by eye |
 | Real devices | That it sounds right | By hand, with `loopback` and its `other` mode for echo, and the numbers the window shows | T6 |
