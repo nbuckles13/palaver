@@ -67,7 +67,7 @@ pub const fn microphone_hint(finding: Finding, system: System) -> &'static str {
             "Nothing at all is coming from this microphone. It may be muted or switched off, on the device or in the system's sound settings."
         }
         (Finding::Processed, System::Windows) => {
-            "Windows is cleaning this microphone before Palaver gets it (Voice Focus or Voice Clarity, in the sound settings). You may be heard faintly and cut off between words; turning that off usually sounds better."
+            "Windows is cleaning this microphone before Palaver gets it (Voice Focus or Voice Clarity). You may be heard faintly and cut off between words; turning that off usually sounds better. To find it: open the sound settings, choose this microphone under Input, and look there for Voice Focus and for Audio enhancements."
         }
         (Finding::Processed, System::Mac) => {
             "The system is cleaning this microphone before Palaver gets it (Voice Isolation, under Mic Mode in the menu bar). You may be heard faintly and cut off between words; Standard usually sounds better."
