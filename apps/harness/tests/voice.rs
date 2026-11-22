@@ -128,6 +128,11 @@ async fn what_is_said_at_one_microphone_comes_out_of_the_others_speaker() {
     // the two frames asked for and the one just made.
     assert_eq!(short, 0);
     assert!(b.speaker().most_waiting <= 3 * FRAME_SAMPLES);
+    // The listener's gauges: one voice, played from, with a buffer of two frames or more.
+    let gauges = b.gauges();
+    assert_eq!(gauges.len(), 1);
+    assert!(gauges[0].stats.played > 100, "{:?}", gauges[0]);
+    assert!(gauges[0].delay >= Duration::from_millis(40));
     // The listener, who said nothing, sent nothing; the talker hears nobody.
     let mut a = a;
     assert!(!hears(&a.speaker().heard, pitch_of(2)));

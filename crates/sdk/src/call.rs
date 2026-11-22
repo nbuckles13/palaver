@@ -17,11 +17,12 @@
 
 use crate::engine::Engine;
 use bytes::Bytes;
-use palaver_media::jitter::Config as JitterConfig;
+use palaver_media::jitter::{Config as JitterConfig, Stats as JitterStats};
 use palaver_media::voice::{Played, VoiceReceiver, VoiceSender};
 use palaver_media::{Channels, CodecError, EncoderConfig, mix};
 use palaver_proto::Timestamp;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use tokio::time::Instant;
 
 /// A voice that has given nothing but silence for this many frames (five seconds) is
@@ -32,6 +33,16 @@ struct Voice {
     receiver: VoiceReceiver<Bytes>,
     /// Frames in a row for which it had nothing to play.
     silent_for: u32,
+}
+
+/// How one voice being played is faring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceGauge {
+    /// The alias of the voice's track; the plan says whose it is.
+    pub alias: u64,
+    /// The playout delay its jitter buffer is aiming for.
+    pub delay: Duration,
+    pub stats: JitterStats,
 }
 
 /// One participant's audio, both ways.
@@ -84,6 +95,19 @@ impl Call {
         Timestamp::from_micros(
             u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX),
         )
+    }
+
+    /// How each voice being played is faring, by alias.
+    #[must_use]
+    pub fn gauges(&self) -> Vec<VoiceGauge> {
+        self.voices
+            .iter()
+            .map(|(alias, voice)| VoiceGauge {
+                alias: *alias,
+                delay: voice.receiver.target_delay(),
+                stats: voice.receiver.stats(),
+            })
+            .collect()
     }
 
     /// Send the 20 ms just captured, in the channels of the encoder's settings. `Ok(false)` if nothing was sent: the encoder found

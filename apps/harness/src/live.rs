@@ -7,17 +7,21 @@
 use crate::voice::{Turn, Voice};
 use palaver_media::Channels;
 use palaver_media::process::Settings;
-use palaver_sdk::Call;
+use palaver_sdk::{Call, VoiceGauge};
 use palaver_sound::{Device, Microphone, SoundError, Speaker};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How much sound is kept waiting for the speaker.
 pub const AHEAD_MS: u32 = 40;
 /// How long a turn waits for the speaker before looking at the microphone anyway.
 const PATIENCE: Duration = Duration::from_millis(20);
+
+/// The voices' gauges are refreshed once in this many turns: they change slowly, and
+/// gathering them takes a lock.
+const GAUGE_EVERY: u32 = 10;
 
 /// What the thread has been doing, for whoever shows it.
 #[derive(Debug, Default)]
@@ -29,10 +33,15 @@ pub struct Meter {
     played: AtomicU64,
     starved: AtomicU64,
     dropped: AtomicU64,
+    /// The longest stretch between two turns, in microseconds, since the last reading.
+    longest_gap: AtomicU64,
+    /// The most frames the microphone had waiting at one turn, since the last reading.
+    largest_burst: AtomicUsize,
+    voices_now: Mutex<Vec<VoiceGauge>>,
 }
 
 /// A reading of the [`Meter`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reading {
     /// The loudest frame from the microphone since the last reading, after cleaning.
     pub loudest: u8,
@@ -45,6 +54,16 @@ pub struct Reading {
     /// Samples the speaker wanted and did not get, and samples it was too slow to take.
     pub starved: u64,
     pub dropped: u64,
+    /// The longest the sound thread went between two turns since the last reading. It
+    /// should be about how often the speaker takes sound (10 ms); much more means the
+    /// thread was kept waiting for the processor.
+    pub longest_gap: Duration,
+    /// The most frames the microphone had waiting at one turn since the last reading.
+    /// One is right. More means frames are sent in bursts, which the far end's jitter
+    /// buffer takes for a bad network.
+    pub largest_burst: usize,
+    /// How each voice being played is faring.
+    pub gauges: Vec<VoiceGauge>,
 }
 
 impl Meter {
@@ -59,9 +78,23 @@ impl Meter {
         self.played.fetch_add(turn.played as u64, Ordering::Relaxed);
         self.starved.store(starved_and_dropped.0, Ordering::Relaxed);
         self.dropped.store(starved_and_dropped.1, Ordering::Relaxed);
+        self.largest_burst
+            .fetch_max(turn.captured, Ordering::Relaxed);
     }
 
-    /// What has happened; the loudest level starts again from here.
+    fn note_gap(&self, gap: Duration) {
+        let micros = u64::try_from(gap.as_micros()).unwrap_or(u64::MAX);
+        self.longest_gap.fetch_max(micros, Ordering::Relaxed);
+    }
+
+    fn note_gauges(&self, gauges: Vec<VoiceGauge>) {
+        if let Ok(mut now) = self.voices_now.lock() {
+            *now = gauges;
+        }
+    }
+
+    /// What has happened. The loudest level, the longest gap and the largest burst start
+    /// again from here.
     pub fn read(&self) -> Reading {
         Reading {
             loudest: self.loudest.swap(0, Ordering::Relaxed),
@@ -71,6 +104,13 @@ impl Meter {
             played: self.played.load(Ordering::Relaxed),
             starved: self.starved.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            longest_gap: Duration::from_micros(self.longest_gap.swap(0, Ordering::Relaxed)),
+            largest_burst: self.largest_burst.swap(0, Ordering::Relaxed),
+            gauges: self
+                .voices_now
+                .lock()
+                .map(|now| now.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -127,12 +167,21 @@ impl Live {
             let ahead = usize::try_from(rate.saturating_mul(u64::from(AHEAD_MS)) / 1000)
                 .unwrap_or(usize::MAX);
             let mut voice = Voice::new(call, microphone, speaker, cleaning, playout, ahead);
+            let mut last = Instant::now();
+            let mut turns = 0u32;
             while !stopping.load(Ordering::Relaxed) {
                 // Room or no room, the microphone is looked at as often as this.
                 let _ = voice.speaker().wait_for_room(ahead, PATIENCE);
+                let now = Instant::now();
+                metering.note_gap(now.saturating_duration_since(last));
+                last = now;
                 voice.set_muted(muting.load(Ordering::Relaxed));
                 let Ok(turn) = voice.turn() else { break };
                 metering.note(turn, voice.speaker().starved_and_dropped());
+                turns = turns.wrapping_add(1);
+                if turns.is_multiple_of(GAUGE_EVERY) {
+                    metering.note_gauges(voice.gauges());
+                }
             }
             voice.into_call()
         });

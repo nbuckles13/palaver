@@ -8,7 +8,7 @@
 )]
 
 use palaver_harness::live::Reading;
-use palaver_harness::session::{NoSound, Order, Sound, Stage, View, World, run};
+use palaver_harness::session::{NoSound, Order, Sound, Stage, View, World, Worst, run};
 use palaver_media::Channels;
 use palaver_net::memory::MemoryNetwork;
 use palaver_proto::{SECRET_BYTES, Secret};
@@ -301,4 +301,16 @@ async fn a_joiner_nobody_answers_is_shown_a_ticket_to_send_back_and_it_gets_them
             .is_some_and(|notice| notice.starts_with("That is not a ticket"))
     })
     .await;
+}
+
+#[test]
+fn a_gauge_is_read_for_its_worst_over_the_last_few() {
+    let mut worst = Worst::of_last(3);
+    assert_eq!(worst.after(5), 5);
+    assert_eq!(worst.after(2), 5);
+    assert_eq!(worst.after(1), 5);
+    // The five has been pushed out.
+    assert_eq!(worst.after(1), 2);
+    assert_eq!(worst.after(0), 1);
+    assert_eq!(worst.after(9), 9);
 }

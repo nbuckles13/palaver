@@ -916,6 +916,31 @@ What there is so far, in three layers:
   clipboard), leave, and both ends of the ticket coming back. The colours are the
   "Ember" look. Still to come from the designs: the grid and the map, the fonts, the
   details drawer, who is talking.
+- **Threads.** What runs where in the app, and what each may wait on:
+
+  | Thread | What it does | Waits on |
+  |---|---|---|
+  | Window | Draws, takes clicks, reads a copy of the view | The display |
+  | Session | One async runtime: the engine (control, and forwarding for others), QUIC, timers, bringing the view up to date | The network, timers |
+  | Sound | Encodes, decodes, echo cancelling, jitter buffers | The speaker taking sound |
+  | Device callbacks (two) | Copy samples in and out | The sound card |
+
+  They meet at two locks, each held only for a copy: one round the view, one round each
+  device's samples. The rules:
+  - The window only reads the view and sends orders. It never waits on the network or
+    the sound.
+  - The sound thread waits on nothing but the speaker.
+  - Forwarding other people's media must not wait behind control work (a plan being
+    worked out, signatures being checked). Today both are on the session thread; whether
+    they need threads of their own is to be decided with numbers from meetings of fifty.
+  - **Measure before changing.** The details in the window show, each as the worst of
+    the last five seconds: the longest the sound thread went between turns (about 10 ms
+    is right), the most frames the microphone had waiting at one turn (one is right;
+    more means our frames leave in bursts, which the far end's jitter buffer takes for a
+    bad network), how late the session thread's timers ran, and for each voice played
+    the delay its jitter buffer aims for and what became of its frames.
+  - Expected next, once the gauges say so: the sound thread at the system's priority for
+    sound.
 - `palaver-harness shot <file.png> [name]` makes the window take a picture of itself
   and close: of the first screen, or of a meeting started under a name. It is how the
   screens are looked at without a person at them. The PNG is written by a few lines of
