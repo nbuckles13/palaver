@@ -88,25 +88,41 @@ pub const fn microphone_warning(finding: Finding, system: System) -> Option<&'st
     }
 }
 
-/// The steps to put a microphone right in the system's settings, where they are known
-/// well enough to give: on Windows, where its cleaning is switched off for the
-/// microphone called `device`.
-#[must_use]
-pub fn microphone_steps(finding: Finding, system: System, device: &str) -> Option<String> {
-    match (finding, system) {
-        (Finding::Processed, System::Windows) => Some(format!(
-            "To turn it off: open the sound settings, choose \u{201c}{device}\u{201d} under Input, and under Advanced settings set Audio enhancements to Off. That turns Voice Focus off as well."
-        )),
-        _ => None,
-    }
-}
-
 /// A way into the system's own settings: what the link says, and the address the system
 /// opens them by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsLink {
     pub label: &'static str,
     pub address: &'static str,
+}
+
+/// The steps to put a microphone right in the system's settings: a sentence with a link
+/// in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Steps {
+    pub before: &'static str,
+    /// The words of the sentence that open the settings when clicked.
+    pub link: SettingsLink,
+    pub after: String,
+}
+
+/// The steps to put a microphone right, where they are known well enough to give: on
+/// Windows, where its cleaning is switched off for the microphone called `device`.
+#[must_use]
+pub fn microphone_steps(finding: Finding, system: System, device: &str) -> Option<Steps> {
+    match (finding, system) {
+        (Finding::Processed, System::Windows) => Some(Steps {
+            before: "To turn it off: ",
+            link: SettingsLink {
+                label: "open the sound settings",
+                address: "ms-settings:sound",
+            },
+            after: format!(
+                ", choose \u{201c}{device}\u{201d} under Input, and under Advanced settings set Audio enhancements to Off. That turns Voice Focus off as well."
+            ),
+        }),
+        _ => None,
+    }
 }
 
 /// Where in the system's settings a microphone found wanting can be put right, where
@@ -378,10 +394,13 @@ mod tests {
 
     #[test]
     fn the_steps_on_windows_name_the_microphone_and_the_setting() {
+        let steps =
+            microphone_steps(Finding::Processed, System::Windows, "Headset Microphone").unwrap();
         assert_eq!(
-            microphone_steps(Finding::Processed, System::Windows, "Headset Microphone").unwrap(),
+            format!("{}{}{}", steps.before, steps.link.label, steps.after),
             "To turn it off: open the sound settings, choose \u{201c}Headset Microphone\u{201d} under Input, and under Advanced settings set Audio enhancements to Off. That turns Voice Focus off as well."
         );
+        assert_eq!(steps.link.address, "ms-settings:sound");
         assert_eq!(
             microphone_steps(Finding::Processed, System::Mac, "a microphone"),
             None

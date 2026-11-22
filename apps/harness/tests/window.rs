@@ -186,8 +186,12 @@ fn in_a_meeting_a_microphone_that_gives_nothing_usable_is_said_under_the_meter()
     assert!(!desk.shows(processed));
     desk.show(|view| view.sound.microphone = Finding::Processed);
     assert!(desk.shows(processed));
-    // With a way into the system's settings, on a system that has an address for them.
-    let link = words::settings_for(Finding::Processed, words::System::HERE);
+    // With a way into the system's settings, on a system that has an address for them:
+    // among the words of the steps where there are steps, and by itself where not.
+    let here = words::System::HERE;
+    let link = words::microphone_steps(Finding::Processed, here, "a microphone")
+        .map(|steps| steps.link)
+        .or_else(|| words::settings_for(Finding::Processed, here));
     assert_eq!(
         link.is_some(),
         link.is_some_and(|link| desk.shows(link.label))

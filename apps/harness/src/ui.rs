@@ -432,25 +432,36 @@ impl Window {
     }
 }
 
-/// The steps to put right a microphone found wanting, and a link into the system's
-/// settings, where the system has an address for them.
-fn settings_link(ui: &mut Ui, finding: Finding, device: &str) {
-    if let Some(steps) = words::microphone_steps(finding, words::System::HERE, device) {
-        ui.label(RichText::new(steps).small().color(ember::QUIET));
-    }
-    let Some(link) = words::settings_for(finding, words::System::HERE) else {
-        return;
+/// Open the system's settings at one of the addresses the words give.
+fn open_settings(link: words::SettingsLink) {
+    let opener = match words::System::HERE {
+        words::System::Windows => "explorer.exe",
+        words::System::Mac => "open",
+        words::System::Other => return,
     };
-    if ui.link(RichText::new(link.label).small()).clicked() {
-        // The system's own opener, given one of the addresses above and nothing else.
-        let opener = match words::System::HERE {
-            words::System::Windows => "explorer.exe",
-            words::System::Mac => "open",
-            words::System::Other => return,
-        };
-        if let Err(error) = std::process::Command::new(opener).arg(link.address).spawn() {
-            eprintln!("{opener}: {error}");
-        }
+    if let Err(error) = std::process::Command::new(opener).arg(link.address).spawn() {
+        eprintln!("{opener}: {error}");
+    }
+}
+
+/// How to put right a microphone found wanting: the steps, with the link into the
+/// system's settings among their words; or where there are no steps to give, the link
+/// alone, where the system has an address for its settings.
+fn settings_link(ui: &mut Ui, finding: Finding, device: &str) {
+    let here = words::System::HERE;
+    if let Some(steps) = words::microphone_steps(finding, here, device) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.label(RichText::new(steps.before).small().color(ember::QUIET));
+            if ui.link(RichText::new(steps.link.label).small()).clicked() {
+                open_settings(steps.link);
+            }
+            ui.label(RichText::new(steps.after).small().color(ember::QUIET));
+        });
+    } else if let Some(link) = words::settings_for(finding, here)
+        && ui.link(RichText::new(link.label).small()).clicked()
+    {
+        open_settings(link);
     }
 }
 
