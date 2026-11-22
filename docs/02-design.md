@@ -903,8 +903,31 @@ What there is so far, in three layers:
   on WSLg's, which is that slow).
 - `live::Live` runs one on a thread of its own, against the system's devices, and keeps
   a meter for whoever shows it.
-- The program is a call from the command line: `palaver-harness create`, or
-  `join <ticket>`. The window is to come.
+- `session::Session` is the meeting behind the window: the node, its network and its
+  sound on a thread of their own, taking orders (start, join, reach, mute, leave) and
+  keeping a view up to date. The window only draws the view and sends orders, so it
+  never waits on the network.
+- `check::MicCheck` listens to the microphone outside a meeting, for the meter on the
+  first screen.
+- **The window** (`ui`, egui through `eframe`, drawn with OpenGL): run the program with
+  no arguments. Outside a meeting: a name, the microphone and its meter, start a
+  meeting, or paste a ticket and join. Inside: the people in a circle round a fire that
+  burns higher the more voices are heard, mute, "bring someone in" (a ticket to the
+  clipboard), leave, and both ends of the ticket coming back. The colours are the
+  "Ember" look. Still to come from the designs: the grid and the map, the fonts, the
+  details drawer, who is talking.
+- `palaver-harness shot <file.png> [name]` makes the window take a picture of itself
+  and close: of the first screen, or of a meeting started under a name. It is how the
+  screens are looked at without a person at them. The PNG is written by a few lines of
+  our own (`png`), stored without compression.
+- The program is also a call from the command line: `palaver-harness create`, or
+  `join <ticket>`.
+- **What the window costs.** `eframe` brings the app from 103 packages to 221 on Linux
+  (95 to 173 on Windows); the bot and everything under it are untouched. The OpenGL
+  renderer was chosen over the default (wgpu) because it is fewer packages; video may
+  change that. Three licences come with it and are allowed only for the crates that
+  carry them (`deny.toml`): the Boost licence for the Windows clipboard, and two font
+  licences for egui's built-in fonts.
 
 ## 16. Operability without servers
 

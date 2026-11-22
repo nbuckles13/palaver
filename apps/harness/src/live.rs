@@ -85,6 +85,7 @@ pub struct Failed {
 /// A voice running on the system's devices.
 pub struct Live {
     stop: Arc<AtomicBool>,
+    muted: Arc<AtomicBool>,
     thread: JoinHandle<Call>,
     meter: Arc<Meter>,
     microphone: Device,
@@ -104,6 +105,8 @@ impl Live {
         playout: Channels,
     ) -> Result<Self, Box<Failed>> {
         let stop = Arc::new(AtomicBool::new(false));
+        let muted = Arc::new(AtomicBool::new(false));
+        let muting = Arc::clone(&muted);
         let meter = Arc::new(Meter::default());
         let (opened, devices) = mpsc::channel();
         let (stopping, metering) = (Arc::clone(&stop), Arc::clone(&meter));
@@ -127,6 +130,7 @@ impl Live {
             while !stopping.load(Ordering::Relaxed) {
                 // Room or no room, the microphone is looked at as often as this.
                 let _ = voice.speaker().wait_for_room(ahead, PATIENCE);
+                voice.set_muted(muting.load(Ordering::Relaxed));
                 let Ok(turn) = voice.turn() else { break };
                 metering.note(turn, voice.speaker().starved_and_dropped());
             }
@@ -135,6 +139,7 @@ impl Live {
         match devices.recv() {
             Ok(Ok((microphone, speaker))) => Ok(Self {
                 stop,
+                muted,
                 thread,
                 meter,
                 microphone,
@@ -165,6 +170,11 @@ impl Live {
     #[must_use]
     pub fn meter(&self) -> &Meter {
         &self.meter
+    }
+
+    /// Stop sending what the microphone gives, or start again.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
     }
 
     /// Whether the thread is still carrying sound; it stops by itself if the codec fails.

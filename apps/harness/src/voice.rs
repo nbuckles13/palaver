@@ -74,6 +74,9 @@ pub struct Voice<M, S> {
     ahead: usize,
     captured: Vec<f32>,
     played: Vec<f32>,
+    /// While set, what the microphone gives is listened to (the echo canceller needs
+    /// it) and not sent.
+    muted: bool,
 }
 
 impl<M: Source, S: Sink> Voice<M, S> {
@@ -96,6 +99,7 @@ impl<M: Source, S: Sink> Voice<M, S> {
             ahead,
             captured: vec![0.0; Channels::Mono.frame_len()],
             played: vec![0.0; playout.frame_len()],
+            muted: false,
         }
     }
 
@@ -124,11 +128,16 @@ impl<M: Source, S: Sink> Voice<M, S> {
             }
             turn.captured = turn.captured.saturating_add(1);
             turn.loudest = turn.loudest.max(audio_level(&self.captured));
-            if self.call.speak(&self.captured)? {
+            if !self.muted && self.call.speak(&self.captured)? {
                 turn.sent = turn.sent.saturating_add(1);
             }
         }
         Ok(turn)
+    }
+
+    /// Stop sending what the microphone gives, or start again.
+    pub const fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
     }
 
     pub const fn speaker(&mut self) -> &mut S {
