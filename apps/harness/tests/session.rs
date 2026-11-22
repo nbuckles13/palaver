@@ -192,6 +192,13 @@ async fn a_meeting_is_started_and_someone_joins_by_its_ticket() {
         .find(|person| person.name == "Ana")
         .unwrap();
     assert!(bo_sees.linked && !bo_sees.me);
+    // The details name the link by who is at its other end.
+    let named = ana
+        .until(5, "the link to Bo in the details", |view| {
+            view.details.links.len() == 1
+        })
+        .await;
+    assert_eq!(named.details.links[0].name, "Bo");
     // Once in, the joiner has a ticket of its own to bring someone else in with.
     assert!(
         joined

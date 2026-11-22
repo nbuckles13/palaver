@@ -113,6 +113,19 @@ pub fn voice_line(name: &str, delay: Duration, speaker_lead: Duration, stats: &S
     )
 }
 
+/// How the connection to one of the others is faring: the round trip, and how many of
+/// the packets sent to them were lost on the way, in tenths of a percent.
+#[must_use]
+pub fn link_line(name: &str, rtt: Duration, sent: u64, lost: u64) -> String {
+    let tenths = lost.saturating_mul(1000).checked_div(sent).unwrap_or(0);
+    format!(
+        "link to {name}: round trip {} · lost {lost} of {sent} packets sent ({}.{}%)",
+        millis(rtt),
+        tenths / 10,
+        tenths % 10
+    )
+}
+
 /// The first two letters of a name, as they stand on a person's disc.
 #[must_use]
 pub fn initials(name: &str) -> String {
@@ -225,6 +238,19 @@ mod tests {
                 &stats
             ),
             "Bo: heard 115 ms after arriving (buffer 60 ms) · played 1200 · rebuilt 4 · lost 2 · skipped 2 · late 5"
+        );
+    }
+
+    #[test]
+    fn a_link_line_gives_the_round_trip_and_the_share_of_packets_lost() {
+        assert_eq!(
+            link_line("Bo", Duration::from_millis(12), 4000, 30),
+            "link to Bo: round trip 12 ms · lost 30 of 4000 packets sent (0.7%)"
+        );
+        // Nothing sent yet is nothing lost.
+        assert_eq!(
+            link_line("Bo", Duration::ZERO, 0, 0),
+            "link to Bo: round trip 0 ms · lost 0 of 0 packets sent (0.0%)"
         );
     }
 

@@ -17,8 +17,8 @@ use palaver_media::process::Settings;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
 use palaver_proto::SECRET_BYTES;
-use palaver_proto::{Secret, Ticket};
-use palaver_sdk::{Call, Options, Participant, Status, entry_points};
+use palaver_proto::{ParticipantId, Secret, Ticket};
+use palaver_sdk::{Call, LinkGauge, Options, Participant, Status, entry_points};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -101,6 +101,16 @@ pub struct VoiceLine {
     pub stats: JitterStats,
 }
 
+/// One connection to another participant, as the details show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkLine {
+    pub name: String,
+    pub rtt: Duration,
+    /// Packets sent on it, and how many of them were lost.
+    pub sent: u64,
+    pub lost: u64,
+}
+
 /// The numbers behind how the meeting sounds, each the worst of the last five seconds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Details {
@@ -113,6 +123,8 @@ pub struct Details {
     /// The most sound that waited for the speaker.
     pub speaker_lead: Duration,
     pub voices: Vec<VoiceLine>,
+    /// The connections this node has, as they are now.
+    pub links: Vec<LinkLine>,
 }
 
 /// The gauges as they are remembered between refreshes.
@@ -361,8 +373,26 @@ fn refresh(
     invitation: Option<&Ticket>,
     sound: Reading,
     status: &Status,
+    links: Vec<LinkGauge>,
     gauges: &mut Gauges,
 ) {
+    let name_of = |id: &ParticipantId| {
+        status
+            .roster
+            .iter()
+            .position(|member| member == id)
+            .and_then(|place| status.names.get(place))
+            .map_or_else(|| String::from("someone"), |name| name.reveal().clone())
+    };
+    let links = links
+        .into_iter()
+        .map(|link| LinkLine {
+            name: name_of(&link.peer),
+            rtt: link.rtt,
+            sent: link.sent,
+            lost: link.lost,
+        })
+        .collect();
     // Whose voice each alias is, by the plan.
     let voices = sound
         .gauges
@@ -372,9 +402,7 @@ fn refresh(
                 .microphones
                 .iter()
                 .find(|(alias, _)| *alias == gauge.alias)
-                .and_then(|(_, id)| status.roster.iter().position(|member| member == id))
-                .and_then(|place| status.names.get(place))
-                .map_or_else(|| String::from("someone"), |name| name.reveal().clone());
+                .map_or_else(|| String::from("someone"), |(_, id)| name_of(id));
             VoiceLine {
                 name,
                 delay: gauge.delay,
@@ -390,6 +418,7 @@ fn refresh(
             .after(std::mem::take(&mut gauges.late_now)),
         speaker_lead: gauges.speaker_lead.after(sound.lead),
         voices,
+        links,
     };
     let me = participant.control().me().clone();
     let people: Vec<Person> = status
@@ -556,6 +585,7 @@ async fn meeting<W: World>(
             invitation.as_ref(),
             live.reading(),
             &status,
+            participant.control().links().await,
             &mut gauges,
         );
     };

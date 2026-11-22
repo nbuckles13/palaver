@@ -5,7 +5,7 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use palaver_harness::session::{Details, Order, Person, Session, Stage, View, VoiceLine};
+use palaver_harness::session::{Details, LinkLine, Order, Person, Session, Stage, View, VoiceLine};
 use palaver_harness::ui::{Setup, Window};
 use palaver_media::jitter::Stats;
 use std::sync::{Arc, Mutex};
@@ -196,6 +196,12 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
                     ..Stats::default()
                 },
             }],
+            links: vec![LinkLine {
+                name: String::from("Bo"),
+                rtt: Duration::from_millis(7),
+                sent: 2000,
+                lost: 3,
+            }],
         };
     });
     let voice = "Bo: heard 110 ms after arriving (buffer 60 ms) · played 500 · rebuilt 0 · lost 0 · skipped 0 · late 0";
@@ -204,6 +210,7 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
     assert!(desk.shows(voice));
     assert!(desk.shows("a microphone → a speaker"));
     assert!(desk.shows("network thread: timers up to 2 ms late"));
+    assert!(desk.shows("link to Bo: round trip 7 ms · lost 3 of 2000 packets sent (0.1%)"));
     assert!(desk.shows(
         "sound thread: longest wait 11 ms · most frames at once 1 · speaker ran dry for 0 ms · fell behind by 0 ms"
     ));

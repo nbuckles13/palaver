@@ -581,8 +581,11 @@ impl Connection for QuicConnection {
     }
 
     fn path(&self) -> Path {
+        let counted = self.connection.stats().path;
         Path {
             rtt: self.connection.rtt(),
+            sent: counted.sent_packets,
+            lost: counted.lost_packets,
             remote: Some(self.connection.remote_address()),
         }
     }
