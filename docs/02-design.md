@@ -896,7 +896,7 @@ What there is so far, in three layers:
 **A participant with a sound card** (`apps/harness`):
 
 - `voice::Voice` joins a call to a microphone and a speaker. **The speaker keeps time**:
-  each turn makes frames only until two frames' worth wait for the device, and sends on
+  each turn makes frames only until a set lead (20 ms) waits for the device, and sends on
   whatever the microphone has gathered. A timer beside the device would be a second
   clock; with the speaker as the clock, a device that takes 3% too little is simply
   given 3% fewer frames, and nothing is thrown away (tested on a made-up speaker; seen

@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How much sound is kept waiting for the speaker, unless told otherwise.
-pub const AHEAD_MS: u32 = 40;
+pub const AHEAD_MS: u32 = 20;
 
 /// What can be tried at different settings, to find how little delay a network allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,12 +29,12 @@ pub struct Tuning {
 }
 
 impl Default for Tuning {
-    /// Two frames at the least and one of margin in the jitter buffer; 40 ms waiting
-    /// for the speaker.
+    /// No floor and no margin in the jitter buffer, which starts at its two frames and
+    /// comes down as far as the network allows; 20 ms waiting for the speaker.
     fn default() -> Self {
         Self {
-            floor_frames: 2,
-            margin_frames: 1,
+            floor_frames: 0,
+            margin_frames: 0,
             lead_ms: AHEAD_MS,
         }
     }

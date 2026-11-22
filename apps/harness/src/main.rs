@@ -22,10 +22,10 @@
 //!                           its line, for carrying to another machine
 //!   --raw                   send the microphone as it is: no echo, noise or level work
 //!   --floor <frames>        the least delay a voice's jitter buffer may aim for, in
-//!                           frames of 20 ms (default 2)
+//!                           frames of 20 ms (default 0; it starts at 2 and comes down)
 //!   --margin <frames>       what the jitter buffer adds to the lateness it has seen
-//!                           (default 1)
-//!   --lead <ms>             how much sound is kept waiting for the speaker (default 40)
+//!                           (default 0)
+//!   --lead <ms>             how much sound is kept waiting for the speaker (default 20)
 //!   --seconds <n>           how long to stay (default: until stopped)
 //! ```
 //!

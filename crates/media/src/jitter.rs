@@ -13,7 +13,8 @@
 //!
 //! - **Playout delay.** Each arrival is compared with when it would have arrived on a
 //!   network with no jitter; the delay kept is enough to cover 95% of what was seen over the
-//!   last few seconds, plus a frame. It rises at once and falls slowly.
+//!   last few seconds, plus a margin. It begins at a starting value that may be above its
+//!   floor, rises at once and falls slowly.
 //! - **Running dry.** If nothing is buffered when a frame is due, the decoder conceals and
 //!   the buffer remembers where that began. A packet for a frame it concealed in that spell
 //!   is not thrown away as late: playout steps back to it, which is how the delay grows when
@@ -24,6 +25,9 @@
 //!   earliest possible arrival the frame at the playhead is being played. If that stays above
 //!   the target, a frame is skipped (a quiet one if the level is known); if it stays below, a
 //!   frame of filler is played without consuming anything.
+//! - **Catching up in a pause.** Once a pause has faded to silence, the playhead moves
+//!   straight to the target, however far that is, but never past a frame that is waiting:
+//!   only silence is dropped, so a pause is heard a little shorter and no speech is lost.
 //! - Everything is bounded: the buffer, the history, and how far a stream may jump before
 //!   the buffer starts again from scratch.
 
@@ -41,6 +45,10 @@ pub struct Config {
     /// not been seen yet.
     pub margin_frames: u32,
     pub max_delay_frames: u32,
+    /// The delay a stream begins with, in frames, kept within the least and the most.
+    /// Above the least, it covers the first seconds, while nothing is known of the
+    /// network yet; the delay then comes down as far as the network allows.
+    pub start_delay_frames: u32,
     /// How many recent arrivals the delay is estimated from.
     pub history: usize,
     /// How long the estimate must stay lower before the delay drops by a frame.
@@ -74,6 +82,7 @@ impl Default for Config {
             min_delay_frames: 2,
             margin_frames: 1,
             max_delay_frames: 25,
+            start_delay_frames: 2,
             history: 150,
             decrease_after: Duration::from_secs(2),
             shrink_after: 50,
@@ -203,7 +212,10 @@ fn micros(span: Duration) -> i64 {
 impl<P: Clone> JitterBuffer<P> {
     #[must_use]
     pub fn new(config: Config) -> Self {
-        let target_frames = config.min_delay_frames.min(config.max_delay_frames);
+        let target_frames = config.start_delay_frames.clamp(
+            config.min_delay_frames,
+            config.max_delay_frames.max(config.min_delay_frames),
+        );
         Self {
             config,
             buffer: BTreeMap::new(),
@@ -286,6 +298,10 @@ impl<P: Clone> JitterBuffer<P> {
 
     /// Update the delay estimate with a packet that arrived at `now`.
     fn observe(&mut self, seq: u64, now: Timestamp) {
+        if self.reference.is_none() {
+            // The starting delay is held from the stream's first packet.
+            self.target_held_since = now;
+        }
         let (ref_seq, ref_at) = *self.reference.get_or_insert((seq, now));
         // Signed: a packet may be older than the reference, or arrive ahead of its pace.
         let frames = i64::try_from(seq)
@@ -404,9 +420,10 @@ impl<P: Clone> JitterBuffer<P> {
 
     /// A frame is due at `now`. Call once per frame interval.
     pub fn pull(&mut self, now: Timestamp) -> Playout<P> {
-        let Some(mut next) = self.next else {
+        let Some(next) = self.next else {
             return self.maybe_start(now);
         };
+        let mut next = self.catch_up_in_a_pause(next, now);
 
         // Steer the delay in force towards the target, a frame at a time.
         let frame = micros(self.config.frame).max(1);
@@ -496,6 +513,40 @@ impl<P: Clone> JitterBuffer<P> {
         // Lost, with nothing to rebuild it from.
         self.stats.lost = self.stats.lost.saturating_add(1);
         self.conceal(next)
+    }
+
+    /// In a pause the sender sent nothing, so there is nothing to lose by moving on: if
+    /// the delay in force is a frame or more over the target, move the playhead from
+    /// `next` straight to the target, but not past a frame that is waiting. Returns where
+    /// the playhead now is.
+    ///
+    /// A pause is known by the silence already played. Should it have been a stalled
+    /// network instead, the packets that then arrive are stepped back to like any others
+    /// from a dry spell.
+    fn catch_up_in_a_pause(&mut self, next: u64, now: Timestamp) -> u64 {
+        if self.concealed_in_a_row <= self.config.max_conceal_frames {
+            return next;
+        }
+        let frame = micros(self.config.frame).max(1);
+        let target = i64::from(self.target_frames).saturating_mul(frame);
+        let Some(delay) = self.delay_in_force(next, now) else {
+            return next;
+        };
+        let over = u64::try_from(delay.saturating_sub(target) / frame).unwrap_or(0);
+        let silent = self
+            .buffer
+            .range(next..)
+            .next()
+            .map_or(u64::MAX, |(&waiting, _)| waiting.saturating_sub(next));
+        let jump = over.min(silent);
+        if jump == 0 {
+            return next;
+        }
+        let next = next.saturating_add(jump);
+        self.next = Some(next);
+        self.overfull_for = 0;
+        self.stats.skipped = self.stats.skipped.saturating_add(jump);
+        next
     }
 
     const fn conceal(&mut self, seq: u64) -> Playout<P> {
@@ -750,7 +801,8 @@ mod tests {
                 ..Config::default()
             };
             let mut call = Call::new(config);
-            call.run(0..200, |_| Some(30));
+            // Long enough to come down from the two frames it starts with.
+            call.run(0..250, |_| Some(30));
             assert_eq!(
                 call.buffer.target_delay(),
                 ms(delay_ms),
@@ -775,14 +827,91 @@ mod tests {
         };
         let mut call = Call::new(config);
         // Even at first, then every fifth packet 50 ms later than the rest.
-        call.run(0..100, |_| Some(30));
+        call.run(0..250, |_| Some(30));
         assert_eq!(call.buffer.target_delay(), ms(0));
-        call.run(100..200, |seq| Some(if seq % 5 == 0 { 80 } else { 30 }));
+        call.run(250..350, |seq| Some(if seq % 5 == 0 { 80 } else { 30 }));
         assert!(
             call.buffer.target_delay() >= ms(60),
             "{:?}",
             call.buffer.target_delay()
         );
+    }
+
+    /// No floor, no margin, and a talker with no quiet frames, so that the delay can only
+    /// come down in a pause; it starts at six frames and aims lower within a second.
+    fn eager() -> Config {
+        Config {
+            min_delay_frames: 0,
+            margin_frames: 0,
+            start_delay_frames: 6,
+            decrease_after: ms(100),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn the_delay_starts_above_its_floor_and_comes_down_when_the_network_allows() {
+        let config = Config {
+            min_delay_frames: 0,
+            margin_frames: 0,
+            ..Config::default()
+        };
+        let mut call = Call::new(config);
+        // The first second is played with the two frames it starts with.
+        call.run(0..50, steady);
+        assert_eq!(call.buffer.target_delay(), ms(40));
+        assert_eq!(call.latency_ms(), 60);
+        // On an even network it then comes down to nothing: a frame plays at the first
+        // pull after it arrives.
+        call.run(50..400, steady);
+        assert_eq!(call.buffer.target_delay(), ms(0));
+        assert_eq!(call.latency_ms(), 40);
+        let stats = call.buffer.stats();
+        assert_eq!(
+            (stats.lost, stats.late, stats.skipped),
+            (0, 0, 1),
+            "{stats:?}"
+        );
+    }
+
+    #[test]
+    fn a_pause_brings_the_delay_down_to_the_target_in_one_step() {
+        let mut call = Call::new(eager());
+        call.level = |_| 90;
+        // Speech, a second with nothing sent, speech.
+        let network = |seq: u64| (!(60..110).contains(&seq)).then_some(30);
+        call.run(0..60, network);
+        assert_eq!(call.latency_ms(), 140);
+        call.run(60..200, network);
+        // After the pause the delay is at its target of nothing.
+        assert_eq!(call.buffer.target_delay(), ms(0));
+        assert_eq!(call.latency_ms(), 40);
+        // No speech went to pay for it: every frame sent was played.
+        let frames = call.frames();
+        let (before, after): (Vec<u64>, Vec<u64>) = frames.iter().partition(|seq| **seq < 60);
+        assert!(complete(&before) && before.len() == 60, "{before:?}");
+        assert!(complete(&after) && after.first() == Some(&110), "{after:?}");
+        // The pause was heard five frames shorter than it was made.
+        assert_eq!(call.played_at(110) - call.played_at(59), 51 - 5);
+        let stats = call.buffer.stats();
+        assert_eq!((stats.late, stats.skipped), (0, 5), "{stats:?}");
+    }
+
+    #[test]
+    fn a_short_pause_is_shortened_only_as_far_as_its_silence_goes() {
+        let mut call = Call::new(eager());
+        call.level = |_| 90;
+        // Eight frames of nothing: by the time it has faded to silence, two are left.
+        let network = |seq: u64| (!(60..68).contains(&seq)).then_some(30);
+        call.run(0..120, network);
+        let frames = call.frames();
+        let (before, after): (Vec<u64>, Vec<u64>) = frames.iter().partition(|seq| **seq < 60);
+        assert!(complete(&before) && before.len() == 60, "{before:?}");
+        assert!(complete(&after) && after.first() == Some(&68), "{after:?}");
+        assert_eq!(call.played_at(68) - call.played_at(59), 9 - 2);
+        // The rest of the way waits for the next pause.
+        assert_eq!(call.buffer.stats().skipped, 2);
+        assert_eq!(call.latency_ms(), 140 - 40);
     }
 
     #[test]
