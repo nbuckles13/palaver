@@ -5,8 +5,10 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use palaver_harness::check::Finding;
 use palaver_harness::session::{Details, LinkLine, Order, Person, Session, Stage, View, VoiceLine};
 use palaver_harness::ui::{Setup, Window};
+use palaver_harness::words;
 use palaver_media::jitter::Stats;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -174,6 +176,19 @@ fn in_a_meeting_the_buttons_ask_for_what_they_say() {
 
     desk.click("Leave");
     assert!(matches!(desk.order(), Some(Order::Leave)));
+}
+
+#[test]
+fn in_a_meeting_a_microphone_that_gives_nothing_usable_is_said_under_the_meter() {
+    let mut desk = Desk::named("Ana");
+    desk.show(in_a_meeting);
+    let processed = words::microphone_hint(Finding::Processed, words::System::HERE);
+    assert!(!desk.shows(processed));
+    desk.show(|view| view.sound.microphone = Finding::Processed);
+    assert!(desk.shows(processed));
+    // A faint voice is not: it would come and go with each word.
+    desk.show(|view| view.sound.microphone = Finding::Faint);
+    assert!(!desk.shows(words::microphone_hint(Finding::Faint, words::System::HERE)));
 }
 
 #[test]

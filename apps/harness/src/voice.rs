@@ -8,6 +8,7 @@
 //! The devices are behind two small traits, so that the same code runs against a sound
 //! card and against made-up devices in a test.
 
+use crate::check::{Ear, Finding};
 use palaver_media::level::audio_level;
 use palaver_media::process::{Processor, Settings};
 use palaver_media::{Channels, CodecError};
@@ -79,6 +80,8 @@ pub struct Voice<M, S> {
     /// While set, what the microphone gives is listened to (the echo canceller needs
     /// it) and not sent.
     muted: bool,
+    /// Judges the microphone by what it gives, before any cleaning here.
+    ear: Ear,
 }
 
 impl<M: Source, S: Sink> Voice<M, S> {
@@ -102,6 +105,7 @@ impl<M: Source, S: Sink> Voice<M, S> {
             captured: vec![0.0; Channels::Mono.frame_len()],
             played: vec![0.0; playout.frame_len()],
             muted: false,
+            ear: Ear::default(),
         }
     }
 
@@ -124,6 +128,7 @@ impl<M: Source, S: Sink> Voice<M, S> {
         }
         turn.waiting = self.speaker.waiting();
         while self.microphone.pop(&mut self.captured) {
+            self.ear.hear(&self.captured);
             if let Some(processor) = &mut self.processor {
                 processor
                     .captured(&mut self.captured)
@@ -142,6 +147,12 @@ impl<M: Source, S: Sink> Voice<M, S> {
     #[must_use]
     pub fn gauges(&self) -> Vec<VoiceGauge> {
         self.call.gauges()
+    }
+
+    /// What the last few seconds say of the microphone, as the device gives it.
+    #[must_use]
+    pub fn microphone_finding(&self) -> Finding {
+        self.ear.finding()
     }
 
     /// Stop sending what the microphone gives, or start again.
