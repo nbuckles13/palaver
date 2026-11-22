@@ -229,7 +229,7 @@ impl Window {
                 ui.label(RichText::new("opening…").color(ember::QUIET));
             }
             Found::Listening(device) => {
-                ui.label(RichText::new(device).color(ember::QUIET));
+                ui.label(RichText::new(&device).color(ember::QUIET));
                 let share = self.metered(level);
                 meter(ui, share);
                 let colour = match finding {
@@ -242,7 +242,7 @@ impl Window {
                         .small()
                         .color(colour),
                 );
-                settings_link(ui, finding);
+                settings_link(ui, finding, &device);
             }
             Found::Failed(why) => {
                 ui.label(RichText::new(why).color(ember::EMBER));
@@ -372,7 +372,7 @@ impl Window {
         if let Some(warning) = words::microphone_warning(view.sound.microphone, words::System::HERE)
         {
             ui.label(RichText::new(warning).small().color(ember::EMBER));
-            settings_link(ui, view.sound.microphone);
+            settings_link(ui, view.sound.microphone, &view.microphone);
         }
 
         ui.horizontal(|ui| {
@@ -432,9 +432,12 @@ impl Window {
     }
 }
 
-/// A link into the system's settings for a microphone found wanting, where the system
-/// has an address for them.
-fn settings_link(ui: &mut Ui, finding: Finding) {
+/// The steps to put right a microphone found wanting, and a link into the system's
+/// settings, where the system has an address for them.
+fn settings_link(ui: &mut Ui, finding: Finding, device: &str) {
+    if let Some(steps) = words::microphone_steps(finding, words::System::HERE, device) {
+        ui.label(RichText::new(steps).small().color(ember::QUIET));
+    }
     let Some(link) = words::settings_for(finding, words::System::HERE) else {
         return;
     };
