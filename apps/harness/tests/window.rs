@@ -5,10 +5,11 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use palaver_harness::session::{Order, Person, Session, Stage, View};
+use palaver_harness::session::{Details, Order, Person, Session, Stage, View, VoiceLine};
 use palaver_harness::ui::{Setup, Window};
+use palaver_media::jitter::Stats;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 /// A window with the test holding the session's other ends.
@@ -173,6 +174,38 @@ fn in_a_meeting_the_buttons_ask_for_what_they_say() {
 
     desk.click("Leave");
     assert!(matches!(desk.order(), Some(Order::Leave)));
+}
+
+#[test]
+fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring() {
+    let mut desk = Desk::named("Ana");
+    desk.show(|view| {
+        in_a_meeting(view);
+        view.microphone = String::from("a microphone");
+        view.speaker = String::from("a speaker");
+        view.details = Details {
+            sound_gap: Duration::from_millis(11),
+            sound_burst: 1,
+            network_late: Duration::from_millis(2),
+            voices: vec![VoiceLine {
+                name: String::from("Bo"),
+                delay: Duration::from_millis(60),
+                stats: Stats {
+                    played: 500,
+                    ..Stats::default()
+                },
+            }],
+        };
+    });
+    let voice = "Bo: buffer 60 ms · played 500 · rebuilt 0 · guessed 0 · skipped 0 · late 0";
+    assert!(!desk.shows(voice));
+    desk.click("Details");
+    assert!(desk.shows(voice));
+    assert!(desk.shows("a microphone → a speaker"));
+    assert!(desk.shows("network thread: timers up to 2 ms late"));
+    assert!(desk.shows(
+        "sound thread: longest wait 11 ms · most frames at once 1 · speaker short 0 · dropped 0"
+    ));
 }
 
 #[test]

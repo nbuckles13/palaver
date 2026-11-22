@@ -3,6 +3,9 @@
 //! Everything here is a plain function of what is known, so that it is tested without a
 //! window. The drawing code in [`crate::ui`] decides nothing but colours and layout.
 
+use palaver_media::jitter::Stats;
+use std::time::Duration;
+
 /// The quietest and the loudest level the meter shows, on the scale of
 /// [`palaver_media::level`]: above the hiss of a quiet room, and close to full scale.
 pub const METER_FLOOR: u8 = 72;
@@ -49,6 +52,43 @@ pub fn links_line(links: usize, network: Option<&str>) -> String {
         line.push_str(network);
     }
     line
+}
+
+/// A length of time as whole milliseconds.
+#[must_use]
+pub fn millis(time: Duration) -> String {
+    format!("{} ms", time.as_millis())
+}
+
+/// How the sound thread is keeping up: its longest wait between turns and the most
+/// frames the microphone had waiting at once, then what the speaker went short of and
+/// was too slow to take.
+#[must_use]
+pub fn sound_line(gap: Duration, burst: usize, starved: u64, dropped: u64) -> String {
+    format!(
+        "sound thread: longest wait {} · most frames at once {burst} · speaker short {starved} · dropped {dropped}",
+        millis(gap)
+    )
+}
+
+/// How the network thread is keeping up.
+#[must_use]
+pub fn network_line(late: Duration) -> String {
+    format!("network thread: timers up to {} late", millis(late))
+}
+
+/// One voice being played: the delay its buffer aims for, and what became of its frames.
+#[must_use]
+pub fn voice_line(name: &str, delay: Duration, stats: &Stats) -> String {
+    format!(
+        "{name}: buffer {} · played {} · rebuilt {} · guessed {} · skipped {} · late {}",
+        millis(delay),
+        stats.played,
+        stats.recovered_fec.saturating_add(stats.recovered_dred),
+        stats.concealed,
+        stats.skipped,
+        stats.late
+    )
 }
 
 /// The first two letters of a name, as they stand on a person's disc.
@@ -127,6 +167,31 @@ mod tests {
         assert_eq!(
             links_line(3, Some("behind a router")),
             "3 links · direct · no server · behind a router"
+        );
+    }
+
+    #[test]
+    fn the_details_say_how_the_threads_and_each_voice_are_faring() {
+        assert_eq!(
+            sound_line(Duration::from_micros(14_900), 2, 960, 0),
+            "sound thread: longest wait 14 ms · most frames at once 2 · speaker short 960 · dropped 0"
+        );
+        assert_eq!(
+            network_line(Duration::from_millis(3)),
+            "network thread: timers up to 3 ms late"
+        );
+        let stats = Stats {
+            played: 1200,
+            recovered_fec: 3,
+            recovered_dred: 1,
+            concealed: 12,
+            skipped: 2,
+            late: 5,
+            ..Stats::default()
+        };
+        assert_eq!(
+            voice_line("Bo", Duration::from_millis(60), &stats),
+            "Bo: buffer 60 ms · played 1200 · rebuilt 4 · guessed 12 · skipped 2 · late 5"
         );
     }
 

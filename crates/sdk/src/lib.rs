@@ -13,6 +13,6 @@ pub mod call;
 pub mod engine;
 pub mod participant;
 
-pub use call::Call;
+pub use call::{Call, VoiceGauge};
 pub use engine::{AudioIn, Controller, Engine, EngineConfig, Status};
 pub use participant::{Options, Participant, StartError, entry_points};

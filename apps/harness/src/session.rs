@@ -12,15 +12,22 @@
 
 use crate::live::{Live, Reading};
 use palaver_media::Channels;
+use palaver_media::jitter::Stats as JitterStats;
 use palaver_media::process::Settings;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
 use palaver_proto::SECRET_BYTES;
 use palaver_proto::{Secret, Ticket};
 use palaver_sdk::{Call, Options, Participant, Status, entry_points};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+/// How often the network thread checks how late it is running.
+const PULSE: Duration = Duration::from_millis(20);
+/// The worst of each gauge over this many refreshes is what is shown: five seconds.
+const REMEMBERED: usize = 25;
 
 /// How often the view is brought up to date.
 const REFRESH: Duration = Duration::from_millis(200);
@@ -59,6 +66,73 @@ pub struct Person {
     pub linked: bool,
 }
 
+/// The largest of the last few values given: a gauge that is read for its worst.
+#[derive(Debug, Clone)]
+pub struct Worst<T> {
+    recent: VecDeque<T>,
+    kept: usize,
+}
+
+impl<T: Ord + Copy + Default> Worst<T> {
+    #[must_use]
+    pub const fn of_last(kept: usize) -> Self {
+        Self {
+            recent: VecDeque::new(),
+            kept,
+        }
+    }
+
+    /// Take the newest value and give the largest of those remembered.
+    pub fn after(&mut self, value: T) -> T {
+        self.recent.push_back(value);
+        while self.recent.len() > self.kept.max(1) {
+            self.recent.pop_front();
+        }
+        self.recent.iter().copied().max().unwrap_or_default()
+    }
+}
+
+/// How one voice being played is faring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceLine {
+    pub name: String,
+    /// The playout delay its jitter buffer is aiming for.
+    pub delay: Duration,
+    pub stats: JitterStats,
+}
+
+/// The numbers behind how the meeting sounds, each the worst of the last five seconds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Details {
+    /// The longest the sound thread went between two turns.
+    pub sound_gap: Duration,
+    /// The most frames the microphone had waiting at one turn.
+    pub sound_burst: usize,
+    /// How late the network thread's timers have run.
+    pub network_late: Duration,
+    pub voices: Vec<VoiceLine>,
+}
+
+/// The gauges as they are remembered between refreshes.
+struct Gauges {
+    sound_gap: Worst<Duration>,
+    sound_burst: Worst<usize>,
+    network_late: Worst<Duration>,
+    /// The latest the pulse has been since the last refresh.
+    late_now: Duration,
+}
+
+impl Gauges {
+    const fn new() -> Self {
+        Self {
+            sound_gap: Worst::of_last(REMEMBERED),
+            sound_burst: Worst::of_last(REMEMBERED),
+            network_late: Worst::of_last(REMEMBERED),
+            late_now: Duration::ZERO,
+        }
+    }
+}
+
 /// What the window draws.
 #[derive(Debug, Clone, Default)]
 pub struct View {
@@ -80,6 +154,7 @@ pub struct View {
     pub muted: bool,
     /// When this node got in.
     pub since: Option<Instant>,
+    pub details: Details,
 }
 
 /// The sound of a meeting, once started.
@@ -275,7 +350,35 @@ fn refresh(
     invitation: Option<&Ticket>,
     sound: Reading,
     status: &Status,
+    gauges: &mut Gauges,
 ) {
+    // Whose voice each alias is, by the plan.
+    let voices = sound
+        .gauges
+        .iter()
+        .map(|gauge| {
+            let name = status
+                .microphones
+                .iter()
+                .find(|(alias, _)| *alias == gauge.alias)
+                .and_then(|(_, id)| status.roster.iter().position(|member| member == id))
+                .and_then(|place| status.names.get(place))
+                .map_or_else(|| String::from("someone"), |name| name.reveal().clone());
+            VoiceLine {
+                name,
+                delay: gauge.delay,
+                stats: gauge.stats,
+            }
+        })
+        .collect();
+    let details = Details {
+        sound_gap: gauges.sound_gap.after(sound.longest_gap),
+        sound_burst: gauges.sound_burst.after(sound.largest_burst),
+        network_late: gauges
+            .network_late
+            .after(std::mem::take(&mut gauges.late_now)),
+        voices,
+    };
     let me = participant.control().me().clone();
     let people: Vec<Person> = status
         .roster
@@ -305,6 +408,7 @@ fn refresh(
         view.links = status.links.len();
         // The loudest level starts again at each reading; keep the last one heard.
         view.sound = sound;
+        view.details = details;
     });
 }
 
@@ -315,6 +419,17 @@ fn secret_for(invitation: Option<&Ticket>) -> Result<Secret<[u8; SECRET_BYTES]>,
         None => Ok(palaver_net::identity::Identity::generate()
             .map_err(|_| "The system gave no random bytes for a meeting secret.")?
             .secret()),
+    }
+}
+
+/// Dial whoever sent `text` back, if it is a ticket; what to say about it either way.
+async fn reach(participant: &Participant, text: &str) -> String {
+    match Ticket::parse(text.trim()) {
+        Ok(back) => {
+            participant.reach(&back).await;
+            String::from("Reaching for whoever sent that back.")
+        }
+        Err(error) => format!("That is not a ticket: {error:?}"),
     }
 }
 
@@ -382,19 +497,22 @@ async fn meeting<W: World>(
     });
 
     let mut beat = tokio::time::interval(REFRESH);
+    let mut pulse = tokio::time::interval(PULSE);
+    pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut gauges = Gauges::new();
     let mut replied = false;
     let ended = loop {
         tokio::select! {
             _ = beat.tick() => {}
+            due = pulse.tick() => {
+                // How long after it was due this thread got to it.
+                let late = tokio::time::Instant::now().saturating_duration_since(due);
+                gauges.late_now = gauges.late_now.max(late);
+                continue;
+            }
             order = orders.recv() => match order {
                 Some(Order::Reach(text)) => {
-                    let said = match Ticket::parse(text.trim()) {
-                        Ok(back) => {
-                            participant.reach(&back).await;
-                            String::from("Reaching for whoever sent that back.")
-                        }
-                        Err(error) => format!("That is not a ticket: {error:?}"),
-                    };
+                    let said = reach(&participant, &text).await;
                     set(view, |view| view.notice = Some(said));
                 }
                 Some(Order::Mute(muted)) => {
@@ -426,6 +544,7 @@ async fn meeting<W: World>(
             invitation.as_ref(),
             live.reading(),
             &status,
+            &mut gauges,
         );
     };
     if let Some(call) = live.stop() {

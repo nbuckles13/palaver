@@ -384,12 +384,29 @@ impl Window {
         }
 
         self.getting_in(ui, view);
-        ui.label(
-            RichText::new(format!("{} → {}", view.microphone, view.speaker))
-                .small()
-                .monospace()
-                .color(ember::DIM),
-        );
+        // Closed until asked for; open in a picture, so that the picture shows them.
+        let details = egui::CollapsingHeader::new("Details").default_open(self.shot.is_some());
+        details.show(ui, |ui| {
+            let small = |text: String| RichText::new(text).small().monospace().color(ember::QUIET);
+            ui.label(small(format!("{} → {}", view.microphone, view.speaker)));
+            ui.label(small(words::sound_line(
+                view.details.sound_gap,
+                view.details.sound_burst,
+                view.sound.starved,
+                view.sound.dropped,
+            )));
+            ui.label(small(words::network_line(view.details.network_late)));
+            for voice in &view.details.voices {
+                ui.label(small(words::voice_line(
+                    &voice.name,
+                    voice.delay,
+                    &voice.stats,
+                )));
+            }
+            if view.details.voices.is_empty() {
+                ui.label(small(String::from("no voices are being played")));
+            }
+        });
     }
 }
 
@@ -506,10 +523,12 @@ impl eframe::App for Window {
 /// With a shot in `setup`, the window takes a picture of itself after a few seconds and
 /// closes.
 pub fn run(setup: Setup) -> Result<(), String> {
+    // A picture shows the details open, and is taller to hold them.
+    let height = if setup.shot.is_some() { 900.0 } else { 720.0 };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Palaver")
-            .with_inner_size([520.0, 720.0])
+            .with_inner_size([520.0, height])
             .with_min_inner_size([420.0, 560.0]),
         ..eframe::NativeOptions::default()
     };

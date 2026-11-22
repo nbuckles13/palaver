@@ -11,7 +11,7 @@
 use palaver_media::level::audio_level;
 use palaver_media::process::{Processor, Settings};
 use palaver_media::{Channels, CodecError};
-use palaver_sdk::Call;
+use palaver_sdk::{Call, VoiceGauge};
 use palaver_sound::{Microphone, Speaker};
 
 /// The most frames made for the speaker in one turn. A speaker that never fills (a broken
@@ -133,6 +133,12 @@ impl<M: Source, S: Sink> Voice<M, S> {
             }
         }
         Ok(turn)
+    }
+
+    /// How each voice being played is faring.
+    #[must_use]
+    pub fn gauges(&self) -> Vec<VoiceGauge> {
+        self.call.gauges()
     }
 
     /// Stop sending what the microphone gives, or start again.
