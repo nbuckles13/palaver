@@ -167,6 +167,29 @@ level to its target within seconds.
   (its settings, or a first guess at the gain from the first seconds of speech), without
   bringing up the noise of a quiet room when nobody is talking.
 
+### The firewall on the machine that starts a meeting
+
+Found on the first call between two machines (2026-11-21, two Windows machines on one
+home network). The joiner needed nothing: a firewall lets in the answers to what its own
+machine sent. The creator was unreachable, silently, for two reasons that each sufficed:
+Windows had no rule for the program (and showed no prompt asking for one), and the home
+network was marked Public. With a rule for the program and the network marked Private,
+the call was good at once.
+
+- **The installer adds the rule** (decided 2026-11-21): one rule for our program,
+  incoming UDP, on every kind of network; named, said in the installer, and taken away
+  on uninstall; through the firewall's own interface. Every kind of network because home
+  networks are often marked Public and a meeting that fails there fails without a word;
+  what it exposes is a port that refuses anyone who does not know the meeting's secret.
+- **The app notices** when it has been in a meeting for a while and nobody has ever
+  reached it, says what that usually means, and offers to add the rule (one prompt for
+  permission). This covers installs without administrator rights and the bare program.
+- It cannot cover other firewalls or a company's policy. The way not to depend on a rule
+  is for both ends to send first, which is what rendezvous (phase 4) brings to the one
+  case that needs it: reaching the creator, who does not yet know the joiner exists.
+- Heard on that call: the delay is low enough that, with both machines in one room, the
+  talker's own voice and its copy from the other machine are hard to tell apart.
+
 ### Noise suppression: how much, and who decides
 
 What there is (`media::process`): WebRTC's suppressor as ported in `sonora`, at its
