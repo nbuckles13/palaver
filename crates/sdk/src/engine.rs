@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -109,12 +109,25 @@ pub struct Status {
     pub nobody_answers: bool,
 }
 
+/// How one connection is faring, as its transport measures it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkGauge {
+    pub peer: ParticipantId,
+    /// The round-trip time.
+    pub rtt: Duration,
+    /// Packets sent to the peer since the connection came up, and how many of them were
+    /// given up as lost.
+    pub sent: u64,
+    pub lost: u64,
+}
+
 enum Command {
     Create,
     Join(Vec<Peer>),
     Addresses(Vec<SocketAddr>),
     Reach(Vec<Peer>),
     Stop,
+    Links(oneshot::Sender<Vec<LinkGauge>>),
     Audio {
         group: u64,
         level: u8,
@@ -334,6 +347,16 @@ impl Controller {
         self.status.clone()
     }
 
+    /// How each connection is faring at the moment. These change all the time, so they
+    /// are asked for and not watched. Empty once the node has stopped.
+    pub async fn links(&self) -> Vec<LinkGauge> {
+        let (answer, answered) = oneshot::channel();
+        if self.commands.send(Command::Links(answer)).await.is_err() {
+            return Vec::new();
+        }
+        answered.await.unwrap_or_default()
+    }
+
     /// Stop the node: close its endpoint and every connection.
     pub async fn stop(&self) {
         let _ = self.commands.send(Command::Stop).await;
@@ -486,6 +509,23 @@ impl<E: Endpoint> Run<E> {
             Command::Create => self.node.create_meeting(now),
             // Taken before it gets here: it ends the loop.
             Command::Stop => {}
+            Command::Links(answer) => {
+                let gauges = self
+                    .links
+                    .iter()
+                    .map(|(peer, link)| {
+                        let path = link.connection.path();
+                        LinkGauge {
+                            peer: peer.clone(),
+                            rtt: path.rtt,
+                            sent: path.sent,
+                            lost: path.lost,
+                        }
+                    })
+                    .collect();
+                // Whoever asked may have gone.
+                let _ = answer.send(gauges);
+            }
             Command::Addresses(addresses) => self
                 .node
                 .set_addresses(addresses.into_iter().map(Redacted::new).collect(), now),

@@ -58,6 +58,10 @@ pub enum Side {
 pub struct Path {
     /// The round-trip time the transport measures.
     pub rtt: Duration,
+    /// Packets sent on the connection so far, and how many of them the transport has
+    /// given up as lost. Nought where the transport does not count.
+    pub sent: u64,
+    pub lost: u64,
     /// The address the peer's packets come from, where the transport has addresses.
     pub remote: Option<SocketAddr>,
 }

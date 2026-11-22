@@ -398,6 +398,11 @@ impl Window {
                 view.sound.dropped,
             )));
             ui.label(small(words::network_line(view.details.network_late)));
+            for link in &view.details.links {
+                ui.label(small(words::link_line(
+                    &link.name, link.rtt, link.sent, link.lost,
+                )));
+            }
             for voice in &view.details.voices {
                 ui.label(small(words::voice_line(
                     &voice.name,

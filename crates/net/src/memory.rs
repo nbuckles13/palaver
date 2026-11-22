@@ -339,6 +339,8 @@ impl Connection for MemoryConnection {
     fn path(&self) -> Path {
         Path {
             rtt: Duration::ZERO,
+            sent: 0,
+            lost: 0,
             remote: None,
         }
     }
