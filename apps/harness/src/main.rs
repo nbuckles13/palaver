@@ -29,7 +29,8 @@
 //!                           (default 0)
 //!   --lead <ms>             how much sound is kept waiting for the speaker (default 20)
 //!   --noise <strength>      how hard the microphone's steady noise is turned down: low,
-//!                           moderate (the default), high or veryhigh
+//!                           moderate, high or veryhigh; or auto (the default): moderate,
+//!                           and high for a microphone with much noise of its own
 //!   --seconds <n>           how long to stay (default: until stopped)
 //! ```
 //!
@@ -122,11 +123,12 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
 fn tune(tuning: &mut Tuning, option: &str, text: &str) -> Result<(), String> {
     if option == "--noise" {
         tuning.noise = match text {
-            "low" => NoiseStrength::Low,
-            "moderate" => NoiseStrength::Moderate,
-            "high" => NoiseStrength::High,
-            "veryhigh" => NoiseStrength::VeryHigh,
-            _ => return Err(format!("not low, moderate, high or veryhigh: {text}")),
+            "auto" => None,
+            "low" => Some(NoiseStrength::Low),
+            "moderate" => Some(NoiseStrength::Moderate),
+            "high" => Some(NoiseStrength::High),
+            "veryhigh" => Some(NoiseStrength::VeryHigh),
+            _ => return Err(format!("not auto, low, moderate, high or veryhigh: {text}")),
         };
         return Ok(());
     }
@@ -185,7 +187,7 @@ async fn run(asked: Asked) -> Result<(), String> {
     };
 
     let cleaning = (!asked.raw).then(|| asked.tuning.cleaning());
-    let live = match Live::start(call, cleaning, playout, asked.tuning.lead_ms) {
+    let live = match Live::start(call, cleaning, playout, asked.tuning) {
         Ok(live) => live,
         Err(failed) => {
             if let Some(call) = failed.call {

@@ -28,6 +28,12 @@ pub const SPEECH_FLOOR: u8 = 67;
 /// A voice below this is faint: 87 is -40 dB. A headset at an ordinary level gave -35 dB;
 /// the same one behind the system's own cleaning gave -44 to -63 dB.
 pub const FAINT_BELOW: u8 = 87;
+/// A microphone is noisy when the quietest tenth of what it gives is this loud or more.
+///
+/// 77 is -50 dB. A headset in a room sits near -60 dB or below; a handheld's built-in
+/// microphone, heard pulsing at the far end, sat at -40 dB.
+pub const NOISY_FLOOR: u8 = 77;
+
 /// With this share of its frames exactly silent, in tenths, a microphone that also gives
 /// sound is being gated before it gets here. No microphone is that silent by itself.
 const GATED_TENTHS: usize = 1;
@@ -132,6 +138,23 @@ impl Ear {
     }
 }
 
+impl Ear {
+    /// Whether the microphone has much noise of its own: with five seconds heard, the
+    /// quietest tenth of them, which is what lies between words, is still loud. Not said
+    /// of a microphone that is gated or gives nothing.
+    #[must_use]
+    pub fn noisy(&self) -> bool {
+        if self.heard.len() < WINDOW || self.gated || self.silent > 0 {
+            return false;
+        }
+        let mut levels: Vec<u8> = self.heard.iter().flatten().copied().collect();
+        levels.sort_unstable();
+        levels
+            .get(levels.len() / 10)
+            .is_some_and(|floor| *floor >= NOISY_FLOOR)
+    }
+}
+
 /// What the check has found so far.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Found {
@@ -149,6 +172,7 @@ pub struct MicCheck {
     stop: Arc<AtomicBool>,
     loudest: Arc<AtomicU8>,
     finding: Arc<AtomicU8>,
+    noisy: Arc<AtomicBool>,
     found: Arc<Mutex<Found>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -160,11 +184,13 @@ impl MicCheck {
         let loudest = Arc::new(AtomicU8::new(0));
         let found = Arc::new(Mutex::new(Found::Opening));
         let finding = Arc::new(AtomicU8::new(Finding::TooSoon.code()));
-        let (stopping, level, finding_out, judged) = (
+        let noisy = Arc::new(AtomicBool::new(false));
+        let (stopping, level, finding_out, judged, hissing) = (
             Arc::clone(&stop),
             Arc::clone(&loudest),
             Arc::clone(&found),
             Arc::clone(&finding),
+            Arc::clone(&noisy),
         );
         let thread = std::thread::spawn(move || {
             let say = |what: Found| {
@@ -185,6 +211,7 @@ impl MicCheck {
                     ear.hear(&frame);
                 }
                 judged.store(ear.finding().code(), Ordering::Relaxed);
+                hissing.store(ear.noisy(), Ordering::Relaxed);
                 std::thread::park_timeout(Duration::from_millis(20));
             }
         });
@@ -192,6 +219,7 @@ impl MicCheck {
             stop,
             loudest,
             finding,
+            noisy,
             found,
             thread: Some(thread),
         }
@@ -207,6 +235,12 @@ impl MicCheck {
     #[must_use]
     pub fn finding(&self) -> Finding {
         Finding::from_code(self.finding.load(Ordering::Relaxed))
+    }
+
+    /// Whether the microphone has much noise of its own.
+    #[must_use]
+    pub fn noisy(&self) -> bool {
+        self.noisy.load(Ordering::Relaxed)
     }
 
     #[must_use]
@@ -316,6 +350,21 @@ mod tests {
             ear.hear(&frame(ROOM));
         }
         assert_eq!(ear.finding(), Finding::NothingSaid);
+    }
+
+    #[test]
+    fn a_microphone_is_noisy_when_it_is_loud_between_words() {
+        // -40 dB between words, as one handheld's microphone gave.
+        let loud_floor = 0.01;
+        assert!(heard(&[(200, loud_floor), (50, VOICE)]).noisy());
+        // A room's hiss is not, however much is said over it.
+        assert!(!heard(&[(50, ROOM), (200, VOICE)]).noisy());
+        assert!(!heard(&[(250, ROOM)]).noisy());
+        // It takes five seconds to say so, and is not said of a gated microphone or of
+        // one that gives nothing.
+        assert!(!heard(&[(200, loud_floor)]).noisy());
+        assert!(!heard(&[(100, 0.0), (150, loud_floor)]).noisy());
+        assert!(!heard(&[(250, 0.0)]).noisy());
     }
 
     #[test]

@@ -203,6 +203,30 @@ pub fn sound_line(gap: Duration, burst: usize, starved: Duration, dropped: Durat
     )
 }
 
+/// What is said of a noisy microphone while it is being tried: that more noise
+/// suppression will be added, where that is left to Palaver, and nothing where the
+/// strength was fixed by whoever started it.
+#[must_use]
+pub const fn noisy_hint(noisy: bool, by_ear: bool) -> Option<&'static str> {
+    if noisy && by_ear {
+        Some(
+            "Palaver hears a lot of background noise from this microphone, and will add extra noise suppression to compensate.",
+        )
+    } else {
+        None
+    }
+}
+
+/// What the details say when extra noise suppression is on.
+#[must_use]
+pub const fn noise_line(high: bool) -> Option<&'static str> {
+    if high {
+        Some("noise suppression: high, to compensate for background noise")
+    } else {
+        None
+    }
+}
+
 /// How the network thread is keeping up.
 #[must_use]
 pub fn network_line(late: Duration) -> String {
@@ -622,6 +646,22 @@ mod tests {
         assert_eq!(grown_width(1280.0, 400.0, Some(1280.0), false), None);
         assert_eq!(grown_width(1000.0, 400.0, Some(1280.0), false), None);
         assert_eq!(grown_width(520.0, 400.0, Some(1920.0), true), None);
+    }
+
+    #[test]
+    fn extra_noise_suppression_is_said_only_where_it_is_added() {
+        assert_eq!(
+            noise_line(true),
+            Some("noise suppression: high, to compensate for background noise")
+        );
+        assert_eq!(noise_line(false), None);
+        // Before a meeting: only for a noisy microphone, and only where the strength is
+        // left to Palaver.
+        assert!(
+            noisy_hint(true, true).is_some_and(|hint| hint.contains("extra noise suppression"))
+        );
+        assert_eq!(noisy_hint(true, false), None);
+        assert_eq!(noisy_hint(false, true), None);
     }
 
     #[test]

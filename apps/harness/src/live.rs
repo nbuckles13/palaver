@@ -27,8 +27,9 @@ pub struct Tuning {
     pub margin_frames: u32,
     /// How much sound is kept waiting for the speaker, in milliseconds.
     pub lead_ms: u32,
-    /// How hard the microphone's steady noise is turned down.
-    pub noise: NoiseStrength,
+    /// How hard the microphone's steady noise is turned down. `None` leaves it to the
+    /// ear: as usual, and harder for a microphone found to have much noise of its own.
+    pub noise: Option<NoiseStrength>,
 }
 
 impl Default for Tuning {
@@ -39,7 +40,7 @@ impl Default for Tuning {
             floor_frames: 0,
             margin_frames: 0,
             lead_ms: AHEAD_MS,
-            noise: NoiseStrength::default(),
+            noise: None,
         }
     }
 }
@@ -56,11 +57,12 @@ impl Tuning {
         jitter
     }
 
-    /// Every kind of cleaning, with noise turned down as hard as this tuning says.
+    /// Every kind of cleaning, with noise turned down as hard as this tuning says, or
+    /// as usual to begin with where it is left to the ear.
     #[must_use]
     pub fn cleaning(self) -> Settings {
         Settings {
-            noise_strength: self.noise,
+            noise_strength: self.noise.unwrap_or_default(),
             ..Settings::default()
         }
     }
@@ -93,6 +95,8 @@ pub struct Meter {
     lead: AtomicU64,
     /// A [`Finding`], as its number.
     microphone: AtomicU8,
+    /// Whether noise is being turned down at "high" or harder.
+    noise_high: AtomicBool,
 }
 
 /// A reading of the [`Meter`].
@@ -125,6 +129,8 @@ pub struct Reading {
     pub lead: Duration,
     /// What the last few seconds say of the microphone, as the device gives it.
     pub microphone: Finding,
+    /// Whether the microphone's noise is being turned down harder than usual.
+    pub noise_high: bool,
 }
 
 impl Meter {
@@ -153,8 +159,10 @@ impl Meter {
         self.longest_gap.fetch_max(micros, Ordering::Relaxed);
     }
 
-    fn note_microphone(&self, finding: Finding) {
+    fn note_microphone(&self, finding: Finding, noise: Option<NoiseStrength>) {
         self.microphone.store(finding.code(), Ordering::Relaxed);
+        let high = matches!(noise, Some(NoiseStrength::High | NoiseStrength::VeryHigh));
+        self.noise_high.store(high, Ordering::Relaxed);
     }
 
     fn note_gauges(&self, gauges: Vec<VoiceGauge>) {
@@ -183,6 +191,7 @@ impl Meter {
                 .unwrap_or_default(),
             lead: Duration::from_micros(self.lead.swap(0, Ordering::Relaxed)),
             microphone: Finding::from_code(self.microphone.load(Ordering::Relaxed)),
+            noise_high: self.noise_high.load(Ordering::Relaxed),
         }
     }
 }
@@ -206,7 +215,9 @@ pub struct Live {
 
 impl Live {
     /// Open the default speaker and microphone and start carrying `call` on them.
-    /// `call` must send one channel and play `playout`.
+    /// `call` must send one channel and play `playout`. From `tuning` come how much
+    /// sound is kept waiting for the speaker, and whether the strength of the noise
+    /// suppression is left to the ear.
     ///
     /// # Errors
     ///
@@ -215,8 +226,9 @@ impl Live {
         call: Call,
         cleaning: Option<Settings>,
         playout: Channels,
-        lead_ms: u32,
+        tuning: Tuning,
     ) -> Result<Self, Box<Failed>> {
+        let lead_ms = tuning.lead_ms;
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(false));
         let muting = Arc::clone(&muted);
@@ -240,6 +252,7 @@ impl Live {
             let ahead = usize::try_from(rate.saturating_mul(u64::from(lead_ms)) / 1000)
                 .unwrap_or(usize::MAX);
             let mut voice = Voice::new(call, microphone, speaker, cleaning, playout, ahead);
+            voice.set_noise_by_ear(tuning.noise.is_none());
             let mut last = Instant::now();
             let mut turns = 0u32;
             while !stopping.load(Ordering::Relaxed) {
@@ -259,7 +272,7 @@ impl Live {
                 turns = turns.wrapping_add(1);
                 if turns.is_multiple_of(GAUGE_EVERY) {
                     metering.note_gauges(voice.gauges());
-                    metering.note_microphone(voice.microphone_finding());
+                    metering.note_microphone(voice.microphone_finding(), voice.noise_strength());
                 }
             }
             voice.into_call()

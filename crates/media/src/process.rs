@@ -127,16 +127,15 @@ impl Planar {
 /// Cleans one microphone's frames, knowing what the speaker plays.
 pub struct Processor {
     apm: AudioProcessing,
+    settings: Settings,
     captured: Planar,
     played: Planar,
 }
 
 impl Processor {
-    /// For a microphone whose frames have `captured` channels beside a speaker whose
-    /// frames have `played`.
-    #[must_use]
-    pub fn new(settings: Settings, captured: Channels, played: Channels) -> Self {
-        let config = Config {
+    /// What the processor is told to do, for these settings and channels.
+    fn config(settings: Settings, captured: Channels, played: Channels) -> Config {
+        Config {
             pipeline: Pipeline {
                 multi_channel_capture: captured == Channels::Stereo,
                 multi_channel_render: played == Channels::Stereo,
@@ -168,7 +167,34 @@ impl Processor {
                 ..GainController2::default()
             }),
             ..Config::default()
-        };
+        }
+    }
+
+    /// Turn steady noise down as hard as `strength` from here on, without starting
+    /// again: what has been learnt of the room and of the voice's level is kept.
+    pub fn set_noise_strength(&mut self, strength: NoiseStrength) {
+        if self.settings.noise_strength == strength {
+            return;
+        }
+        self.settings.noise_strength = strength;
+        self.apm.apply_config(Self::config(
+            self.settings,
+            self.captured.channels,
+            self.played.channels,
+        ));
+    }
+
+    /// How hard steady noise is being turned down, if it is at all.
+    #[must_use]
+    pub fn noise_strength(&self) -> Option<NoiseStrength> {
+        self.settings.noise.then_some(self.settings.noise_strength)
+    }
+
+    /// For a microphone whose frames have `captured` channels beside a speaker whose
+    /// frames have `played`.
+    #[must_use]
+    pub fn new(settings: Settings, captured: Channels, played: Channels) -> Self {
+        let config = Self::config(settings, captured, played);
         let stream = |channels: Channels| {
             StreamConfig::new(
                 SAMPLE_RATE,
@@ -181,6 +207,7 @@ impl Processor {
                 .capture_config(stream(captured))
                 .render_config(stream(played))
                 .build(),
+            settings,
             captured: Planar::new(captured),
             played: Planar::new(played),
         }

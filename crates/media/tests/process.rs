@@ -260,6 +260,38 @@ fn steady_noise_is_turned_down_and_a_voice_in_it_is_kept() {
 }
 
 #[test]
+fn noise_can_be_turned_down_harder_while_running() {
+    let mut state = 1u32;
+    let mut hiss = move || -> Vec<f32> {
+        (0..FRAME_SAMPLES)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((state >> 8) as f32 / 8_388_608.0 - 1.0) * 0.02
+            })
+            .collect()
+    };
+    let mut processor = Processor::new(Settings::default(), Channels::Mono, Channels::Mono);
+    assert_eq!(processor.noise_strength(), Some(NoiseStrength::Moderate));
+    let silence = vec![0.0; FRAME_SAMPLES];
+    let mut clean = Vec::new();
+    for frame in 0..400 {
+        if frame == 200 {
+            processor.set_noise_strength(NoiseStrength::High);
+        }
+        let mut microphone = hiss();
+        processor.played(&silence).unwrap();
+        processor.captured(&mut microphone).unwrap();
+        clean.extend_from_slice(&microphone);
+    }
+    assert_eq!(processor.noise_strength(), Some(NoiseStrength::High));
+    // Seconds 2 to 4 at "moderate", seconds 6 to 8 at "high": half is left, or less.
+    let second = SAMPLE_RATE as usize;
+    let before = energy(&clean[2 * second..4 * second]);
+    let after = energy(&clean[6 * second..8 * second]);
+    assert!(after < before / 2.0, "{before} before, {after} after");
+}
+
+#[test]
 fn a_quiet_voice_is_brought_up_and_nothing_goes_past_full_scale() {
     let only_level = Settings {
         echo: false,

@@ -229,9 +229,15 @@ room. Tested on made-up hiss only, not on a real fan or a street.
   off, and how strong; echo cancelling and level control on or off. They belong with the microphone check,
   where the effect can be heard at once. A musician, or someone whose system already
   cleans the microphone, wants them off.
-- **Chosen for the user where it can be**: a microphone the check finds noisy (its level
-  between words is high; one handheld's was -40 dB) could be given stronger suppression
-  without being asked. To try by hand first, with `--noise high` on that machine.
+- **Chosen for the user where it can be** (done): tried by hand first, `--noise high` on
+  the handheld with its system's cleaning off took the pulsing hiss away (2026-11-22,
+  by ear). Now the check's ear says when a microphone is noisy (the quietest tenth of
+  five seconds at -50 dB or above), and the sound thread then turns suppression up to
+  "high" for the rest of the call, without starting the processor again. `--noise`
+  with a strength fixes it; `--noise auto` is the default. The details say when it is
+  on. To find out: what "high" costs a voice, where the line between a noisy
+  microphone and an ordinary one should be (one noisy and no quiet one measured so
+  far), and whether it should come down again.
 - **Stronger suppression**, if the default proves too little once it can be heard in the
   app: `sonora`'s higher levels (more noise gone, at some cost to the voice), or a neural
   suppressor (RNNoise, DeepFilterNet) as a stage of its own, which is what goes after

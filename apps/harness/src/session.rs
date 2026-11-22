@@ -251,7 +251,7 @@ impl World for Real {
 
     fn sound(&mut self, call: Call, playout: Channels) -> Result<Live, Box<NoSound>> {
         let cleaning = Some(self.tuning.cleaning());
-        Live::start(call, cleaning, playout, self.tuning.lead_ms).map_err(|failed| {
+        Live::start(call, cleaning, playout, self.tuning).map_err(|failed| {
             Box::new(NoSound {
                 why: format!("Sound: {}", failed.error),
                 call: failed.call,

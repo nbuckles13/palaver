@@ -909,8 +909,9 @@ What there is so far, in three layers:
   never waits on the network.
 - `check::MicCheck` listens to the microphone outside a meeting, for the meter on the
   first screen. `check::Ear` judges what a microphone gives (nothing, cleaned by the
-  system first, faint, good) by its sound alone; the check runs one, and so does the
-  sound thread during a meeting.
+  system first, faint, good; and whether it has much noise of its own) by its sound
+  alone; the check runs one, and so does the sound thread during a meeting, where a
+  microphone found noisy has its noise turned down harder from then on.
 - `history::History` keeps the voices and links as they are and two minutes of the
   numbers worth watching, one value a second, for the details to draw over time.
 - **The window** (`ui`, egui through `eframe`, drawn with OpenGL): run the program with
