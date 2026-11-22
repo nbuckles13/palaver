@@ -284,6 +284,20 @@ WSLg) and it sheds the surplus only once the delay is 200 ms over the target. Re
 devices differ by hundredths of a percent, where none of this shows. To do: keep the
 target where it was when the lateness is a trend and not a scatter, and shed sooner.
 
+### The statistics panel
+
+The details are a list of lines under the meeting for now. To become a panel that slides
+out, organised by what it is about (this machine's sound, each link, each voice), with:
+
+- the present value of each number as a gauge or a counter, as now;
+- for the ones that matter, a line drawn over time that moves as the call goes on: each
+  voice's delay and what was lost or late, each link's round trip and loss, the sound
+  thread's waits. A history of a minute or two, kept by the session and only read by
+  the window.
+
+Names to settle there too: a link line is for a direct connection, and a voice line for
+a voice however many hops it came.
+
 ### Bots that say words
 
 For manual testing by ear, a bot that says something recognisable ("alpha, alpha, alpha")
