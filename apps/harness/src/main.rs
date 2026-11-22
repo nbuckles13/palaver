@@ -9,6 +9,8 @@
 //!   --bind <address>        where to listen (default 0.0.0.0:0)
 //!   --advertise <address>   where to tell the meeting this node is; may be repeated
 //!   --no-stun               ask no STUN server for this node's public address
+//!   --ticket-file <path>    with create: also write the ticket to this file, alone on
+//!                           its line, for carrying to another machine
 //!   --raw                   send the microphone as it is: no echo, noise or level work
 //!   --seconds <n>           how long to stay (default: until stopped)
 //! ```
@@ -43,6 +45,7 @@ struct Asked {
     bind: Option<SocketAddr>,
     advertise: Vec<SocketAddr>,
     stun: bool,
+    ticket_file: Option<String>,
     cleaning: Option<Settings>,
     seconds: Option<u64>,
 }
@@ -62,6 +65,7 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
         bind: None,
         advertise: Vec::new(),
         stun: true,
+        ticket_file: None,
         cleaning: Some(Settings::default()),
         seconds: None,
     };
@@ -76,6 +80,7 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
             "--bind" => asked.bind = Some(address(value("an address")?)?),
             "--advertise" => asked.advertise.push(address(value("an address")?)?),
             "--no-stun" => asked.stun = false,
+            "--ticket-file" => asked.ticket_file = Some(value("a path")?),
             "--raw" => asked.cleaning = None,
             "--seconds" => {
                 let text = value("a number")?;
@@ -154,8 +159,13 @@ async fn run(asked: Asked) -> Result<(), String> {
         // An invitation is about to be made: now is when the public address matters.
         say_network(participant.find_network_asking(&names).await);
         participant.create_meeting().await;
-        // The ticket holds the meeting secret; showing it is the point of this line.
-        println!("ticket {}", participant.ticket(&secret).to_text().expose());
+        // The ticket holds the meeting secret; showing it is the point of these lines.
+        let ticket = participant.ticket(&secret).to_text();
+        println!("ticket {}", ticket.expose());
+        if let Some(path) = &asked.ticket_file {
+            std::fs::write(path, format!("{}\n", ticket.expose()))
+                .map_err(|error| format!("{path}: {error}"))?;
+        }
     }
 
     stay(&mut participant, &live, &asked, &names).await;
