@@ -257,13 +257,24 @@ which is the same for a track across the whole meeting and which every packet ca
 the plan says whose track it is. A voice silent for five seconds is forgotten, buffer and
 all, and one that speaks again starts from the starting delay.
 
-To do: keep the delay each participant's voice had reached (and how settled it was) after
-the voice is dropped, whether for silence or because it left the loudest few, and start
-from that when it comes back, adjusting from there. A participant never heard before
-starts from the defaults, never from what another voice's buffer has reached. To settle:
-keep it by participant and not by alias, should an alias ever be given to another track;
-and how long a remembered delay is worth trusting, since the path to that participant
-may have changed in the meantime.
+Because each voice has its own buffer and decoder and the voices are mixed, a change of
+talker needs no swap: what is left of A in its buffer plays out while B's buffer fills to
+its starting delay, and B joins the mix when it is ready. Nothing of A's tail is dropped,
+and no decoder is handed a different voice. This is to be kept (and tested) however the
+buffers are managed later.
+
+To do: keep the delay each voice had reached after the voice is dropped, whether for
+silence or because it left the loudest few, and when it comes back wait for that much
+before playing, adjusting from there. A voice never heard before starts from the
+defaults, never from what another voice's buffer has reached.
+
+- Kept by track alias: one per participant and kind of sound (microphone, shared
+  audio), which is the right grain, since each has its own source and may take its own
+  path. Forgotten when the plan drops the track, so that an alias given out again
+  brings nothing with it.
+- Trusted for 30 to 60 seconds, then back to the defaults: the path may have changed.
+  The case to serve is voices taking turns, where each would otherwise be learnt
+  again every time round.
 
 ### A sender whose clock runs fast
 
