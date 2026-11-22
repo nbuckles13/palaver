@@ -97,6 +97,8 @@ pub struct Status {
     pub conductor: bool,
     /// Everyone in the plan's roster, this node included.
     pub roster: Vec<ParticipantId>,
+    /// The name each of the roster chose, in the same order. Redacted in debug output.
+    pub names: Vec<Redacted<String>>,
     /// The nodes this one has a connection to.
     pub links: Vec<ParticipantId>,
     /// Whose microphone each audio alias is, by the plan.
@@ -704,6 +706,12 @@ impl<E: Endpoint> Run<E> {
                 plan.roster
                     .iter()
                     .map(|member| participant_id(&member.key))
+                    .collect()
+            }),
+            names: self.node.plan().map_or_else(Vec::new, |plan| {
+                plan.roster
+                    .iter()
+                    .map(|member| member.name.clone())
                     .collect()
             }),
             links: self.links.keys().cloned().collect(),

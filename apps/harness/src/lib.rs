@@ -4,5 +4,9 @@
 //! time; [`live::Live`] runs one on a thread of its own against the system's devices.
 //! The program in `main.rs` is a call from the command line; the window comes next.
 
+pub mod check;
 pub mod live;
+pub mod png;
+pub mod session;
+pub mod ui;
 pub mod voice;

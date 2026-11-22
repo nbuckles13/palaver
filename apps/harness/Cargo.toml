@@ -14,6 +14,7 @@ palaver-net = { workspace = true }
 palaver-proto = { workspace = true }
 palaver-sdk = { workspace = true }
 palaver-sound = { workspace = true }
+eframe = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "macros", "net", "sync"] }
 
 [dev-dependencies]

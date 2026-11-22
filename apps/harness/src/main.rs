@@ -1,6 +1,10 @@
-//! A call on real devices, from the command line.
+//! Palaver with a sound card: a window, or a call from the command line.
 //!
 //! ```text
+//! palaver-harness                           the window
+//! palaver-harness shot <file.png> [name]    a picture of the window, taken by itself:
+//!                                           of the first screen, or with a name, of a
+//!                                           meeting started under it
 //! palaver-harness create [options]          start a meeting; prints a ticket to hand on
 //! palaver-harness join <ticket> [options]   join one
 //!
@@ -243,6 +247,24 @@ async fn stay(participant: &mut Participant, live: &Live, asked: &Asked, names: 
 }
 
 fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    if first.as_deref().is_none_or(|first| first == "shot") {
+        // `shot` with no file is the window, as with nothing at all.
+        let shot = first
+            .and_then(|_| args.next())
+            .map(|path| palaver_harness::ui::Shot {
+                path,
+                name: args.next(),
+            });
+        return match palaver_harness::ui::run(shot) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("no window: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let asked = match asked(std::env::args().skip(1)) {
         Ok(asked) => asked,
         Err(error) => {

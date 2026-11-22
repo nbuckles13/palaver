@@ -32,3 +32,19 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# The window toolkit (eframe/egui) brings three licences that are not on the list. Each
+# is allowed for the crates that carry it and nothing else.
+[[licenses.exceptions]]
+# The fonts egui draws with by default, which are data, not code.
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
+[[licenses.exceptions]]
+# The Boost licence: permissive, no conditions on binaries. The Windows clipboard.
+crate = "clipboard-win"
+allow = ["BSL-1.0"]
+
+[[licenses.exceptions]]
+crate = "error-code"
+allow = ["BSL-1.0"]

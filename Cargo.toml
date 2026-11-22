@@ -25,6 +25,8 @@ palaver-sdk = { path = "crates/sdk" }
 palaver-sim = { path = "crates/sim" }
 serde_json = "1"
 bytes = "1"
+# The window. The OpenGL renderer and no extras: fewer packages than the default (wgpu).
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland", "clipboard"] }
 ed25519-dalek = "3"
 getrandom = "0.4"
 hkdf = "0.13"
