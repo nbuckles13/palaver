@@ -67,7 +67,7 @@ pub const fn microphone_hint(finding: Finding, system: System) -> &'static str {
             "Nothing at all is coming from this microphone. It may be muted or switched off, on the device or in the system's sound settings."
         }
         (Finding::Processed, System::Windows) => {
-            "Windows is cleaning this microphone before Palaver gets it (Voice Focus or Voice Clarity). You may be heard faintly and cut off between words; turning that off usually sounds better. To find it: open the sound settings, choose this microphone under Input, and look there for Voice Focus and for Audio enhancements."
+            "Windows is cleaning this microphone before Palaver gets it (Voice Focus or Voice Clarity). You may be heard faintly and cut off between words; turning that off usually sounds better."
         }
         (Finding::Processed, System::Mac) => {
             "The system is cleaning this microphone before Palaver gets it (Voice Isolation, under Mic Mode in the menu bar). You may be heard faintly and cut off between words; Standard usually sounds better."
@@ -85,6 +85,19 @@ pub const fn microphone_warning(finding: Finding, system: System) -> Option<&'st
     match finding {
         Finding::NoSignal | Finding::Processed => Some(microphone_hint(finding, system)),
         Finding::TooSoon | Finding::NothingSaid | Finding::Faint | Finding::Good => None,
+    }
+}
+
+/// The steps to put a microphone right in the system's settings, where they are known
+/// well enough to give: on Windows, where its cleaning is switched off for the
+/// microphone called `device`.
+#[must_use]
+pub fn microphone_steps(finding: Finding, system: System, device: &str) -> Option<String> {
+    match (finding, system) {
+        (Finding::Processed, System::Windows) => Some(format!(
+            "To turn it off: open the sound settings, choose \u{201c}{device}\u{201d} under Input, and under Advanced settings set Audio enhancements to Off. That turns Voice Focus off as well."
+        )),
+        _ => None,
     }
 }
 
@@ -361,6 +374,22 @@ mod tests {
         ] {
             assert_eq!(microphone_warning(finding, here), None);
         }
+    }
+
+    #[test]
+    fn the_steps_on_windows_name_the_microphone_and_the_setting() {
+        assert_eq!(
+            microphone_steps(Finding::Processed, System::Windows, "Headset Microphone").unwrap(),
+            "To turn it off: open the sound settings, choose \u{201c}Headset Microphone\u{201d} under Input, and under Advanced settings set Audio enhancements to Off. That turns Voice Focus off as well."
+        );
+        assert_eq!(
+            microphone_steps(Finding::Processed, System::Mac, "a microphone"),
+            None
+        );
+        assert_eq!(
+            microphone_steps(Finding::Faint, System::Windows, "a microphone"),
+            None
+        );
     }
 
     #[test]
