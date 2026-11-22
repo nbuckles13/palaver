@@ -172,18 +172,23 @@ level to its target within seconds.
   refused the microphone is given (silence, or an error on opening).
 - Seen on a handheld's built-in microphone (2026-11-22; its choices are Off, Device
   Default Effects and Voice Clarity): with them off, the far end heard a pulsing hiss
-  all the time, which a headset on another machine does not give. Not yet recorded or
-  measured. The likely cause is that microphone's own noise, which the maker's effects
-  were hiding, lifted by our level control because its voice is faint, with the pulse
-  being the level control or the noise suppression hunting, or sending starting and
-  stopping. A first recording, made with `loopback` through the handheld's own speaker,
-  shows only that speaker feeding its microphone (a 9 kHz ring every 196 ms, the round
-  trip of the loop) and settles nothing; between rings the microphone as it is sits at
-  about -52 dB, and -60 dB or lower after our cleaning. To be recorded again with the
-  speaker silent. So the advice cannot be "always turn the system's cleaning off": the check
-  now says it often sounds better and to turn it back on if the microphone hisses. To
-  do: record it (`loopback save` on that machine) and find which of ours is pulsing;
-  stronger noise suppression when the level control is lifting a faint microphone.
+  all the time, which a headset on another machine does not give. Recorded with its
+  speaker silent: the microphone's own noise is at -40 dB, mostly below 500 Hz, and its
+  voice only some 10 dB above that. Our cleaning brings the noise to -47 dB and holds
+  it steady, so the pulse is not made there. Run through the encoder, that noise is
+  sent in stretches of a few hundred milliseconds with nothing between: the encoder
+  cannot settle whether it is worth sending, and the far end, which plays silence when
+  nothing comes, hears it come and go. With noise suppression at its "high" setting
+  (18 dB, against 12) the same recording is withheld cleanly between words, but for
+  the small packet Opus sends every 400 ms, which may itself be heard as a tick over
+  silence. (An earlier recording through that machine's own speaker showed only the
+  speaker feeding the microphone, and does not count.)
+- So the advice cannot be "always turn the system's cleaning off": the check says it
+  often sounds better, and to turn it back on if the microphone hisses.
+- To do, in this order: stronger noise suppression, at least for a microphone this
+  noisy, judged by ear for what it does to a voice; and at the far end a quiet noise
+  kept up through silence in place of nothing, so that what is sent and what is
+  withheld do not sound so different.
 - To find out: whether the level control can be made to climb faster for a faint voice
   (its settings, or a first guess at the gain from the first seconds of speech), without
   bringing up the noise of a quiet room when nobody is talking.
@@ -323,10 +328,10 @@ Each plot has a scale down its side and says the value under the pointer. In a w
 that fills its screen the details take their width from the meeting; otherwise the
 window grows for them.
 
-To decide: a voice's plots stop when its sender is muted or silent, because nothing is
-sent then and there is nothing to measure. A small packet now and then through silence
-(Opus makes one every 400 ms; we drop it today) would keep the measurements going and
-the far end's jitter buffer warm, for a little traffic from every silent participant.
+A voice's plots stop when its sender is muted: nothing at all is sent then, and there
+is nothing to measure. A sender who is only silent still sends the small packet Opus
+makes every 400 ms, which keeps the voice listed and its buffer current. To decide:
+whether a muted sender should send the same, for the measurements' sake.
 
 To do:
 
