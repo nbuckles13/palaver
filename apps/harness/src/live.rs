@@ -4,6 +4,7 @@
 //! the thread that opened it), then turns the voice each time the speaker has taken
 //! sound. It ends when told to, or when the codec fails, and gives the call back.
 
+use crate::check::Finding;
 use crate::voice::{Turn, Voice};
 use palaver_media::Channels;
 use palaver_media::process::Settings;
@@ -78,6 +79,8 @@ pub struct Meter {
     /// The most that waited for the speaker, in microseconds of sound, since the last
     /// reading.
     lead: AtomicU64,
+    /// A [`Finding`], as its number.
+    microphone: AtomicU8,
 }
 
 /// A reading of the [`Meter`].
@@ -108,6 +111,8 @@ pub struct Reading {
     /// The most sound that waited for the speaker since the last reading: how long
     /// after a frame is made it is played.
     pub lead: Duration,
+    /// What the last few seconds say of the microphone, as the device gives it.
+    pub microphone: Finding,
 }
 
 impl Meter {
@@ -136,6 +141,10 @@ impl Meter {
         self.longest_gap.fetch_max(micros, Ordering::Relaxed);
     }
 
+    fn note_microphone(&self, finding: Finding) {
+        self.microphone.store(finding.code(), Ordering::Relaxed);
+    }
+
     fn note_gauges(&self, gauges: Vec<VoiceGauge>) {
         if let Ok(mut now) = self.voices_now.lock() {
             *now = gauges;
@@ -161,6 +170,7 @@ impl Meter {
                 .map(|now| now.clone())
                 .unwrap_or_default(),
             lead: Duration::from_micros(self.lead.swap(0, Ordering::Relaxed)),
+            microphone: Finding::from_code(self.microphone.load(Ordering::Relaxed)),
         }
     }
 }
@@ -237,6 +247,7 @@ impl Live {
                 turns = turns.wrapping_add(1);
                 if turns.is_multiple_of(GAUGE_EVERY) {
                     metering.note_gauges(voice.gauges());
+                    metering.note_microphone(voice.microphone_finding());
                 }
             }
             voice.into_call()

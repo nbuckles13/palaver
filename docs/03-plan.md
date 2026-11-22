@@ -160,9 +160,16 @@ Our own cleaning then works on top of someone else's: the level control lifted t
 faintest of these by only 17 dB in thirty seconds, where it brings a voice at an ordinary
 level to its target within seconds.
 
-- The microphone check should notice it (exact silence between sounds is the sign; so is
-  speech that stays very quiet) and say so, so that the user can turn one or the other
-  off, or raise the input gain.
+- Done: the microphone check notices it, before a meeting and during one, by the sound
+  alone (exact silence between sounds; nothing but exact silence; a voice that stays
+  faint), which works the same on every system, and says where to look on the system it
+  is on.
+- To do, and particular to each system: ask the system itself instead of inferring it.
+  Whether its voice effects are on for this device and whether the app is allowed the
+  microphone at all (Windows and macOS each have their own way to ask); reading and
+  setting the device's input level, so that a faint microphone can be raised from here;
+  and choosing a microphone other than the default. To be checked on a Mac: what an app
+  refused the microphone is given (silence, or an error on opening).
 - To find out: whether the level control can be made to climb faster for a faint voice
   (its settings, or a first guess at the gain from the first seconds of speech), without
   bringing up the noise of a quiet room when nobody is talking.
@@ -216,7 +223,11 @@ as loud while the other voice played as alone, but for one dip of 8 dB three sec
 in. An earlier run that showed the talker 3 to 20 dB down was through the system's
 effects and a clipping gain, and does not count.
 
-Not yet measured: speakers, where there is an echo to remove. Until it is, keep in mind
+One call with speakers so far (2026-11-21, the handheld's own, against a headset at the
+other end): no echo was heard, but its microphone is faint enough to need a voice close
+to it, so little of the speaker's sound can have reached it. Not a hard test.
+
+Not yet measured: speakers at an ordinary level, where there is an echo to remove. Until it is, keep in mind
 the ways out if it disappoints: tuning the canceller, turning it off when the output is
 headphones (where the system can say), and a switch for the user.
 

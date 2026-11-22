@@ -3,6 +3,7 @@
 //! Everything here is a plain function of what is known, so that it is tested without a
 //! window. The drawing code in [`crate::ui`] decides nothing but colours and layout.
 
+use crate::check::Finding;
 use palaver_media::jitter::Stats;
 use std::time::Duration;
 
@@ -25,6 +26,75 @@ pub fn meter_share(level: u8) -> f32 {
 #[must_use]
 pub fn meter_after(stood: f32, level: u8) -> f32 {
     meter_share(level).max(stood - METER_FALL).max(0.0)
+}
+
+/// The system the program runs on, for where it names the system's own settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum System {
+    Windows,
+    Mac,
+    Other,
+}
+
+impl System {
+    /// The one this program was built for.
+    pub const HERE: Self = if cfg!(target_os = "windows") {
+        Self::Windows
+    } else if cfg!(target_os = "macos") {
+        Self::Mac
+    } else {
+        Self::Other
+    };
+}
+
+/// What to say of the microphone while it is being tried, under its meter. How a
+/// microphone is judged is the same everywhere; where to look to put it right is not.
+#[must_use]
+pub const fn microphone_hint(finding: Finding, system: System) -> &'static str {
+    match (finding, system) {
+        (Finding::TooSoon | Finding::NothingSaid, _) => "Say something. The bar should move.",
+        (Finding::Good, _) => "You are heard well.",
+        (Finding::Faint, _) => {
+            "You are heard, but faintly. Move closer to the microphone, or raise its level in the system's sound settings."
+        }
+        (Finding::NoSignal, System::Mac) => {
+            "Nothing at all is coming from this microphone. It may be muted or switched off, or Palaver may not be allowed the microphone (System Settings, Privacy & Security, Microphone)."
+        }
+        (Finding::NoSignal, System::Windows) => {
+            "Nothing at all is coming from this microphone. It may be muted or switched off, or apps may not be allowed the microphone (Settings, Privacy & security, Microphone)."
+        }
+        (Finding::NoSignal, System::Other) => {
+            "Nothing at all is coming from this microphone. It may be muted or switched off, on the device or in the system's sound settings."
+        }
+        (Finding::Processed, System::Windows) => {
+            "Windows is cleaning this microphone before Palaver gets it (Voice Focus or Voice Clarity, in the sound settings). You may be heard faintly and cut off between words; turning that off usually sounds better."
+        }
+        (Finding::Processed, System::Mac) => {
+            "The system is cleaning this microphone before Palaver gets it (Voice Isolation, under Mic Mode in the menu bar). You may be heard faintly and cut off between words; Standard usually sounds better."
+        }
+        (Finding::Processed, System::Other) => {
+            "Something is cleaning this microphone before Palaver gets it (noise suppression in the system or the device). You may be heard faintly and cut off between words; turning that off usually sounds better."
+        }
+    }
+}
+
+/// What to say of the microphone during a meeting: only of what stays wrong whether or
+/// not anyone is speaking, so that it does not come and go with each word.
+#[must_use]
+pub const fn microphone_warning(finding: Finding, system: System) -> Option<&'static str> {
+    match finding {
+        Finding::NoSignal | Finding::Processed => Some(microphone_hint(finding, system)),
+        Finding::TooSoon | Finding::NothingSaid | Finding::Faint | Finding::Good => None,
+    }
+}
+
+/// Whether a finding is of something wrong, to be shown as a warning.
+#[must_use]
+pub const fn is_trouble(finding: Finding) -> bool {
+    matches!(
+        finding,
+        Finding::NoSignal | Finding::Processed | Finding::Faint
+    )
 }
 
 /// The line under the title: how many are here and for how long.
@@ -239,6 +309,45 @@ mod tests {
             ),
             "Bo: heard 115 ms after arriving (buffer 60 ms) · played 1200 · rebuilt 4 · lost 2 · skipped 2 · late 5"
         );
+    }
+
+    #[test]
+    fn the_microphone_is_warned_of_in_a_meeting_only_for_what_stays_wrong() {
+        let here = System::Windows;
+        for finding in [Finding::NoSignal, Finding::Processed] {
+            assert_eq!(
+                microphone_warning(finding, here),
+                Some(microphone_hint(finding, here))
+            );
+            assert!(is_trouble(finding));
+        }
+        // A faint voice is said while trying the microphone, and not over a meeting,
+        // where it would come and go with each word.
+        assert!(is_trouble(Finding::Faint));
+        for finding in [
+            Finding::TooSoon,
+            Finding::NothingSaid,
+            Finding::Faint,
+            Finding::Good,
+        ] {
+            assert_eq!(microphone_warning(finding, here), None);
+        }
+    }
+
+    #[test]
+    fn where_to_put_a_microphone_right_is_said_for_the_system_it_is_on() {
+        let processed = |system| microphone_hint(Finding::Processed, system);
+        assert!(processed(System::Windows).contains("Voice Focus"));
+        assert!(processed(System::Mac).contains("Voice Isolation"));
+        assert!(processed(System::Other).contains("noise suppression"));
+        assert!(microphone_hint(Finding::NoSignal, System::Mac).contains("Privacy"));
+        // What needs no settings is said the same everywhere.
+        for system in [System::Windows, System::Mac, System::Other] {
+            assert_eq!(
+                microphone_hint(Finding::NothingSaid, system),
+                "Say something. The bar should move."
+            );
+        }
     }
 
     #[test]

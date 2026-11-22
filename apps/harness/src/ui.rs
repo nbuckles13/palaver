@@ -4,7 +4,7 @@
 //! one) and inside (the people round the fire, the way to bring someone in, the sound).
 //! The look is "Ember": warm dark, one ember colour for what matters.
 
-use crate::check::{Found, MicCheck};
+use crate::check::{Finding, Found, MicCheck};
 use crate::session::{Order, Person, Session, Stage, View};
 use crate::words;
 use eframe::egui::{
@@ -218,9 +218,12 @@ impl Window {
 
         ui.add_space(8.0);
         ui.label(RichText::new("MICROPHONE").small().color(ember::DIM));
-        let (found, level) = self.check.as_ref().map_or((Found::Opening, 0), |check| {
-            (check.found(), check.loudest())
-        });
+        let (found, level, finding) = self
+            .check
+            .as_ref()
+            .map_or((Found::Opening, 0, Finding::TooSoon), |check| {
+                (check.found(), check.loudest(), check.finding())
+            });
         match found {
             Found::Opening => {
                 ui.label(RichText::new("opening…").color(ember::QUIET));
@@ -229,10 +232,15 @@ impl Window {
                 ui.label(RichText::new(device).color(ember::QUIET));
                 let share = self.metered(level);
                 meter(ui, share);
+                let colour = match finding {
+                    Finding::Good => ember::GOOD,
+                    _ if words::is_trouble(finding) => ember::EMBER,
+                    _ => ember::DIM,
+                };
                 ui.label(
-                    RichText::new("Say something. The bar should move.")
+                    RichText::new(words::microphone_hint(finding, words::System::HERE))
                         .small()
-                        .color(ember::DIM),
+                        .color(colour),
                 );
             }
             Found::Failed(why) => {
@@ -360,6 +368,10 @@ impl Window {
 
         let share = self.metered(if view.muted { 0 } else { view.sound.loudest });
         meter(ui, share);
+        if let Some(warning) = words::microphone_warning(view.sound.microphone, words::System::HERE)
+        {
+            ui.label(RichText::new(warning).small().color(ember::EMBER));
+        }
 
         ui.horizontal(|ui| {
             let label = if view.muted { "Unmute" } else { "Mute" };
