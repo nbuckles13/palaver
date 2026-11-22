@@ -77,15 +77,33 @@ pub fn network_line(late: Duration) -> String {
     format!("network thread: timers up to {} late", millis(late))
 }
 
-/// One voice being played: the delay its buffer aims for, and what became of its frames.
+/// What the speaker's own buffer adds to what waits for it: the device is asked to work
+/// in pieces of this length.
+pub const SPEAKER_PIECE: Duration = Duration::from_millis(10);
+
+/// How long after a voice's frame arrives it is heard: its jitter buffer's delay, what
+/// waits for the speaker, and the speaker's own piece.
 #[must_use]
-pub fn voice_line(name: &str, delay: Duration, stats: &Stats) -> String {
+pub const fn heard_after(delay: Duration, speaker_lead: Duration) -> Duration {
+    delay
+        .saturating_add(speaker_lead)
+        .saturating_add(SPEAKER_PIECE)
+}
+
+/// One voice being played.
+///
+/// How long after arriving it is heard, the delay its buffer aims for, and what became
+/// of its frames. "Lost" are frames that could not be rebuilt; the fade at the start of
+/// each pause is not among them.
+#[must_use]
+pub fn voice_line(name: &str, delay: Duration, speaker_lead: Duration, stats: &Stats) -> String {
     format!(
-        "{name}: buffer {} · played {} · rebuilt {} · guessed {} · skipped {} · late {}",
+        "{name}: heard {} after arriving (buffer {}) · played {} · rebuilt {} · lost {} · skipped {} · late {}",
+        millis(heard_after(delay, speaker_lead)),
         millis(delay),
         stats.played,
         stats.recovered_fec.saturating_add(stats.recovered_dred),
-        stats.concealed,
+        stats.lost,
         stats.skipped,
         stats.late
     )
@@ -185,13 +203,19 @@ mod tests {
             recovered_fec: 3,
             recovered_dred: 1,
             concealed: 12,
+            lost: 2,
             skipped: 2,
             late: 5,
             ..Stats::default()
         };
         assert_eq!(
-            voice_line("Bo", Duration::from_millis(60), &stats),
-            "Bo: buffer 60 ms · played 1200 · rebuilt 4 · guessed 12 · skipped 2 · late 5"
+            voice_line(
+                "Bo",
+                Duration::from_millis(60),
+                Duration::from_millis(45),
+                &stats
+            ),
+            "Bo: heard 115 ms after arriving (buffer 60 ms) · played 1200 · rebuilt 4 · lost 2 · skipped 2 · late 5"
         );
     }
 

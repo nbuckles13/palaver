@@ -110,6 +110,8 @@ pub struct Details {
     pub sound_burst: usize,
     /// How late the network thread's timers have run.
     pub network_late: Duration,
+    /// The most sound that waited for the speaker.
+    pub speaker_lead: Duration,
     pub voices: Vec<VoiceLine>,
 }
 
@@ -118,6 +120,7 @@ struct Gauges {
     sound_gap: Worst<Duration>,
     sound_burst: Worst<usize>,
     network_late: Worst<Duration>,
+    speaker_lead: Worst<Duration>,
     /// The latest the pulse has been since the last refresh.
     late_now: Duration,
 }
@@ -128,6 +131,7 @@ impl Gauges {
             sound_gap: Worst::of_last(REMEMBERED),
             sound_burst: Worst::of_last(REMEMBERED),
             network_late: Worst::of_last(REMEMBERED),
+            speaker_lead: Worst::of_last(REMEMBERED),
             late_now: Duration::ZERO,
         }
     }
@@ -377,6 +381,7 @@ fn refresh(
         network_late: gauges
             .network_late
             .after(std::mem::take(&mut gauges.late_now)),
+        speaker_lead: gauges.speaker_lead.after(sound.lead),
         voices,
     };
     let me = participant.control().me().clone();
