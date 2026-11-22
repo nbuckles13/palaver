@@ -228,12 +228,21 @@ rebuilt. The delay we add is then mostly two waits that do overlapping work: the
 buffer's floor (two frames, 40 ms) and the sound kept waiting for the speaker (40 ms). A
 frame decoded and waiting for the speaker is already safe from a late packet behind it.
 
-- Both can be tried lower: `--floor` and `--margin` (frames) and `--lead` (ms) on
-  `palaver-harness`. With no floor and no margin the buffer runs at nothing on an even
-  network and still rises at once when packets come late (tested).
-- To do: try them on real machines, reading "lost", "late" and "speaker short" in the
-  details, and set the defaults from that. A floor of nothing with a lead of 20 ms would
-  take about 60 ms off.
+- Tried with no floor, no margin and a lead of 20 ms on the same two machines: heard
+  60 ms after arriving, nothing lost or late. Those are now what `palaver-harness` starts
+  with (`--floor`, `--margin` in frames and `--lead` in ms still set them).
+- The buffer starts at two frames whatever its floor, so the first seconds are covered
+  while it learns the network, and comes down from there. It comes down without
+  dropping speech where it can: in a pause it moves straight to its target, as far as
+  the silence reaches; between pauses it skips a quiet frame, and a voiced one only
+  after waiting two seconds for a quiet one.
+- To do: playing a little faster or slower without changing the pitch (taking out or
+  repeating whole periods of the voice, as WebRTC's buffer does). It catches up without
+  waiting for a pause, grows the delay mid-sentence without a gap, and lets the delay be
+  set finer than one 20 ms frame, which is what stands between a good network and a
+  buffer of nearly nothing: a few milliseconds of spread now round up to a whole frame.
+- To decide: whether a voiced frame should ever be skipped to come down, or the buffer
+  should always wait for the pause.
 - Further off: frames of 10 ms, which halve the wait to fill a frame and let the buffer
   move in smaller steps, for more packets a second.
 
