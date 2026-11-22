@@ -46,6 +46,18 @@ pub struct Shot {
     pub name: Option<String>,
 }
 
+/// What the window is opened with.
+#[derive(Debug, Clone, Default)]
+pub struct Setup {
+    pub shot: Option<Shot>,
+    /// The name to begin with.
+    pub name: Option<String>,
+    /// A file to carry the ticket between machines that share a folder and not a
+    /// clipboard. Whoever starts a meeting writes its ticket there; whoever opens the
+    /// window finds the ticket in the field, ready to join.
+    pub ticket_file: Option<String>,
+}
+
 /// How long the window is left to settle before its picture is taken.
 const SETTLE: Duration = Duration::from_secs(3);
 
@@ -62,6 +74,9 @@ pub struct Window {
     meter: f32,
     copied: Option<&'static str>,
     shot: Option<Shot>,
+    ticket_file: Option<String>,
+    /// The ticket last written to the file, so that it is written once.
+    written: Option<String>,
     opened: Instant,
     /// Set once the picture is saved: the window then closes.
     shot_done: Arc<AtomicBool>,
@@ -69,7 +84,7 @@ pub struct Window {
 }
 
 impl Window {
-    fn new(context: &egui::Context, shot: Option<Shot>) -> Self {
+    fn new(context: &egui::Context, setup: Setup) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = ember::GROUND;
         visuals.window_fill = ember::PANEL;
@@ -98,16 +113,38 @@ impl Window {
         Self {
             session: Session::start(),
             check: Some(MicCheck::start()),
-            name: String::new(),
-            ticket: String::new(),
+            name: setup.name.unwrap_or_default(),
+            // A ticket left in the file is put in the field, to join by.
+            ticket: setup
+                .ticket_file
+                .as_ref()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|text| text.trim().to_owned())
+                .unwrap_or_default(),
             came_back: String::new(),
             ask_outside: true,
             meter: 0.0,
             copied: None,
-            shot,
+            shot: setup.shot,
+            ticket_file: setup.ticket_file,
+            written: None,
             opened: Instant::now(),
             shot_done: Arc::new(AtomicBool::new(false)),
             shot_asked: false,
+        }
+    }
+
+    /// Leave the meeting's ticket in the file, if one was named, for another machine to
+    /// pick up.
+    fn leave_ticket(&mut self, view: &View) {
+        let (Some(path), Some(ticket)) = (&self.ticket_file, &view.ticket) else {
+            return;
+        };
+        if self.written.as_ref() != Some(ticket) {
+            self.written = Some(ticket.clone());
+            if let Err(error) = std::fs::write(path, format!("{ticket}\n")) {
+                eprintln!("{path}: {error}");
+            }
         }
     }
 
@@ -458,6 +495,7 @@ fn circle(ui: &mut Ui, side: f32, people: &[Person], voices: usize) {
 impl eframe::App for Window {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let view = self.session.view();
+        self.leave_ticket(&view);
         let frame = egui::Frame::new()
             .fill(ember::GROUND)
             .inner_margin(egui::Margin::symmetric(28, 20));
@@ -478,8 +516,9 @@ impl eframe::App for Window {
 ///
 /// When the system gives no window: no display, or no way to draw on it.
 ///
-/// With `shot`, the window takes a picture of itself after a few seconds and closes.
-pub fn run(shot: Option<Shot>) -> Result<(), String> {
+/// With a shot in `setup`, the window takes a picture of itself after a few seconds and
+/// closes.
+pub fn run(setup: Setup) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Palaver")
@@ -490,7 +529,7 @@ pub fn run(shot: Option<Shot>) -> Result<(), String> {
     eframe::run_native(
         "Palaver",
         options,
-        Box::new(move |creation| Ok(Box::new(Window::new(&creation.egui_ctx, shot)))),
+        Box::new(move |creation| Ok(Box::new(Window::new(&creation.egui_ctx, setup)))),
     )
     .map_err(|error| error.to_string())
 }

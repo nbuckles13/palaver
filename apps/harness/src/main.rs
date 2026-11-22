@@ -2,6 +2,11 @@
 //!
 //! ```text
 //! palaver-harness                           the window
+//! palaver-harness window [--name <name>] [--ticket-file <path>]
+//!                                           the window, with the name filled in, and a
+//!                                           file that carries the ticket: written when
+//!                                           a meeting is started, read into the join
+//!                                           field when the window opens
 //! palaver-harness shot <file.png> [name]    a picture of the window, taken by itself:
 //!                                           of the first screen, or with a name, of a
 //!                                           meeting started under it
@@ -31,6 +36,7 @@
 //! it; paste that into the inviter's terminal and it reaches for the joiner.
 
 use palaver_harness::live::Live;
+use palaver_harness::ui::{Setup, Shot};
 use palaver_media::Channels;
 use palaver_media::process::Settings;
 use palaver_net::quic::QuicOptions;
@@ -246,18 +252,43 @@ async fn stay(participant: &mut Participant, live: &Live, asked: &Asked, names: 
     }
 }
 
+/// What the window is opened with: nothing, `shot <file.png> [name]`, or
+/// `window [--name <name>] [--ticket-file <path>]`.
+fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result<Setup, String> {
+    let mut setup = Setup::default();
+    if first == Some("shot") {
+        setup.shot = Some(Shot {
+            path: args.next().ok_or("shot needs a file to write")?,
+            name: args.next(),
+        });
+        return Ok(setup);
+    }
+    while let Some(arg) = args.next() {
+        let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what}"));
+        match arg.as_str() {
+            "--name" => setup.name = Some(value("a name")?),
+            "--ticket-file" => setup.ticket_file = Some(value("a path")?),
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+    Ok(setup)
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let first = args.next();
-    if first.as_deref().is_none_or(|first| first == "shot") {
-        // `shot` with no file is the window, as with nothing at all.
-        let shot = first
-            .and_then(|_| args.next())
-            .map(|path| palaver_harness::ui::Shot {
-                path,
-                name: args.next(),
-            });
-        return match palaver_harness::ui::run(shot) {
+    if first
+        .as_deref()
+        .is_none_or(|first| matches!(first, "shot" | "window"))
+    {
+        let setup = match window(first.as_deref(), args) {
+            Ok(setup) => setup,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match palaver_harness::ui::run(setup) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("no window: {error}");
