@@ -52,6 +52,8 @@ pub struct Setup {
     /// clipboard. Whoever starts a meeting writes its ticket there; whoever opens the
     /// window finds the ticket in the field, ready to join.
     pub ticket_file: Option<String>,
+    /// The delays to run with.
+    pub tuning: crate::live::Tuning,
 }
 
 /// How long the window is left to settle before its picture is taken.
@@ -111,7 +113,7 @@ impl Window {
 
     fn new(context: &egui::Context, setup: Setup) -> Self {
         Self::dress(context);
-        Self::over(Session::start(), Some(MicCheck::start()), setup)
+        Self::over(Session::start(setup.tuning), Some(MicCheck::start()), setup)
     }
 
     /// A window over a session that already exists, listening to the microphone or not.

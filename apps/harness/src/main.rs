@@ -21,6 +21,11 @@
 //!   --ticket-file <path>    with create: also write the ticket to this file, alone on
 //!                           its line, for carrying to another machine
 //!   --raw                   send the microphone as it is: no echo, noise or level work
+//!   --floor <frames>        the least delay a voice's jitter buffer may aim for, in
+//!                           frames of 20 ms (default 2)
+//!   --margin <frames>       what the jitter buffer adds to the lateness it has seen
+//!                           (default 1)
+//!   --lead <ms>             how much sound is kept waiting for the speaker (default 40)
 //!   --seconds <n>           how long to stay (default: until stopped)
 //! ```
 //!
@@ -35,7 +40,7 @@
 //! A joiner nobody can answer prints a `reply` ticket to send back to whoever invited
 //! it; paste that into the inviter's terminal and it reaches for the joiner.
 
-use palaver_harness::live::Live;
+use palaver_harness::live::{Live, Tuning};
 use palaver_harness::ui::{Setup, Shot};
 use palaver_media::Channels;
 use palaver_media::process::Settings;
@@ -57,6 +62,7 @@ struct Asked {
     stun: bool,
     ticket_file: Option<String>,
     cleaning: Option<Settings>,
+    tuning: Tuning,
     seconds: Option<u64>,
 }
 
@@ -77,6 +83,7 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
         stun: true,
         ticket_file: None,
         cleaning: Some(Settings::default()),
+        tuning: Tuning::default(),
         seconds: None,
     };
     while let Some(arg) = args.next() {
@@ -92,6 +99,9 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
             "--no-stun" => asked.stun = false,
             "--ticket-file" => asked.ticket_file = Some(value("a path")?),
             "--raw" => asked.cleaning = None,
+            "--floor" | "--margin" | "--lead" => {
+                tune(&mut asked.tuning, &arg, &value("a number")?)?;
+            }
             "--seconds" => {
                 let text = value("a number")?;
                 asked.seconds = Some(text.parse().map_err(|_| format!("not a number: {text}"))?);
@@ -100,6 +110,19 @@ fn asked(mut args: impl Iterator<Item = String>) -> Result<Asked, String> {
         }
     }
     Ok(asked)
+}
+
+/// Set one of the delays being tried: `--floor` and `--margin` in frames of 20 ms,
+/// `--lead` in milliseconds.
+fn tune(tuning: &mut Tuning, option: &str, text: &str) -> Result<(), String> {
+    let number: u32 = text.parse().map_err(|_| format!("not a number: {text}"))?;
+    match option {
+        "--floor" => tuning.floor_frames = number.min(25),
+        "--margin" => tuning.margin_frames = number.min(25),
+        // Less than the speaker's own piece would leave it nothing to play.
+        _ => tuning.lead_ms = number.clamp(10, 500),
+    }
+    Ok(())
 }
 
 fn say_network(network: Network) {
@@ -131,9 +154,11 @@ async fn run(asked: Asked) -> Result<(), String> {
         ..QuicOptions::default()
     };
     let playout = Channels::Stereo;
+    let usual = Options::named(&asked.name);
     let options = Options {
         playout,
-        ..Options::named(&asked.name)
+        jitter: asked.tuning.applied(usual.jitter),
+        ..usual
     };
     let (mut participant, call) =
         Participant::on_quic(quic, asked.advertise.clone(), &secret, options)
@@ -144,7 +169,7 @@ async fn run(asked: Asked) -> Result<(), String> {
         Vec::new()
     };
 
-    let live = match Live::start(call, asked.cleaning, playout) {
+    let live = match Live::start(call, asked.cleaning, playout, asked.tuning.lead_ms) {
         Ok(live) => live,
         Err(failed) => {
             if let Some(call) = failed.call {
@@ -267,6 +292,9 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
         let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what}"));
         match arg.as_str() {
             "--name" => setup.name = Some(value("a name")?),
+            "--floor" | "--margin" | "--lead" => {
+                tune(&mut setup.tuning, &arg, &value("a number")?)?;
+            }
             "--ticket-file" => setup.ticket_file = Some(value("a path")?),
             other => return Err(format!("unknown option: {other}")),
         }
