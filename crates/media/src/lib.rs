@@ -12,11 +12,15 @@
 //! and block sizes; [`resample`] changes rates. Neither touches a device.
 //!
 //! [`synthetic`] makes voices for bots and tests, and can tell whose voice is in a mix.
+//!
+//! [`picture`] is the beginning of the same for video: one frame as it passes between a
+//! camera, a codec and a screen, and moving pictures for bots and tests.
 
 pub mod jitter;
 pub mod level;
 pub mod mix;
 pub mod pcm;
+pub mod picture;
 pub mod process;
 pub mod resample;
 pub mod synthetic;

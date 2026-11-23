@@ -4,12 +4,15 @@
 //! palaver-harness                           the window
 //! palaver-harness window [--name <name>] [--ticket-file <path>]
 //!                        [--floor <frames>] [--margin <frames>] [--lead <ms>]
-//!                        [--noise <strength>]
+//!                        [--noise <strength>] [--pattern]
 //!                                           the window, with the name filled in, and a
 //!                                           file that carries the ticket: written when
 //!                                           a meeting is started, read into the join
 //!                                           field when the window opens
-//! palaver-harness shot <file.png> [name]    a picture of the window, taken by itself:
+//!                                           --pattern shows a moving pattern as this
+//!                                           machine's own picture, in place of a camera
+//! palaver-harness shot <file.png> [name [pattern]]
+//!                                           a picture of the window, taken by itself:
 //!                                           of the first screen, or with a name, of a
 //!                                           meeting started under it
 //! palaver-harness create [options]          start a meeting; prints a ticket to hand on
@@ -304,6 +307,7 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
             path: args.next().ok_or("shot needs a file to write")?,
             name: args.next(),
         });
+        setup.pattern = args.next().as_deref() == Some("pattern");
         return Ok(setup);
     }
     while let Some(arg) = args.next() {
@@ -314,6 +318,7 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
                 tune(&mut setup.tuning, &arg, &value("a setting")?)?;
             }
             "--ticket-file" => setup.ticket_file = Some(value("a path")?),
+            "--pattern" => setup.pattern = true,
             other => return Err(format!("unknown option: {other}")),
         }
     }

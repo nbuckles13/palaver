@@ -865,7 +865,17 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
   Media Foundation on Windows first, then VideoToolbox, VAAPI/NVENC, MediaCodec. `moq-video`'s
   backends (MIT/Apache) are the starting point to copy from, without its `moq-net`/`hang`
   dependencies. Software encoders may skip frames to hold a bitrate; the pipeline tolerates it.
-- **Video capture**: not yet examined (`nokhwa`, `scap`, or `moq-video`'s capture code).
+- **Pictures** (`media::picture`): a frame of video is kept as cameras and codecs keep
+  one (I420: brightness for every pixel, colour for every two by two), and turned into
+  what a screen wants in whole-number arithmetic. `Pattern` makes moving pictures for
+  bots and tests, a colour to each speaker.
+- **Video capture**: behind a small crate of our own, as sound is, so that what is
+  underneath can change. Looked at (2026-11-22): `scap` captures screens only;
+  `nokhwa` does cameras on all three systems but looks unmaintained (last release
+  line old, many open issues), so it is at most a first backend that we expect to
+  replace; `moq-video` has camera backends for all three (some 450 to 800 lines each)
+  that cannot be depended on, because the crate brings its own network stack, but can
+  be copied and owned. Expect to maintain capture ourselves either way.
 - Simulcast as separate encoder sessions, one track per rendition. Media container: MoQ's
   low-overhead container (LOC).
 - **Distribution notes**: unsigned Windows builds are blocked by Smart App Control, so code
@@ -912,6 +922,12 @@ What there is so far, in three layers:
   system first, faint, good; and whether it has much noise of its own) by its sound
   alone; the check runs one, and so does the sound thread during a meeting, where a
   microphone found noisy has its noise turned down harder from then on.
+- `picture::Slot` holds the newest picture of one tile: whoever makes pictures puts
+  each in, the window takes the newest when it draws and is woken for it, and one not
+  taken in time is dropped. `--pattern` shows a moving pattern as this machine's own
+  picture, until there is a camera. Making a 640 × 360 picture ready for the screen
+  on the processor takes about half a millisecond, which is fine for a few tiles and
+  is what the choice of renderer is to be measured against for many.
 - `history::History` keeps the voices and links as they are and two minutes of the
   numbers worth watching, one value a second, for the details to draw over time.
 - **The window** (`ui`, egui through `eframe`, drawn with OpenGL): run the program with

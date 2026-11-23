@@ -68,7 +68,16 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
 
 - Video: capture, encode behind our own interface (openh264 software first, then Media
   Foundation hardware on Windows in this phase), group per stream, subscribe by name, keyframe
-  requests, tiles.
+  requests, tiles. In this order (agreed 2026-11-22):
+  1. Camera to window on one machine. Begun: the picture type, a moving pattern, and a
+     tile in the window that shows this machine's own picture. Capture is next, behind
+     a crate of our own.
+  2. Encode and decode in a loop on one machine, behind our own interface, with the
+     pattern as a source for tests.
+  3. One video track across a link, at one size: streams in the wire code, subscribe
+     by name, keyframe requests.
+  4. Tiles for everyone, then simulcast and choosing a size for each tile.
+  5. Hardware encoding on Windows.
 - Default routes, hop-by-hop resolution, dedupe; every edge khef peered with ≥2 khefs.
 - Roster, self mute, host role, catalog track.
 - Stats overlay; diagnostics bundle; local multi-bot end-to-end tests.

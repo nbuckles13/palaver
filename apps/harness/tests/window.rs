@@ -6,10 +6,12 @@
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use palaver_harness::check::Finding;
+use palaver_harness::picture::Slot;
 use palaver_harness::session::{Details, LinkLine, Order, Person, Session, Stage, View, VoiceLine};
 use palaver_harness::ui::{Setup, Window};
 use palaver_harness::words;
 use palaver_media::jitter::Stats;
+use palaver_media::picture::{Pattern, Size};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -199,6 +201,27 @@ fn in_a_meeting_a_microphone_that_gives_nothing_usable_is_said_under_the_meter()
     // A faint voice is not: it would come and go with each word.
     desk.show(|view| view.sound.microphone = Finding::Faint);
     assert!(!desk.shows(words::microphone_hint(Finding::Faint, words::System::HERE)));
+}
+
+#[test]
+fn this_machines_own_picture_is_shown_in_a_meeting_once_there_is_one() {
+    let mut desk = Desk::named("Ana");
+    let slot = Arc::new(Slot::default());
+    desk.harness.state_mut().watch(Arc::clone(&slot));
+    desk.show(in_a_meeting);
+    // Nothing to show until a picture comes.
+    assert!(!desk.shows("Your picture"));
+    let size = Size::new(64, 36).unwrap();
+    slot.put(Pattern::new(size, 1).next_picture());
+    desk.show(|_| {});
+    assert!(desk.shows("Your picture"));
+    // And the details say how large it is.
+    desk.click("Details");
+    assert!(
+        desk.harness
+            .query_by_label_contains("your picture: 64 × 36")
+            .is_some()
+    );
 }
 
 #[test]
