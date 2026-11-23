@@ -7,6 +7,7 @@
 pub mod check;
 pub mod history;
 pub mod live;
+pub mod picture;
 pub mod png;
 pub mod session;
 pub mod ui;

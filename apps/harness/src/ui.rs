@@ -5,11 +5,13 @@
 //! The look is "Ember": warm dark, one ember colour for what matters.
 
 use crate::check::{Finding, Found, MicCheck};
+use crate::picture::{Feed, Slot};
 use crate::session::{Order, Person, Session, Stage, View};
 use crate::words;
 use eframe::egui::{
     self, Align2, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
+use palaver_media::picture::Size;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -54,6 +56,8 @@ pub struct Setup {
     pub ticket_file: Option<String>,
     /// The delays to run with.
     pub tuning: crate::live::Tuning,
+    /// Show a moving pattern as this machine's own picture, in place of a camera.
+    pub pattern: bool,
 }
 
 /// How long the window is left to settle before its picture is taken.
@@ -68,6 +72,69 @@ enum Drawer {
     /// Open, in a window made wider for them, to be made narrower again.
     OpenWider,
 }
+
+/// One picture on the screen: where its pictures come from, and the newest of them as
+/// the screen holds it.
+struct Tile {
+    slot: Arc<Slot>,
+    /// The count of the picture on the screen.
+    seen: u64,
+    texture: Option<egui::TextureHandle>,
+    /// Kept from one picture to the next, to save making room each time.
+    rgba: Vec<u8>,
+    /// The size of the picture on the screen, and how long it took to make ready.
+    shown: Option<(u32, u32, Duration)>,
+}
+
+impl Tile {
+    const fn new(slot: Arc<Slot>) -> Self {
+        Self {
+            slot,
+            seen: 0,
+            texture: None,
+            rgba: Vec::new(),
+            shown: None,
+        }
+    }
+
+    /// Put the newest picture on the screen, if there is a newer one than is there.
+    fn refresh(&mut self, context: &egui::Context) {
+        let Some((seen, picture)) = self.slot.newer_than(self.seen) else {
+            return;
+        };
+        self.seen = seen;
+        let began = Instant::now();
+        picture.to_rgba(&mut self.rgba);
+        let size = picture.size();
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [size.width() as usize, size.height() as usize],
+            &self.rgba,
+        );
+        let options = egui::TextureOptions::LINEAR;
+        match &mut self.texture {
+            Some(texture) => texture.set(image, options),
+            None => self.texture = Some(context.load_texture("picture", image, options)),
+        }
+        self.shown = Some((size.width(), size.height(), began.elapsed()));
+    }
+
+    /// Draw the picture `tall` high under the name `name`, if there is one yet.
+    fn draw(&mut self, ui: &mut Ui, name: &str, tall: f32) {
+        self.refresh(ui.ctx());
+        if let (Some(texture), Some((width, height, _))) = (&self.texture, self.shown) {
+            let size = Vec2::new(words::tile_width(width, height, tall), tall);
+            ui.add(
+                egui::Image::new((texture.id(), size))
+                    .corner_radius(CornerRadius::same(4))
+                    .alt_text(name),
+            );
+        }
+    }
+}
+
+/// How large this machine's own pattern is, and how high its picture is drawn.
+const PATTERN: (u32, u32) = (640, 360);
+const OWN_TALL: f32 = 90.0;
 
 /// The window's own state: what has been typed, and what is being listened to.
 pub struct Window {
@@ -85,6 +152,9 @@ pub struct Window {
     meter: f32,
     copied: Option<&'static str>,
     shot: Option<Shot>,
+    /// This machine's own picture, if it has one, and what makes it.
+    own: Option<Tile>,
+    feed: Option<Feed>,
     /// Whether the details stand beside the meeting.
     details: Drawer,
     ticket_file: Option<String>,
@@ -128,7 +198,22 @@ impl Window {
 
     fn new(context: &egui::Context, setup: Setup) -> Self {
         Self::dress(context);
-        Self::over(Session::start(setup.tuning), Some(MicCheck::start()), setup)
+        let pattern = setup.pattern;
+        let mut window = Self::over(Session::start(setup.tuning), Some(MicCheck::start()), setup);
+        if let (true, Some(size)) = (pattern, Size::new(PATTERN.0, PATTERN.1)) {
+            let slot = Arc::new(Slot::default());
+            // A new picture is a reason to draw again, at once.
+            let waking = context.clone();
+            slot.on_new(move || waking.request_repaint());
+            window.feed = Some(Feed::pattern(Arc::clone(&slot), size, 0));
+            window.watch(slot);
+        }
+        window
+    }
+
+    /// Show what is put into `slot` as this machine's own picture.
+    pub fn watch(&mut self, slot: Arc<Slot>) {
+        self.own = Some(Tile::new(slot));
     }
 
     /// A window over a session that already exists, listening to the microphone or not.
@@ -150,6 +235,8 @@ impl Window {
             noise_by_ear: setup.tuning.noise.is_none(),
             meter: 0.0,
             copied: None,
+            own: None,
+            feed: None,
             // Closed until asked for; open in a picture, so that the picture shows them.
             details: if setup.shot.is_some() {
                 Drawer::Open
@@ -393,6 +480,9 @@ impl Window {
             .available_width()
             .min((ui.available_height() - 210.0).max(160.0));
         circle(ui, side, &view.people, view.sound.voices);
+        if let Some(own) = &mut self.own {
+            own.draw(ui, "Your picture", OWN_TALL);
+        }
 
         let line = words::links_line(view.links, view.network);
         ui.label(RichText::new(line).small().monospace().color(ember::DIM));
@@ -477,7 +567,7 @@ impl Window {
 
     /// The details: this machine, each link and each voice, as they are now and as they
     /// have been over the last two minutes.
-    fn details(ui: &mut Ui, view: &View) {
+    fn details(ui: &mut Ui, view: &View, own: Option<String>) {
         let small = |text: String| RichText::new(text).small().monospace().color(ember::QUIET);
         let heading = |ui: &mut Ui, text: &str| {
             ui.add_space(6.0);
@@ -501,6 +591,9 @@ impl Window {
         ui.label(small(words::network_line(view.details.network_late)));
         if let Some(line) = words::noise_line(view.sound.noise_high) {
             ui.label(small(String::from(line)));
+        }
+        if let Some(line) = own {
+            ui.label(small(line));
         }
         plot(
             ui,
@@ -752,6 +845,11 @@ impl Window {
         let frame = egui::Frame::new()
             .fill(ember::GROUND)
             .inner_margin(egui::Margin::symmetric(28, 20));
+        let own = self
+            .own
+            .as_ref()
+            .and_then(|tile| tile.shown)
+            .map(|(width, height, cost)| words::picture_line(width, height, cost));
         if self.details != Drawer::Shut && view.stage == Stage::In {
             let beside = egui::Frame::new()
                 .fill(ember::PANEL)
@@ -765,7 +863,7 @@ impl Window {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("details")
-                        .show(ui, |ui| Self::details(ui, &view));
+                        .show(ui, |ui| Self::details(ui, &view, own));
                 });
         }
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {

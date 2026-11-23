@@ -227,6 +227,28 @@ pub const fn noise_line(high: bool) -> Option<&'static str> {
     }
 }
 
+/// What the details say of this machine's own picture: how large it is, and how long
+/// each takes to make ready for the screen.
+#[must_use]
+pub fn picture_line(width: u32, height: u32, cost: Duration) -> String {
+    let tenths = cost.as_micros() / 100;
+    format!(
+        "your picture: {width} × {height} · {}.{} ms each to make ready for the screen",
+        tenths / 10,
+        tenths % 10
+    )
+}
+
+/// How large a picture is drawn in a tile `tall` high: as wide as keeps its shape.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a picture's size in pixels, as a size on the screen"
+)]
+pub fn tile_width(width: u32, height: u32, tall: f32) -> f32 {
+    tall * width as f32 / height.max(1) as f32
+}
+
 /// How the network thread is keeping up.
 #[must_use]
 pub fn network_line(late: Duration) -> String {
@@ -662,6 +684,24 @@ mod tests {
         );
         assert_eq!(noisy_hint(true, false), None);
         assert_eq!(noisy_hint(false, true), None);
+    }
+
+    #[test]
+    fn a_picture_line_gives_its_size_and_its_cost_to_a_tenth() {
+        assert_eq!(
+            picture_line(640, 360, Duration::from_micros(1260)),
+            "your picture: 640 × 360 · 1.2 ms each to make ready for the screen"
+        );
+        assert_eq!(
+            picture_line(1920, 1080, Duration::from_millis(11)),
+            "your picture: 1920 × 1080 · 11.0 ms each to make ready for the screen"
+        );
+    }
+
+    #[test]
+    fn a_tile_keeps_the_shape_of_its_picture() {
+        assert!((tile_width(640, 360, 90.0) - 160.0).abs() < 0.001);
+        assert!((tile_width(480, 640, 80.0) - 60.0).abs() < 0.001);
     }
 
     #[test]
