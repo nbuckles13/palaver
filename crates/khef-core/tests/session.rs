@@ -6,10 +6,12 @@
 )]
 
 use palaver_khef_core::session::{NOT_SUPPORTED, PREFIX_OVERLAP, UNINTERESTED};
-use palaver_khef_core::{Action, CloseCode, Event, Role, Session, StreamId, StreamKind};
+use palaver_khef_core::{
+    Action, CloseCode, Event, GroupReader, GroupWriter, Role, Session, StreamId, StreamKind,
+};
 use palaver_moq_wire::{
     Frame, FullTrackName, GoAway, Message, Namespace, PalaverExtensions, Params, Publish, Reader,
-    Setup, Subscribe, SubscribeTracks,
+    Setup, SubscribeOk, SubscribeTracks,
 };
 
 fn setup(version: Option<u64>) -> Setup {
@@ -652,29 +654,289 @@ fn a_closed_session_does_nothing_more() {
     assert_eq!(b.flush(), []);
 }
 
-#[test]
-fn a_single_track_subscribe_is_answered_not_supported() {
-    let (_, mut b) = pair();
-    let subscribe = Message::Subscribe(Subscribe {
-        request_id: 0,
-        track: track(&["m", "ctl", "plan"], "0"),
-        params: Params::default(),
-    });
-    b.feed(9, StreamKind::Bidi, &encoded(&subscribe));
-    let out = b.flush();
+/// `a` has asked `b` for one track, and `b` has accepted it under an alias. The request
+/// as each end knows it, and the alias.
+fn watching() -> (End, End, StreamId, StreamId, u64) {
+    let (mut a, mut b) = pair();
+    let wanted = track(&["m", "video", "p12"], "360p");
+    let request = a.session.subscribe(wanted.clone(), true).unwrap();
+    run(&mut a, &mut b);
+    let events = b.take_events();
     let [
-        Wire::Data {
-            bytes, fin: true, ..
+        Event::Wanted {
+            request: at_b,
+            track: asked,
+            new_group: true,
         },
-    ] = &out[..]
+    ] = &events[..]
     else {
-        panic!("{out:?}")
+        panic!("{events:?}")
     };
-    let Message::RequestError(error) = decoded(bytes) else {
-        panic!()
+    assert_eq!(asked, &wanted);
+    let alias = 20_000;
+    assert!(b.session.accept_subscription(*at_b, alias));
+    let at_b = *at_b;
+    run(&mut a, &mut b);
+    assert_eq!(a.take_events(), [Event::Subscribed { request, alias }]);
+    (a, b, request, at_b, alias)
+}
+
+/// One group, written: its header and a frame for each of `frames`.
+fn group_bytes(alias: u64, group: u64, frames: &[&[u8]]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut writer = GroupWriter::begin(alias, group, &mut bytes);
+    for frame in frames {
+        assert!(writer.object(frame, &mut bytes));
+    }
+    bytes
+}
+
+/// The frames in the `Group` events among `events`, read out as an end of the line would.
+fn frames_in(events: &[Event]) -> Vec<(u64, u64, Vec<u8>)> {
+    let mut reader = GroupReader::new();
+    let mut out = Vec::new();
+    for event in events {
+        if let Event::Group { bytes, .. } = event {
+            reader.feed(bytes, &mut out).unwrap();
+        }
+    }
+    out.into_iter()
+        .map(|object| (object.group, object.object, object.payload))
+        .collect()
+}
+
+#[test]
+fn one_track_is_asked_for_by_name_and_answered_with_its_alias() {
+    let (_, mut b, _, at_b, alias) = watching();
+    // The alias is now taken on this session: a second track cannot have it.
+    let (mut c, mut d) = pair();
+    let first = c
+        .session
+        .subscribe(track(&["m", "video", "p1"], "360p"), false)
+        .unwrap();
+    let second = c
+        .session
+        .subscribe(track(&["m", "video", "p2"], "360p"), false)
+        .unwrap();
+    run(&mut c, &mut d);
+    let asked: Vec<StreamId> = d
+        .take_events()
+        .iter()
+        .map(|event| match event {
+            Event::Wanted {
+                request,
+                new_group: false,
+                ..
+            } => *request,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert!(d.session.accept_subscription(asked[0], 7));
+    assert!(!d.session.accept_subscription(asked[1], 7));
+    // It can still be refused instead.
+    d.session.refuse(asked[1], NOT_SUPPORTED, "no");
+    run(&mut c, &mut d);
+    assert_eq!(
+        c.take_events(),
+        [
+            Event::Subscribed {
+                request: first,
+                alias: 7
+            },
+            Event::SubscribeRefused {
+                request: second,
+                code: NOT_SUPPORTED
+            },
+        ]
+    );
+    // Nothing is sent on a group for a track nobody subscribed to.
+    assert!(b.session.open_group(alias + 1).is_none());
+    assert!(b.session.open_group(alias).is_some());
+    let _ = at_b;
+}
+
+#[test]
+fn a_group_is_passed_on_as_it_arrives_and_read_out_at_the_end_of_the_line() {
+    let (mut a, mut b, _, _, alias) = watching();
+    let key = vec![7u8; 5000];
+    let bytes = group_bytes(alias, 3, &[&key, b"delta one", b"delta two"]);
+    let stream = b.session.open_group(alias).unwrap();
+    // In three pieces, as a network would: each goes up at once, nothing is kept back.
+    let (first, rest) = bytes.split_at(100);
+    let (second, third) = rest.split_at(3000);
+    let mut events = Vec::new();
+    for (piece, fin) in [(first, false), (second, false), (third, true)] {
+        b.session.pass(stream, piece.to_vec(), fin);
+        run(&mut a, &mut b);
+        let came = a.take_events();
+        assert_eq!(came.len(), 1, "{} events", came.len());
+        events.extend(came);
+    }
+    let shape: Vec<(bool, bool)> = events
+        .iter()
+        .map(|event| match event {
+            Event::Group {
+                alias: of,
+                group: 3,
+                start,
+                fin,
+                ..
+            } if *of == alias => (*start, *fin),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(shape, [(true, false), (false, false), (false, true)]);
+    // What went up is what was sent, byte for byte: a khef in the middle passes it on.
+    let passed: Vec<u8> = events
+        .iter()
+        .flat_map(|event| match event {
+            Event::Group { bytes, .. } => bytes.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    assert!(passed == bytes);
+    let frames = frames_in(&events);
+    assert_eq!(frames.len(), 3);
+    assert!(frames[0] == (3, 0, key));
+    assert_eq!(frames[2], (3, 2, b"delta two".to_vec()));
+}
+
+#[test]
+fn a_group_that_overtakes_the_answer_to_the_subscription_waits_for_it() {
+    let (mut a, mut b) = pair();
+    let request = a
+        .session
+        .subscribe(track(&["m", "video", "p12"], "360p"), false)
+        .unwrap();
+    let to_b = a.flush();
+    for wire in to_b {
+        b.receive(wire);
+    }
+    let events = b.take_events();
+    let [Event::Wanted { request: at_b, .. }] = events[..] else {
+        panic!("{events:?}")
     };
-    assert_eq!(error.code, NOT_SUPPORTED);
-    assert_eq!(b.closed, None);
+    assert!(b.session.accept_subscription(at_b, 9));
+    let stream = b.session.open_group(9).unwrap();
+    b.session.pass(stream, group_bytes(9, 0, &[b"key"]), true);
+    // The group's stream arrives first, the answer after.
+    let mut to_a = b.flush();
+    to_a.reverse();
+    for wire in to_a {
+        a.receive(wire);
+    }
+    let events = a.take_events();
+    assert_eq!(events[0], Event::Subscribed { request, alias: 9 });
+    assert_eq!(frames_in(&events[1..]), [(0, 0, b"key".to_vec())]);
+    assert_eq!(a.closed, None);
+}
+
+#[test]
+fn a_new_group_can_be_asked_for_on_a_subscription() {
+    let (mut a, mut b, request, at_b, _) = watching();
+    a.session.ask_for_group(request);
+    run(&mut a, &mut b);
+    assert_eq!(b.take_events(), [Event::GroupWanted { request: at_b }]);
+    // The answer changes nothing for the one who asked.
+    assert_eq!(a.take_events(), []);
+    assert_eq!((a.closed, b.closed), (None, None));
+}
+
+#[test]
+fn a_group_abandoned_part_way_is_reported_and_costs_nothing_else() {
+    let (mut a, mut b, _, _, alias) = watching();
+    let bytes = group_bytes(alias, 1, &[&[1u8; 2000]]);
+    let stream = b.session.open_group(alias).unwrap();
+    b.session.pass(stream, bytes[..500].to_vec(), false);
+    run(&mut a, &mut b);
+    let events = a.take_events();
+    let [
+        Event::Group {
+            stream: at_a,
+            start: true,
+            fin: false,
+            ..
+        },
+    ] = &events[..]
+    else {
+        panic!("{} events", events.len())
+    };
+    b.session.reset_group(stream);
+    run(&mut a, &mut b);
+    assert_eq!(a.take_events(), [Event::GroupReset { stream: *at_a }]);
+    // Nothing more goes on the stream, and the next group is unaffected.
+    b.session.pass(stream, bytes[500..].to_vec(), true);
+    let next = b.session.open_group(alias).unwrap();
+    b.session.pass(next, group_bytes(alias, 2, &[b"key"]), true);
+    run(&mut a, &mut b);
+    assert_eq!(frames_in(&a.take_events()), [(2, 0, b"key".to_vec())]);
+}
+
+#[test]
+fn giving_up_a_subscription_tells_the_peer_and_stops_its_groups() {
+    let (mut a, mut b, request, at_b, alias) = watching();
+    let stream = b.session.open_group(alias).unwrap();
+    let bytes = group_bytes(alias, 1, &[&[1u8; 2000]]);
+    b.session.pass(stream, bytes[..500].to_vec(), false);
+    run(&mut a, &mut b);
+    a.take_events();
+    a.session.unsubscribe(request);
+    run(&mut a, &mut b);
+    assert_eq!(b.take_events(), [Event::Unwanted { request: at_b }]);
+    // The publisher has nothing left to send it on.
+    assert!(b.session.open_group(alias).is_none());
+    b.session.pass(stream, bytes[500..].to_vec(), true);
+    run(&mut a, &mut b);
+    assert_eq!(a.take_events(), []);
+    assert_eq!((a.closed, b.closed), (None, None));
+}
+
+#[test]
+fn the_publisher_can_end_a_subscription() {
+    let (mut a, mut b, request, at_b, alias) = watching();
+    b.session.end_subscription(at_b);
+    run(&mut a, &mut b);
+    assert_eq!(a.take_events(), [Event::SubscriptionEnded { request }]);
+    assert!(b.session.open_group(alias).is_none());
+    // The alias is free again for another track.
+    let again = a
+        .session
+        .subscribe(track(&["m", "video", "p13"], "360p"), false)
+        .unwrap();
+    run(&mut a, &mut b);
+    let events = b.take_events();
+    let [Event::Wanted { request: at_b, .. }] = events[..] else {
+        panic!("{events:?}")
+    };
+    assert!(b.session.accept_subscription(at_b, alias));
+    run(&mut a, &mut b);
+    assert_eq!(
+        a.take_events(),
+        [Event::Subscribed {
+            request: again,
+            alias
+        }]
+    );
+}
+
+#[test]
+fn an_alias_given_for_a_subscription_must_be_free() {
+    let (mut a, mut b, _, _, alias) = watching();
+    // The peer answers a second subscription with the alias it already gave.
+    let second = a
+        .session
+        .subscribe(track(&["m", "video", "p13"], "360p"), false)
+        .unwrap();
+    a.flush();
+    let ok = Message::SubscribeOk(SubscribeOk {
+        track_alias: alias,
+        params: Params::default(),
+        track_properties: Vec::new(),
+    });
+    a.session
+        .on_data(second, StreamKind::Bidi, &encoded(&ok), false);
+    assert_eq!(a.close_code(), Some(CloseCode::DuplicateTrackAlias));
+    let _ = &mut b;
 }
 
 #[test]

@@ -77,7 +77,16 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
      Windows machines, and on a camera's pictures, which are harder to code than the
      pattern's.
   3. One video track across a link, at one size: streams in the wire code, subscribe
-     by name, keyframe requests.
+     by name, keyframe requests. In four pieces:
+     a. The session: a single track asked for by name, its groups passed on as they
+        arrive, a new group asked for. Done.
+     b. The khef: who is asked for a track (to begin with, the neighbour on the audio
+        tree's path to its publisher), a subscription carried hop by hop, groups
+        forwarded, requests for a new group passed up once for many askers, and a track
+        produced only while someone wants it.
+     c. The node and the SDK: video tracks in the plan, a sender that makes groups from
+        coded frames and a receiver that turns them back into pictures.
+     d. The app and the bot: the pattern sent, and a tile for someone else's picture.
   4. Tiles for everyone, then simulcast and choosing a size for each tile.
   5. Hardware encoding on Windows.
 - Default routes, hop-by-hop resolution, dedupe; every edge khef peered with ≥2 khefs.
@@ -370,6 +379,12 @@ To do:
   the screen (the like of a voice's "heard after arriving"), with frames lost, late or
   let go and key frames asked for. The same two kinds of line as sound has: one for
   this machine, one for each track received.
+- Further off (wanted, 2026-11-23): end-to-end numbers, from a camera or a microphone
+  on one machine to the screen or the speaker on another. What is shown today starts
+  at a frame's arrival, because two machines' clocks are not compared. Ways to get
+  there: compare the clocks over the link (as the round trip is already measured), or
+  measure from outside with a pattern that carries the time and a sound made at a
+  known moment.
 - Names: a link line is for a direct connection, and a voice line for a voice however
   many hops it came. To be made plain on the page.
 

@@ -691,7 +691,14 @@ A **profile** of MoQT, deliberately small:
     way. An object stream that overtakes the PUBLISH naming its alias is held for it (at
     most 16 such streams). An object too large, or a stream cut short, costs the stream,
     not the session.
-  - Video needs the streaming form (payload passed on as it arrives); it comes with video.
+  - Video uses the streaming form, and SUBSCRIBE for a single track (in the session
+    since 2026-11-23). A track taken by SUBSCRIBE has its groups handed up as their
+    bytes arrive, header first, to be passed to the next link as they are; only the two
+    ends of the line read the frames out (`GroupWriter`, `GroupReader`). On the
+    subscription's own stream the subscriber may ask that a new group begin, which is
+    how a key frame is asked for, and either end may end it. A group may be abandoned
+    part way by either end, which costs that stream and nothing else. Not yet bounded:
+    how much may wait to be sent to a slow subscriber.
 - **One alias per track, meeting-wide.** The draft has each publisher pick an alias per
   connection, so a khef forwarding a datagram would rewrite its header and copy it once per
   outgoing link. Instead every khef uses the same alias for a track, so a datagram is
