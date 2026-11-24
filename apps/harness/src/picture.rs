@@ -286,15 +286,16 @@ mod tests {
     }
 
     #[test]
-    fn a_coded_feed_gives_the_picture_back_and_says_what_it_cost() {
+    fn a_coded_feed_gives_the_picture_back() {
         let (raw, back) = (Arc::new(Slot::default()), Arc::new(Slot::default()));
         let coding = Arc::new(Coding::default());
         let (made, pictures) = std::sync::mpsc::channel();
         back.on_new(move || {
             let _ = made.send(());
         });
+        // A thousand a second, so that the test does not wait on the clock.
         let settings = Settings {
-            per_second: 100,
+            per_second: 1000,
             ..Settings::new(Size::new(64, 36).unwrap_or_else(|| unreachable!()), 200_000)
         };
         let feed = Feed::coded(
@@ -304,8 +305,7 @@ mod tests {
             settings,
             1,
         );
-        // Until a second's worth has come back, and with it the first word of the cost.
-        for _ in 0..100 {
+        for _ in 0..5 {
             assert!(pictures.recv_timeout(Duration::from_secs(10)).is_ok());
         }
         drop(feed);
@@ -313,10 +313,31 @@ mod tests {
             unreachable!()
         };
         assert_eq!(came_back.size(), settings.size);
-        let cost = coding.cost();
-        assert_eq!(cost.failed, None);
-        assert!(cost.bitrate > 0, "{cost:?}");
+        assert_eq!(coding.cost().failed, None);
         assert!(raw.count() >= back.count());
+    }
+
+    #[test]
+    fn a_seconds_sums_become_a_rate_and_what_each_picture_cost() {
+        let tally = Tally {
+            pictures: 30,
+            bytes: 60_000,
+            encode: Duration::from_millis(60),
+            decode: Duration::from_millis(15),
+            let_go: 2,
+        };
+        assert_eq!(
+            tally.cost(),
+            Cost {
+                bitrate: 480_000,
+                encode: Duration::from_millis(2),
+                decode: Duration::from_micros(500),
+                let_go: 2,
+                failed: None,
+            }
+        );
+        // Nothing made is nothing spent, and not a division by nothing.
+        assert_eq!(Tally::default().cost(), Cost::default());
     }
 
     #[test]
