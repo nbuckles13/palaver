@@ -363,6 +363,13 @@ To do:
   the pointer.
 - More to draw as it comes: the speaker's lead, what the microphone sends, the plan's
   changes, each hop of a voice that came by more than one.
+- Video, once it crosses a network, in place of today's "your picture" and "as sent"
+  lines (which are of a loop on one machine): for what this machine sends, the time to
+  encode and the rate sent, for each size; for each picture received, the rate
+  received, the time to decode, and how long from a frame's arrival to its being on
+  the screen (the like of a voice's "heard after arriving"), with frames lost, late or
+  let go and key frames asked for. The same two kinds of line as sound has: one for
+  this machine, one for each track received.
 - Names: a link line is for a direct connection, and a voice line for a voice however
   many hops it came. To be made plain on the page.
 
