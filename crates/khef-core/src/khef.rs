@@ -609,7 +609,21 @@ impl<N: Ord + Clone> Khef<N> {
                     link.audio_request = None;
                 }
             }
-            Event::Ready { .. } | Event::TracksAccepted { .. } | Event::TrackAccepted { .. } => {}
+            // Single tracks by name, which is how video travels, are not served yet.
+            Event::Wanted { request, .. } => {
+                link.session
+                    .refuse(request, NOT_SUPPORTED, "single tracks are not served yet");
+            }
+            Event::Ready { .. }
+            | Event::TracksAccepted { .. }
+            | Event::TrackAccepted { .. }
+            | Event::Unwanted { .. }
+            | Event::GroupWanted { .. }
+            | Event::Subscribed { .. }
+            | Event::SubscribeRefused { .. }
+            | Event::SubscriptionEnded { .. }
+            | Event::Group { .. }
+            | Event::GroupReset { .. } => {}
         }
     }
 }

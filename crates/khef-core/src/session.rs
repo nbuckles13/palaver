@@ -23,19 +23,28 @@
 //!   holds, with no copy.
 //! - **Whole objects on their own stream** (control tracks: one object per group, a few
 //!   kilobytes at most): [`Session::send_object`] and [`Event::Object`]. These are copied
-//!   once each way, which is fine for objects that are rare. Objects too large to wait for
-//!   whole (video frames) need the streaming form, which comes with video.
+//!   once each way, which is fine for objects that are rare.
+//! - **Groups passed on as they arrive** (video: a group of pictures to a stream). The
+//!   session reads only the stream's header, to know the track and the group, and hands
+//!   the bytes up as they come ([`Event::Group`]); they go out the same way
+//!   ([`Session::open_group`], [`Session::pass`]). A khef in the middle never waits for a
+//!   whole frame, and an end of the line reads the frames out with [`crate::GroupReader`].
 //!
-//! SUBSCRIBE for a single track is not handled yet.
+//! And a third request, for video, which is produced only while someone wants it:
+//!
+//! - SUBSCRIBE: "send me this one track". The answer names the alias. On the same stream
+//!   the subscriber may ask that a new group begin (a key frame), and either end may end
+//!   it. Tracks taken this way are the ones whose groups are passed on as they arrive.
 //!
 //! Anything the peer does that the draft forbids closes the session; the reason is kept for
 //! the log. Nothing here panics on input.
 
 use palaver_moq_wire::{
     Datagram, Error, Frame, FullTrackName, Message, Namespace, ObjectBody, PADDING_DATAGRAM,
-    Params, Publish, PublishDone, Reader, RequestError, RequestOk, Setup, SubgroupHeader,
-    SubgroupId, SubgroupObject, SubgroupReader, SubgroupWriter, SubscribeTracks, UniStream,
-    is_padding_datagram, negotiated_palaver_version, put_vi64, uni_stream,
+    Params, Publish, PublishDone, Reader, RequestError, RequestOk, RequestUpdate, Setup,
+    SubgroupHeader, SubgroupId, SubgroupObject, SubgroupReader, SubgroupWriter, Subscribe,
+    SubscribeOk, SubscribeTracks, UniStream, is_padding_datagram, negotiated_palaver_version,
+    put_vi64, uni_stream,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -145,6 +154,38 @@ pub enum Event {
         object: u64,
         payload: Vec<u8>,
     },
+    /// The peer asks for one track by name; `new_group` if it asks that a new group begin
+    /// for it. Answer with [`Session::accept_subscription`] or [`Session::refuse`].
+    Wanted {
+        request: StreamId,
+        track: FullTrackName,
+        new_group: bool,
+    },
+    /// The peer no longer wants a track it asked for.
+    Unwanted { request: StreamId },
+    /// The peer asks that a new group begin on a track it is subscribed to: it has lost
+    /// its place and needs a key frame.
+    GroupWanted { request: StreamId },
+    /// The peer accepted our subscription. The track's groups will carry `alias`.
+    Subscribed { request: StreamId, alias: u64 },
+    /// The peer refused our subscription, or abandoned it.
+    SubscribeRefused { request: StreamId, code: u64 },
+    /// The peer ended a subscription it had accepted: the track is over.
+    SubscriptionEnded { request: StreamId },
+    /// Bytes of one group of a track we subscribed to, as they arrived. The first bytes
+    /// given for a stream (`start`) begin with the stream's header, so that the whole can
+    /// be passed on as it is, or read with [`crate::GroupReader`]. `fin` when the stream
+    /// has ended cleanly.
+    Group {
+        stream: StreamId,
+        alias: u64,
+        group: u64,
+        start: bool,
+        bytes: Vec<u8>,
+        fin: bool,
+    },
+    /// The peer abandoned a group part way: what was to come is no longer worth sending.
+    GroupReset { stream: StreamId },
 }
 
 /// What a datagram turned out to be. Borrows from the datagram handed in.
@@ -175,6 +216,10 @@ enum Incoming {
     Tracks { prefix: Namespace },
     /// PUBLISH, accepted: we receive the track.
     Track { alias: u64 },
+    /// SUBSCRIBE, not yet answered.
+    SubscribePending,
+    /// SUBSCRIBE, accepted: we send the track, under this alias.
+    Subscription { alias: u64 },
     /// Answered with an error, or finished.
     Done,
 }
@@ -182,8 +227,19 @@ enum Incoming {
 /// A request we made, by the stream we opened for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outgoing {
-    Tracks { prefix: Namespace, answered: bool },
-    Track { alias: u64, answered: bool },
+    Tracks {
+        prefix: Namespace,
+        answered: bool,
+    },
+    Track {
+        alias: u64,
+        answered: bool,
+    },
+    /// SUBSCRIBE; the alias is known once it is answered.
+    Subscription {
+        alias: Option<u64>,
+        answered: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -194,6 +250,9 @@ struct Inbound {
     uni: Option<UniStream>,
     /// For an object stream, once its header has been read.
     subgroup: Option<(SubgroupHeader, SubgroupReader)>,
+    /// For an object stream of a track taken by SUBSCRIBE, once its header has been
+    /// handed up: what follows is handed up as it comes.
+    passing: bool,
     finished: bool,
 }
 
@@ -216,6 +275,10 @@ pub struct Session {
     seen_request_ids: BTreeSet<u64>,
     /// Aliases of the tracks the peer publishes to us.
     their_aliases: BTreeSet<u64>,
+    /// Those of them taken by SUBSCRIBE: their groups are passed on as they arrive.
+    streamed: BTreeSet<u64>,
+    /// The group streams we have open, each with the alias of its track.
+    our_groups: BTreeMap<StreamId, u64>,
     /// Streams of the peer's that we gave up. Bytes already on their way are ignored.
     given_up: BTreeSet<StreamId>,
     actions: VecDeque<Action>,
@@ -247,6 +310,8 @@ impl Session {
             outgoing: BTreeMap::new(),
             seen_request_ids: BTreeSet::new(),
             their_aliases: BTreeSet::new(),
+            streamed: BTreeSet::new(),
+            our_groups: BTreeMap::new(),
             given_up: BTreeSet::new(),
             actions: VecDeque::new(),
             events: VecDeque::new(),
@@ -302,7 +367,7 @@ impl Session {
     pub fn subscribe_tracks(&mut self, prefix: Namespace) -> Option<StreamId> {
         let clash = self.outgoing.values().any(|request| match request {
             Outgoing::Tracks { prefix: held, .. } => overlaps(held, &prefix),
-            Outgoing::Track { .. } => false,
+            Outgoing::Track { .. } | Outgoing::Subscription { .. } => false,
         });
         if self.closed || clash {
             return None;
@@ -380,6 +445,177 @@ impl Session {
         self.outgoing
             .values()
             .any(|request| matches!(request, Outgoing::Track { alias: a, .. } if *a == alias))
+    }
+
+    /// Whether `alias` is a track the peer subscribed to and we accepted.
+    fn serving(&self, alias: u64) -> bool {
+        self.incoming
+            .values()
+            .any(|request| matches!(request, Incoming::Subscription { alias: a } if *a == alias))
+    }
+
+    // --- One track, by name ---
+
+    /// Ask the peer for one track by name; with `new_group`, ask also that a new group
+    /// begin for us. `None` if the session is closed.
+    pub fn subscribe(&mut self, track: FullTrackName, new_group: bool) -> Option<StreamId> {
+        if self.closed {
+            return None;
+        }
+        let message = Message::Subscribe(Subscribe {
+            request_id: self.take_request_id(),
+            track,
+            params: Params {
+                forward: Some(true),
+                new_group_request: new_group.then_some(0),
+                ..Params::default()
+            },
+        });
+        let stream = self.request(&message)?;
+        self.outgoing.insert(
+            stream,
+            Outgoing::Subscription {
+                alias: None,
+                answered: false,
+            },
+        );
+        Some(stream)
+    }
+
+    /// Give up a subscription we made. Groups of it still arriving are dropped.
+    pub fn unsubscribe(&mut self, request: StreamId) {
+        let Some(Outgoing::Subscription { alias, .. }) = self.outgoing.get(&request) else {
+            return;
+        };
+        let alias = *alias;
+        self.outgoing.remove(&request);
+        self.actions.push_back(Action::Reset { stream: request });
+        if let Some(alias) = alias {
+            self.forget_their_stream_track(alias);
+        }
+    }
+
+    /// Ask that a new group begin on a track we are subscribed to.
+    pub fn ask_for_group(&mut self, request: StreamId) {
+        if self.closed
+            || !matches!(
+                self.outgoing.get(&request),
+                Some(Outgoing::Subscription { .. })
+            )
+        {
+            return;
+        }
+        let update = Message::RequestUpdate(RequestUpdate {
+            request_id: self.take_request_id(),
+            params: Params {
+                new_group_request: Some(0),
+                ..Params::default()
+            },
+        });
+        self.send_message(request, &update, false);
+    }
+
+    /// Accept the peer's subscription: the track's groups will carry `alias`, and may be
+    /// sent from now on. `false`, answering nothing, if the request is not one waiting for
+    /// an answer or `alias` is already in use for another track we send here.
+    pub fn accept_subscription(&mut self, request: StreamId, alias: u64) -> bool {
+        if !matches!(
+            self.incoming.get(&request),
+            Some(Incoming::SubscribePending)
+        ) || self.publishing(alias)
+            || self.serving(alias)
+        {
+            return false;
+        }
+        self.incoming
+            .insert(request, Incoming::Subscription { alias });
+        let ok = Message::SubscribeOk(SubscribeOk {
+            track_alias: alias,
+            params: Params::default(),
+            track_properties: Vec::new(),
+        });
+        self.send_message(request, &ok, false);
+        true
+    }
+
+    /// End a subscription we accepted: the track is over.
+    pub fn end_subscription(&mut self, request: StreamId) {
+        let Some(Incoming::Subscription { alias }) = self.incoming.get(&request) else {
+            return;
+        };
+        let alias = *alias;
+        self.incoming.insert(request, Incoming::Done);
+        self.reset_our_groups(alias);
+        let done = Message::PublishDone(PublishDone {
+            status: TRACK_ENDED,
+            stream_count: 0,
+            reason: String::new(),
+        });
+        self.send_message(request, &done, true);
+    }
+
+    /// Open a stream for one group of a track the peer subscribed to. What goes on it,
+    /// beginning with the stream's header, is given to [`Session::pass`]. `None` if the
+    /// peer is not subscribed to `alias`.
+    pub fn open_group(&mut self, alias: u64) -> Option<StreamId> {
+        if self.closed || !self.serving(alias) {
+            return None;
+        }
+        let stream = self.open(StreamKind::Uni);
+        self.our_groups.insert(stream, alias);
+        Some(stream)
+    }
+
+    /// Send the next bytes of a group on a stream from [`Session::open_group`], and end
+    /// it if `fin`. Nothing is sent on a stream that is not open.
+    pub fn pass(&mut self, stream: StreamId, bytes: Vec<u8>, fin: bool) {
+        if self.closed || !self.our_groups.contains_key(&stream) {
+            return;
+        }
+        if fin {
+            self.our_groups.remove(&stream);
+        }
+        self.send(stream, bytes, fin);
+    }
+
+    /// Abandon a group part way: the rest is no longer worth sending.
+    pub fn reset_group(&mut self, stream: StreamId) {
+        if self.our_groups.remove(&stream).is_some() {
+            self.actions.push_back(Action::Reset { stream });
+        }
+    }
+
+    /// Abandon every group we have open for `alias`.
+    fn reset_our_groups(&mut self, alias: u64) {
+        let open: Vec<StreamId> = self
+            .our_groups
+            .iter()
+            .filter(|(_, of)| **of == alias)
+            .map(|(stream, _)| *stream)
+            .collect();
+        for stream in open {
+            self.reset_group(stream);
+        }
+    }
+
+    /// A track we took by SUBSCRIBE is over: stop reading what is still arriving of it.
+    fn forget_their_stream_track(&mut self, alias: u64) {
+        self.their_aliases.remove(&alias);
+        self.streamed.remove(&alias);
+        let arriving: Vec<StreamId> = self
+            .inbound
+            .iter()
+            .filter(|(_, inbound)| {
+                inbound
+                    .subgroup
+                    .as_ref()
+                    .is_some_and(|(header, _)| header.track_alias == alias)
+            })
+            .map(|(stream, _)| *stream)
+            .collect();
+        for stream in arriving {
+            self.give_up(stream);
+        }
     }
 
     /// Send a whole object as the only object of `group`, on a stream of its own. For
@@ -502,7 +738,7 @@ impl Session {
     pub fn refuse(&mut self, request: StreamId, code: u64, reason: &str) {
         if !matches!(
             self.incoming.get(&request),
-            Some(Incoming::TracksPending { .. })
+            Some(Incoming::TracksPending { .. } | Incoming::SubscribePending)
         ) {
             return;
         }
@@ -540,6 +776,7 @@ impl Session {
             buffer: Vec::new(),
             uni: None,
             subgroup: None,
+            passing: false,
             finished: false,
         });
         if inbound.finished {
@@ -549,6 +786,22 @@ impl Session {
             );
         }
         inbound.finished = fin;
+        // A group being passed on: its bytes go up as they come, and nothing is kept.
+        if let (true, Some((header, _))) = (inbound.passing, inbound.subgroup.as_ref()) {
+            let (alias, group) = (header.track_alias, header.group);
+            if fin {
+                self.inbound.remove(&stream);
+            }
+            self.events.push_back(Event::Group {
+                stream,
+                alias,
+                group,
+                start: false,
+                bytes: bytes.to_vec(),
+                fin,
+            });
+            return;
+        }
         match inbound.uni {
             // Padding is read and thrown away.
             Some(UniStream::Padding) => return,
@@ -574,11 +827,19 @@ impl Session {
         if self.closed {
             return;
         }
-        self.inbound.remove(&stream);
+        let passing = self
+            .inbound
+            .remove(&stream)
+            .is_some_and(|inbound| inbound.passing);
         self.given_up.remove(&stream);
         if Some(stream) == self.their_control {
             return self.close(CloseCode::ProtocolViolation, "control stream closed");
         }
+        if passing {
+            self.events.push_back(Event::GroupReset { stream });
+        }
+        // The peer no longer wants a group we were sending.
+        self.our_groups.remove(&stream);
         self.abandoned(stream);
     }
 
@@ -757,6 +1018,28 @@ impl Session {
             return self.hold(stream);
         }
 
+        // A track taken by SUBSCRIBE: hand up the header as it would be written, with
+        // whatever has come after it, and from here on everything as it comes.
+        if self.streamed.contains(&alias) {
+            let mut bytes = Vec::with_capacity(buffer.len().saturating_add(8));
+            header.encode(&mut bytes);
+            bytes.extend_from_slice(reader.rest());
+            inbound.passing = true;
+            let fin = inbound.finished;
+            if fin {
+                self.inbound.remove(&stream);
+            }
+            self.events.push_back(Event::Group {
+                stream,
+                alias,
+                group,
+                start: true,
+                bytes,
+                fin,
+            });
+            return;
+        }
+
         let mut read = Vec::new();
         let outcome = loop {
             match objects.read(&mut reader) {
@@ -854,18 +1137,25 @@ impl Session {
         match stream {
             // The peer will send nothing more on a request it made. For a request for
             // tracks that is allowed and changes nothing; a track it published is over.
-            StreamId::Theirs(_) => {
-                if let Some(Incoming::Track { alias }) = self.incoming.get(&stream) {
+            StreamId::Theirs(_) => match self.incoming.get(&stream) {
+                Some(Incoming::Track { alias }) => {
                     let alias = *alias;
                     self.end_their_track(stream, alias);
                 }
-            }
+                // A subscriber that finishes its request has finished with the track.
+                Some(Incoming::Subscription { .. } | Incoming::SubscribePending) => {
+                    self.abandoned(stream);
+                }
+                _ => {}
+            },
             // The peer will send nothing more on a request we made: unanswered, it failed.
             StreamId::Ours(_) => {
                 let unanswered = match self.outgoing.get(&stream) {
-                    Some(Outgoing::Tracks { answered, .. } | Outgoing::Track { answered, .. }) => {
-                        !answered
-                    }
+                    Some(
+                        Outgoing::Tracks { answered, .. }
+                        | Outgoing::Track { answered, .. }
+                        | Outgoing::Subscription { answered, .. },
+                    ) => !answered,
                     None => false,
                 };
                 if unanswered {
@@ -886,6 +1176,13 @@ impl Session {
                 self.their_aliases.remove(&alias);
                 self.events.push_back(Event::TrackEnded { alias });
             }
+            Some(Incoming::SubscribePending) => {
+                self.events.push_back(Event::Unwanted { request: stream });
+            }
+            Some(Incoming::Subscription { alias }) => {
+                self.reset_our_groups(alias);
+                self.events.push_back(Event::Unwanted { request: stream });
+            }
             Some(Incoming::Done) | None => {}
         }
         match self.outgoing.remove(&stream) {
@@ -896,6 +1193,15 @@ impl Session {
             Some(Outgoing::Track { alias, .. }) => {
                 self.events
                     .push_back(Event::TrackRefused { alias, code: 0 });
+            }
+            Some(Outgoing::Subscription { alias, .. }) => {
+                if let Some(alias) = alias {
+                    self.forget_their_stream_track(alias);
+                }
+                self.events.push_back(Event::SubscribeRefused {
+                    request: stream,
+                    code: 0,
+                });
             }
             None => {}
         }
@@ -991,6 +1297,31 @@ impl Session {
                     self.send_message(stream, &error, false);
                 }
             }
+            // A subscriber asks that a new group begin. Nothing else can be changed.
+            (
+                Incoming::Subscription { .. } | Incoming::SubscribePending,
+                Message::RequestUpdate(update),
+            ) => {
+                if !self.their_request_id_is_valid(update.request_id) {
+                    return;
+                }
+                let answer = if update.params.new_group_request.is_some() {
+                    self.events
+                        .push_back(Event::GroupWanted { request: stream });
+                    Message::RequestOk(RequestOk {
+                        params: Params::default(),
+                        track_properties: Vec::new(),
+                    })
+                } else {
+                    Message::RequestError(RequestError {
+                        code: NOT_SUPPORTED,
+                        retry_after: None,
+                        reason: "only a new group can be asked for".to_owned(),
+                        redirect: None,
+                    })
+                };
+                self.send_message(stream, &answer, false);
+            }
             (_, Message::GoAway(_)) => {}
             _ => self.close(
                 CloseCode::ProtocolViolation,
@@ -1038,7 +1369,7 @@ impl Session {
                     Outgoing::Tracks { prefix, .. } => {
                         prefix.is_prefix_of(publish.track.namespace())
                     }
-                    Outgoing::Track { .. } => false,
+                    Outgoing::Track { .. } | Outgoing::Subscription { .. } => false,
                 });
                 if !wanted {
                     self.their_aliases.remove(&publish.track_alias);
@@ -1062,9 +1393,15 @@ impl Session {
                 self.release_held(publish.track_alias);
             }
             Message::Subscribe(request) => {
-                if self.their_request_id_is_valid(request.request_id) {
-                    self.reject(stream, NOT_SUPPORTED, "SUBSCRIBE is not supported yet");
+                if !self.their_request_id_is_valid(request.request_id) {
+                    return;
                 }
+                self.incoming.insert(stream, Incoming::SubscribePending);
+                self.events.push_back(Event::Wanted {
+                    request: stream,
+                    track: request.track,
+                    new_group: request.params.new_group_request.is_some(),
+                });
             }
             _ => self.close(
                 CloseCode::ProtocolViolation,
@@ -1078,9 +1415,9 @@ impl Session {
             return; // a request we gave up; whatever was on its way is of no interest
         };
         let first = match request {
-            Outgoing::Tracks { answered, .. } | Outgoing::Track { answered, .. } => {
-                !core::mem::replace(answered, true)
-            }
+            Outgoing::Tracks { answered, .. }
+            | Outgoing::Track { answered, .. }
+            | Outgoing::Subscription { answered, .. } => !core::mem::replace(answered, true),
         };
         let event = match (request.clone(), message, first) {
             (Outgoing::Tracks { .. }, Message::RequestOk(_), true) => {
@@ -1103,6 +1440,41 @@ impl Session {
                     code: error.code,
                 }
             }
+            (Outgoing::Subscription { .. }, Message::SubscribeOk(ok), true) => {
+                if !self.their_aliases.insert(ok.track_alias) {
+                    return self
+                        .close(CloseCode::DuplicateTrackAlias, "track alias already in use");
+                }
+                self.streamed.insert(ok.track_alias);
+                self.outgoing.insert(
+                    stream,
+                    Outgoing::Subscription {
+                        alias: Some(ok.track_alias),
+                        answered: true,
+                    },
+                );
+                self.events.push_back(Event::Subscribed {
+                    request: stream,
+                    alias: ok.track_alias,
+                });
+                // Groups may have overtaken the answer.
+                return self.release_held(ok.track_alias);
+            }
+            (Outgoing::Subscription { .. }, Message::RequestError(error), true) => {
+                self.outgoing.remove(&stream);
+                Event::SubscribeRefused {
+                    request: stream,
+                    code: error.code,
+                }
+            }
+            // The publisher ends the track.
+            (Outgoing::Subscription { alias, .. }, Message::PublishDone(_), false) => {
+                self.outgoing.remove(&stream);
+                if let Some(alias) = alias {
+                    self.forget_their_stream_track(alias);
+                }
+                Event::SubscriptionEnded { request: stream }
+            }
             // After accepting a track the subscriber may try to change the subscription.
             (Outgoing::Track { .. }, Message::RequestUpdate(update), false) => {
                 if self.their_request_id_is_valid(update.request_id) {
@@ -1116,7 +1488,14 @@ impl Session {
                 }
                 return;
             }
-            (_, Message::GoAway(_), false) => return,
+            // The answer to our asking for a new group, from which nothing follows; or the
+            // peer saying it is going away.
+            (
+                Outgoing::Subscription { .. },
+                Message::RequestOk(_) | Message::RequestError(_),
+                false,
+            )
+            | (_, Message::GoAway(_), false) => return,
             _ => {
                 return self.close(
                     CloseCode::ProtocolViolation,
