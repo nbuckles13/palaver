@@ -254,7 +254,7 @@ pub fn coding_line(bitrate: u64, encode: Duration, decode: Duration, let_go: u32
         tenths(decode)
     );
     if let_go > 0 {
-        format!("{line} · {let_go} let go in the last second")
+        format!("{line} · {let_go} let go of late")
     } else {
         line
     }
@@ -737,7 +737,7 @@ mod tests {
                 Duration::from_millis(2),
                 4
             ),
-            "as sent: 90 kbit/s · 40.0 ms to encode · 2.0 ms to decode · 4 let go in the last second"
+            "as sent: 90 kbit/s · 40.0 ms to encode · 2.0 ms to decode · 4 let go of late"
         );
     }
 
