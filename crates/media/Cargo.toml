@@ -13,6 +13,8 @@ palaver-proto = { workspace = true }
 palaver-opus = { workspace = true }
 # WebRTC's echo canceller, noise suppression and gain control, in Rust.
 sonora = { workspace = true }
+# H.264 in software: the first backend behind `video`.
+openh264 = { workspace = true }
 
 [lints]
 workspace = true

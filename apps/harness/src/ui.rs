@@ -5,13 +5,14 @@
 //! The look is "Ember": warm dark, one ember colour for what matters.
 
 use crate::check::{Finding, Found, MicCheck};
-use crate::picture::{Feed, Slot};
+use crate::picture::{Coding, Feed, Slot};
 use crate::session::{Order, Person, Session, Stage, View};
 use crate::words;
 use eframe::egui::{
     self, Align2, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
 use palaver_media::picture::Size;
+use palaver_media::video::Settings;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -58,6 +59,9 @@ pub struct Setup {
     pub tuning: crate::live::Tuning,
     /// Show a moving pattern as this machine's own picture, in place of a camera.
     pub pattern: bool,
+    /// With the pattern: also show it as it would be sent, encoded at this many bits a
+    /// second and decoded again.
+    pub coded: Option<u32>,
 }
 
 /// How long the window is left to settle before its picture is taken.
@@ -155,6 +159,8 @@ pub struct Window {
     /// This machine's own picture, if it has one, and what makes it.
     own: Option<Tile>,
     feed: Option<Feed>,
+    /// The same picture after encoding and decoding, and what that costs.
+    sent: Option<(Tile, Arc<Coding>)>,
     /// Whether the details stand beside the meeting.
     details: Drawer,
     ticket_file: Option<String>,
@@ -198,14 +204,22 @@ impl Window {
 
     fn new(context: &egui::Context, setup: Setup) -> Self {
         Self::dress(context);
-        let pattern = setup.pattern;
+        let (pattern, coded) = (setup.pattern, setup.coded);
         let mut window = Self::over(Session::start(setup.tuning), Some(MicCheck::start()), setup);
         if let (true, Some(size)) = (pattern, Size::new(PATTERN.0, PATTERN.1)) {
             let slot = Arc::new(Slot::default());
             // A new picture is a reason to draw again, at once.
             let waking = context.clone();
             slot.on_new(move || waking.request_repaint());
-            window.feed = Some(Feed::pattern(Arc::clone(&slot), size, 0));
+            window.feed = Some(match coded {
+                Some(bitrate) => {
+                    let (back, coding) = (Arc::new(Slot::default()), Arc::new(Coding::default()));
+                    window.watch_sent(Arc::clone(&back), Arc::clone(&coding));
+                    let settings = Settings::new(size, bitrate);
+                    Feed::coded(Arc::clone(&slot), back, coding, settings, 0)
+                }
+                None => Feed::pattern(Arc::clone(&slot), size, 0),
+            });
             window.watch(slot);
         }
         window
@@ -214,6 +228,12 @@ impl Window {
     /// Show what is put into `slot` as this machine's own picture.
     pub fn watch(&mut self, slot: Arc<Slot>) {
         self.own = Some(Tile::new(slot));
+    }
+
+    /// Show what is put into `slot` beside it, as the picture after encoding and
+    /// decoding, with what `coding` says that costs in the details.
+    pub fn watch_sent(&mut self, slot: Arc<Slot>, coding: Arc<Coding>) {
+        self.sent = Some((Tile::new(slot), coding));
     }
 
     /// A window over a session that already exists, listening to the microphone or not.
@@ -237,6 +257,7 @@ impl Window {
             copied: None,
             own: None,
             feed: None,
+            sent: None,
             // Closed until asked for; open in a picture, so that the picture shows them.
             details: if setup.shot.is_some() {
                 Drawer::Open
@@ -480,9 +501,14 @@ impl Window {
             .available_width()
             .min((ui.available_height() - 210.0).max(160.0));
         circle(ui, side, &view.people, view.sound.voices);
-        if let Some(own) = &mut self.own {
-            own.draw(ui, "Your picture", OWN_TALL);
-        }
+        ui.horizontal(|ui| {
+            if let Some(own) = &mut self.own {
+                own.draw(ui, "Your picture", OWN_TALL);
+            }
+            if let Some((sent, _)) = &mut self.sent {
+                sent.draw(ui, "Your picture, as sent", OWN_TALL);
+            }
+        });
 
         let line = words::links_line(view.links, view.network);
         ui.label(RichText::new(line).small().monospace().color(ember::DIM));
@@ -567,7 +593,7 @@ impl Window {
 
     /// The details: this machine, each link and each voice, as they are now and as they
     /// have been over the last two minutes.
-    fn details(ui: &mut Ui, view: &View, own: Option<String>) {
+    fn details(ui: &mut Ui, view: &View, pictures: [Option<String>; 2]) {
         let small = |text: String| RichText::new(text).small().monospace().color(ember::QUIET);
         let heading = |ui: &mut Ui, text: &str| {
             ui.add_space(6.0);
@@ -592,7 +618,7 @@ impl Window {
         if let Some(line) = words::noise_line(view.sound.noise_high) {
             ui.label(small(String::from(line)));
         }
-        if let Some(line) = own {
+        for line in pictures.into_iter().flatten() {
             ui.label(small(line));
         }
         plot(
@@ -850,6 +876,13 @@ impl Window {
             .as_ref()
             .and_then(|tile| tile.shown)
             .map(|(width, height, cost)| words::picture_line(width, height, cost));
+        let sent = self.sent.as_ref().map(|(_, coding)| {
+            let cost = coding.cost();
+            cost.failed.map_or_else(
+                || words::coding_line(cost.bitrate, cost.encode, cost.decode, cost.let_go),
+                |why| format!("as sent: {why}"),
+            )
+        });
         if self.details != Drawer::Shut && view.stage == Stage::In {
             let beside = egui::Frame::new()
                 .fill(ember::PANEL)
@@ -863,7 +896,7 @@ impl Window {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("details")
-                        .show(ui, |ui| Self::details(ui, &view, own));
+                        .show(ui, |ui| Self::details(ui, &view, [own, sent]));
                 });
         }
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {

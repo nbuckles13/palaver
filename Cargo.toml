@@ -37,6 +37,8 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 sha2 = "0.11"
 sonora = "0.3"
+# Cisco's H.264 encoder and decoder, built from source: the software video codec.
+openh264 = "0.9"
 tokio = { version = "1", default-features = false }
 
 # Guards, mechanism 2 (docs/04): lints every crate inherits.

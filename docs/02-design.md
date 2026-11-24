@@ -860,6 +860,16 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
     with no copy and no allocation per packet.
   - First version: skipping and filler are whole frames; time-stretching inside a frame
     comes with the decoder. Numbers are to be tuned by ear.
+- **Video codec, as built** (`media::video`): two traits of our own, `Encode` and
+  `Decode`. A coded frame is a whole frame in byte-stream form and is either a key
+  frame, which a decoder can begin at, or not; a key frame comes when asked for and,
+  if set, every so many pictures; the encoder may let a picture go to hold its rate.
+  `SoftwareEncoder` and `SoftwareDecoder` are openh264 through the `openh264` crate,
+  which builds it from source and needs no unsafe code of ours. Sizes must be even.
+  Measured on a development machine with the moving pattern, 640 × 360 at thirty a
+  second: under 2 ms to encode and 0.3 ms to decode, without the assembly routines
+  (those need `nasm` at build time, which nothing installs yet; to be added where the
+  numbers on real pictures call for it).
 - **Video codec**: our own encoder/decoder interface. openh264 (software) is the first backend;
   **hardware backends follow early (phase 2)**, because a node must keep CPU for its khef.
   Media Foundation on Windows first, then VideoToolbox, VAAPI/NVENC, MediaCodec. `moq-video`'s
@@ -925,7 +935,9 @@ What there is so far, in three layers:
 - `picture::Slot` holds the newest picture of one tile: whoever makes pictures puts
   each in, the window takes the newest when it draws and is woken for it, and one not
   taken in time is dropped. `--pattern` shows a moving pattern as this machine's own
-  picture, until there is a camera. Making a 640 × 360 picture ready for the screen
+  picture, until there is a camera, and `--coded <kbit/s>` shows it also as it would
+  be sent: through the encoder and the decoder, with the rate and the cost of each in
+  the details. Making a 640 × 360 picture ready for the screen
   on the processor takes about half a millisecond, which is fine for a few tiles and
   is what the choice of renderer is to be measured against for many.
 - `history::History` keeps the voices and links as they are and two minutes of the

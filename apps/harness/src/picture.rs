@@ -5,9 +5,12 @@
 //! woken when there is one. Nothing waits on anything: a picture not taken before the
 //! next arrives is dropped, which is right for something to look at.
 //!
-//! [`Feed`] makes a moving pattern on a thread of its own, in place of a camera.
+//! [`Feed`] makes a moving pattern on a thread of its own, in place of a camera; and can
+//! put each picture through the encoder and the decoder as well, to show what someone
+//! at the far end would see and what that costs.
 
 use palaver_media::picture::{Pattern, Picture, Size};
+use palaver_media::video::{Decode, Encode, Settings, SoftwareDecoder, SoftwareEncoder};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -75,6 +78,60 @@ impl Slot {
     }
 }
 
+/// What coding a feed's pictures costs, over the last second of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cost {
+    /// What was made, in bits a second.
+    pub bitrate: u64,
+    /// How long a picture took to encode, and a frame to decode, on average.
+    pub encode: Duration,
+    pub decode: Duration,
+    /// Pictures the encoder let go to hold its rate.
+    pub let_go: u32,
+    /// Why coding stopped, if it did.
+    pub failed: Option<String>,
+}
+
+/// Where a feed says what its coding costs, for whoever shows it.
+#[derive(Debug, Default)]
+pub struct Coding(Mutex<Cost>);
+
+impl Coding {
+    #[must_use]
+    pub fn cost(&self) -> Cost {
+        self.0.lock().map(|cost| cost.clone()).unwrap_or_default()
+    }
+
+    fn set(&self, cost: Cost) {
+        if let Ok(mut held) = self.0.lock() {
+            *held = cost;
+        }
+    }
+}
+
+/// One second's sums, on the way to a [`Cost`].
+#[derive(Default)]
+struct Tally {
+    pictures: u32,
+    bytes: u64,
+    encode: Duration,
+    decode: Duration,
+    let_go: u32,
+}
+
+impl Tally {
+    fn cost(&self) -> Cost {
+        let each = |sum: Duration| sum / self.pictures.max(1);
+        Cost {
+            bitrate: self.bytes.saturating_mul(8),
+            encode: each(self.encode),
+            decode: each(self.decode),
+            let_go: self.let_go,
+            failed: None,
+        }
+    }
+}
+
 /// A moving pattern put into a slot thirty times a second, until dropped.
 pub struct Feed {
     stop: Arc<AtomicBool>,
@@ -93,6 +150,83 @@ impl Feed {
             let mut due = Instant::now();
             while !stopping.load(Ordering::Relaxed) {
                 slot.put(pattern.next_picture());
+                due += every;
+                std::thread::park_timeout(due.saturating_duration_since(Instant::now()));
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Feed {
+    /// As [`Feed::pattern`], and each picture is also encoded and decoded again, as it
+    /// would be for someone at the far end, and what comes back put into `back`. What
+    /// that costs is said in `coding` once a second.
+    #[must_use]
+    pub fn coded(
+        raw: Arc<Slot>,
+        back: Arc<Slot>,
+        coding: Arc<Coding>,
+        settings: Settings,
+        speaker: u32,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            // The codec is made on the thread that uses it.
+            let both = SoftwareEncoder::new(settings)
+                .and_then(|encoder| SoftwareDecoder::new().map(|decoder| (encoder, decoder)));
+            let (mut encoder, mut decoder) = match both {
+                Ok(both) => both,
+                Err(error) => {
+                    return coding.set(Cost {
+                        failed: Some(error.to_string()),
+                        ..Cost::default()
+                    });
+                }
+            };
+            let mut pattern = Pattern::new(settings.size, speaker);
+            let every = Duration::from_secs(1) / settings.per_second.max(1);
+            let mut due = Instant::now();
+            let mut tally = Tally::default();
+            let mut bytes = Vec::new();
+            while !stopping.load(Ordering::Relaxed) {
+                let picture = pattern.next_picture();
+                let began = Instant::now();
+                let kind = encoder.encode(&picture, &mut bytes);
+                tally.encode += began.elapsed();
+                raw.put(picture);
+                tally.pictures += 1;
+                let back_again = match kind {
+                    Ok(Some(_)) => {
+                        tally.bytes += bytes.len() as u64;
+                        let began = Instant::now();
+                        let picture = decoder.decode(&bytes);
+                        tally.decode += began.elapsed();
+                        picture
+                    }
+                    Ok(None) => {
+                        tally.let_go += 1;
+                        Ok(None)
+                    }
+                    Err(error) => Err(error),
+                };
+                match back_again {
+                    Ok(Some(picture)) => back.put(picture),
+                    Ok(None) => {}
+                    Err(error) => {
+                        return coding.set(Cost {
+                            failed: Some(error.to_string()),
+                            ..Cost::default()
+                        });
+                    }
+                }
+                if tally.pictures >= settings.per_second.max(1) {
+                    coding.set(std::mem::take(&mut tally).cost());
+                }
                 due += every;
                 std::thread::park_timeout(due.saturating_duration_since(Instant::now()));
             }
@@ -149,6 +283,56 @@ mod tests {
         slot.put(Picture::black(size()));
         slot.put(Picture::black(size()));
         assert_eq!(woken.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_coded_feed_gives_the_picture_back_and_says_what_it_cost() {
+        let (raw, back) = (Arc::new(Slot::default()), Arc::new(Slot::default()));
+        let coding = Arc::new(Coding::default());
+        let (made, pictures) = std::sync::mpsc::channel();
+        back.on_new(move || {
+            let _ = made.send(());
+        });
+        let settings = Settings {
+            per_second: 100,
+            ..Settings::new(Size::new(64, 36).unwrap_or_else(|| unreachable!()), 200_000)
+        };
+        let feed = Feed::coded(
+            Arc::clone(&raw),
+            Arc::clone(&back),
+            Arc::clone(&coding),
+            settings,
+            1,
+        );
+        // Until a second's worth has come back, and with it the first word of the cost.
+        for _ in 0..100 {
+            assert!(pictures.recv_timeout(Duration::from_secs(10)).is_ok());
+        }
+        drop(feed);
+        let Some((_, came_back)) = back.newer_than(0) else {
+            unreachable!()
+        };
+        assert_eq!(came_back.size(), settings.size);
+        let cost = coding.cost();
+        assert_eq!(cost.failed, None);
+        assert!(cost.bitrate > 0, "{cost:?}");
+        assert!(raw.count() >= back.count());
+    }
+
+    #[test]
+    fn a_coded_feed_that_cannot_start_says_why() {
+        let coding = Arc::new(Coding::default());
+        let odd = Settings::new(Size::new(63, 36).unwrap_or_else(|| unreachable!()), 200_000);
+        let feed = Feed::coded(
+            Arc::new(Slot::default()),
+            Arc::new(Slot::default()),
+            Arc::clone(&coding),
+            odd,
+            1,
+        );
+        // Dropping waits for its thread, which has ended by itself.
+        drop(feed);
+        assert!(coding.cost().failed.is_some());
     }
 
     #[test]
