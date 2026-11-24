@@ -311,6 +311,44 @@ Not pursued: Windows runs timers about 15 ms late unless asked for finer ones (s
 the details on both machines). Nothing on the sound's way is driven by a timer, and the
 jitter buffer takes up what it adds elsewhere. To revisit only if a gauge points at it.
 
+### Routing video apart from audio
+
+To begin with a video track is asked for along the audio tree: the neighbour on the
+tree's path to its publisher. That needs nothing new in the plan, and it is wrong for
+anything but small meetings: it puts every picture on the links that carry every
+voice.
+
+Wanted (2026-11-23): video routed in step with audio and apart from it. Audio gets the
+best path, for delay and for room; video is fitted in around it, to spread the load
+between machines and to use each path for what it can carry. The conductor already
+gathers what this needs (each node's links and their measurements) and the design
+already has the place for the answer (the plan's routing table, section 7: a default
+route for each participant, finer entries where wanted, more than one next hop).
+
+To work out:
+
+- What a route is chosen by: what a link can carry beyond its audio, how many pictures
+  already cross a machine, how many hops.
+- Congestion: what a khef does when a link cannot take what is routed over it (a
+  smaller size, fewer pictures, another path), who decides, and how fast; with rate
+  control in phase 4.
+- Changing a route under a picture being watched, with nothing lost: the new path up
+  before the old is dropped, as is designed for audio.
+
+### Video waiting for a slow link
+
+A group of pictures goes to each subscriber on a stream. Between the khef and each
+stream is a queue with no end to it (`sdk::engine`: one per stream, filled as fast as
+the pictures arrive and emptied as fast as the link takes them). A neighbour that
+takes less than is sent sees its pictures fall further and further behind, and the
+sender's memory grows. Sound is not at risk in the same way: it goes in datagrams,
+which are dropped when they cannot go.
+
+To do, with the forwarding of video: a limit on what may wait for one link; when it is
+passed, or when a newer group begins, the older group is abandoned on that link (the
+session can already abandon a stream part way) and the subscriber picks up at the next
+key frame. And that it happened is a sign of congestion, for whoever routes.
+
 ### Remembering each participant's delay
 
 There is one jitter buffer and one decoder per voice received, kept by the track's alias,
