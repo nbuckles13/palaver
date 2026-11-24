@@ -866,8 +866,9 @@ No libwebrtc. The pipeline is assembled from parts behind our own traits in `med
   if set, every so many pictures; the encoder may let a picture go to hold its rate.
   `SoftwareEncoder` and `SoftwareDecoder` are openh264 through the `openh264` crate,
   which builds it from source and needs no unsafe code of ours. Sizes must be even.
-  Measured on a development machine with the moving pattern, 640 × 360 at thirty a
-  second: under 2 ms to encode and 0.3 ms to decode, without the assembly routines
+  Measured with the moving pattern, 640 × 360 at thirty a second (2026-11-23): on a
+  desktop 1.3 ms to encode, 0.2 ms to decode and 0.5 ms to make ready for the screen;
+  on a handheld 2.8, 0.6 and 1.1 ms. That is without the assembly routines
   (those need `nasm` at build time, which nothing installs yet; to be added where the
   numbers on real pictures call for it).
 - **Video codec**: our own encoder/decoder interface. openh264 (software) is the first backend;

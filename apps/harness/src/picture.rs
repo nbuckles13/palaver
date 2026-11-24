@@ -78,7 +78,8 @@ impl Slot {
     }
 }
 
-/// What coding a feed's pictures costs, over the last second of them.
+/// What coding a feed's pictures costs, over the last stretch of them from one key frame
+/// to the next: a second with a key frame in it costs far more than one without.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Cost {
     /// What was made, in bits a second.
@@ -109,7 +110,7 @@ impl Coding {
     }
 }
 
-/// One second's sums, on the way to a [`Cost`].
+/// The sums of a stretch of pictures, on the way to a [`Cost`].
 #[derive(Default)]
 struct Tally {
     pictures: u32,
@@ -120,10 +121,15 @@ struct Tally {
 }
 
 impl Tally {
-    fn cost(&self) -> Cost {
+    /// What these sums come to, for pictures made `per_second`.
+    fn cost(&self, per_second: u32) -> Cost {
         let each = |sum: Duration| sum / self.pictures.max(1);
         Cost {
-            bitrate: self.bytes.saturating_mul(8),
+            bitrate: self
+                .bytes
+                .saturating_mul(8)
+                .saturating_mul(u64::from(per_second))
+                / u64::from(self.pictures.max(1)),
             encode: each(self.encode),
             decode: each(self.decode),
             let_go: self.let_go,
@@ -192,6 +198,12 @@ impl Feed {
             let every = Duration::from_secs(1) / settings.per_second.max(1);
             let mut due = Instant::now();
             let mut tally = Tally::default();
+            // From one key frame to the next, and a second at the least.
+            let stretch = settings
+                .key_every
+                .unwrap_or(settings.per_second)
+                .max(settings.per_second)
+                .max(1);
             let mut bytes = Vec::new();
             while !stopping.load(Ordering::Relaxed) {
                 let picture = pattern.next_picture();
@@ -224,8 +236,8 @@ impl Feed {
                         });
                     }
                 }
-                if tally.pictures >= settings.per_second.max(1) {
-                    coding.set(std::mem::take(&mut tally).cost());
+                if tally.pictures >= stretch {
+                    coding.set(std::mem::take(&mut tally).cost(settings.per_second));
                 }
                 due += every;
                 std::thread::park_timeout(due.saturating_duration_since(Instant::now()));
@@ -319,15 +331,16 @@ mod tests {
 
     #[test]
     fn a_seconds_sums_become_a_rate_and_what_each_picture_cost() {
+        // Two seconds of pictures at thirty a second.
         let tally = Tally {
-            pictures: 30,
-            bytes: 60_000,
-            encode: Duration::from_millis(60),
-            decode: Duration::from_millis(15),
+            pictures: 60,
+            bytes: 120_000,
+            encode: Duration::from_millis(120),
+            decode: Duration::from_millis(30),
             let_go: 2,
         };
         assert_eq!(
-            tally.cost(),
+            tally.cost(30),
             Cost {
                 bitrate: 480_000,
                 encode: Duration::from_millis(2),
@@ -337,7 +350,7 @@ mod tests {
             }
         );
         // Nothing made is nothing spent, and not a division by nothing.
-        assert_eq!(Tally::default().cost(), Cost::default());
+        assert_eq!(Tally::default().cost(30), Cost::default());
     }
 
     #[test]

@@ -10,13 +10,13 @@
 //! nothing until one comes.
 
 use crate::picture::{Picture, Size};
-use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::encoder::{
     BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode,
     UsageType,
 };
 use openh264::formats::YUVSource;
+use openh264::{OpenH264API, Timestamp};
 
 /// Why a picture could not be coded, or a frame decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +131,9 @@ impl YUVSource for Planes<'_> {
 pub struct SoftwareEncoder {
     inner: Encoder,
     size: Size,
+    per_second: u32,
+    /// How many pictures it has been given: each is told its time by its place.
+    given: u64,
 }
 
 impl SoftwareEncoder {
@@ -161,7 +164,12 @@ impl SoftwareEncoder {
             );
         let inner = Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|error| Error::Codec(error.to_string()))?;
-        Ok(Self { inner, size })
+        Ok(Self {
+            inner,
+            size,
+            per_second: settings.per_second.max(1),
+            given: 0,
+        })
     }
 }
 
@@ -171,9 +179,12 @@ impl Encode for SoftwareEncoder {
         if picture.size() != self.size {
             return Err(Error::Size);
         }
+        // The codec holds its rate by the pictures' times, in milliseconds.
+        let at = self.given.saturating_mul(1000) / u64::from(self.per_second);
+        self.given = self.given.saturating_add(1);
         let coded = self
             .inner
-            .encode(&Planes(picture))
+            .encode_at(&Planes(picture), Timestamp::from_millis(at))
             .map_err(|error| Error::Codec(error.to_string()))?;
         let kind = match coded.frame_type() {
             FrameType::IDR | FrameType::I => Kind::Key,
