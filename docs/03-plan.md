@@ -73,7 +73,9 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
      tile in the window that shows this machine's own picture. Capture is next, behind
      a crate of our own.
   2. Encode and decode in a loop on one machine, behind our own interface, with the
-     pattern as a source for tests.
+     pattern as a source for tests. Done in software (openh264); to be tried on the
+     Windows machines, and on a camera's pictures, which are harder to code than the
+     pattern's.
   3. One video track across a link, at one size: streams in the wire code, subscribe
      by name, keyframe requests.
   4. Tiles for everyone, then simulcast and choosing a size for each tile.

@@ -239,6 +239,27 @@ pub fn picture_line(width: u32, height: u32, cost: Duration) -> String {
     )
 }
 
+/// What the details say of this machine's picture as it would be sent: the rate, and
+/// what coding costs.
+#[must_use]
+pub fn coding_line(bitrate: u64, encode: Duration, decode: Duration, let_go: u32) -> String {
+    let tenths = |span: Duration| {
+        let tenths = span.as_micros() / 100;
+        format!("{}.{}", tenths / 10, tenths % 10)
+    };
+    let line = format!(
+        "as sent: {} kbit/s · {} ms to encode · {} ms to decode",
+        bitrate / 1000,
+        tenths(encode),
+        tenths(decode)
+    );
+    if let_go > 0 {
+        format!("{line} · {let_go} let go in the last second")
+    } else {
+        line
+    }
+}
+
 /// How large a picture is drawn in a tile `tall` high: as wide as keeps its shape.
 #[must_use]
 #[expect(
@@ -695,6 +716,28 @@ mod tests {
         assert_eq!(
             picture_line(1920, 1080, Duration::from_millis(11)),
             "your picture: 1920 × 1080 · 11.0 ms each to make ready for the screen"
+        );
+    }
+
+    #[test]
+    fn a_coding_line_gives_the_rate_and_the_costs() {
+        assert_eq!(
+            coding_line(
+                487_300,
+                Duration::from_micros(3140),
+                Duration::from_micros(870),
+                0
+            ),
+            "as sent: 487 kbit/s · 3.1 ms to encode · 0.8 ms to decode"
+        );
+        assert_eq!(
+            coding_line(
+                90_000,
+                Duration::from_millis(40),
+                Duration::from_millis(2),
+                4
+            ),
+            "as sent: 90 kbit/s · 40.0 ms to encode · 2.0 ms to decode · 4 let go in the last second"
         );
     }
 

@@ -14,7 +14,8 @@
 //! [`synthetic`] makes voices for bots and tests, and can tell whose voice is in a mix.
 //!
 //! [`picture`] is the beginning of the same for video: one frame as it passes between a
-//! camera, a codec and a screen, and moving pictures for bots and tests.
+//! camera, a codec and a screen, and moving pictures for bots and tests. [`video`] turns
+//! pictures into H.264 and back.
 
 pub mod jitter;
 pub mod level;
@@ -24,6 +25,7 @@ pub mod picture;
 pub mod process;
 pub mod resample;
 pub mod synthetic;
+pub mod video;
 pub mod voice;
 
 pub use jitter::JitterBuffer;

@@ -4,14 +4,16 @@
 //! palaver-harness                           the window
 //! palaver-harness window [--name <name>] [--ticket-file <path>]
 //!                        [--floor <frames>] [--margin <frames>] [--lead <ms>]
-//!                        [--noise <strength>] [--pattern]
+//!                        [--noise <strength>] [--pattern] [--coded <kbit/s>]
 //!                                           the window, with the name filled in, and a
 //!                                           file that carries the ticket: written when
 //!                                           a meeting is started, read into the join
 //!                                           field when the window opens
 //!                                           --pattern shows a moving pattern as this
-//!                                           machine's own picture, in place of a camera
-//! palaver-harness shot <file.png> [name [pattern]]
+//!                                           machine's own picture, in place of a camera;
+//!                                           --coded shows it also as it would be sent,
+//!                                           encoded at that rate and decoded again
+//! palaver-harness shot <file.png> [name [pattern|coded]]
 //!                                           a picture of the window, taken by itself:
 //!                                           of the first screen, or with a name, of a
 //!                                           meeting started under it
@@ -307,7 +309,14 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
             path: args.next().ok_or("shot needs a file to write")?,
             name: args.next(),
         });
-        setup.pattern = args.next().as_deref() == Some("pattern");
+        match args.next().as_deref() {
+            Some("pattern") => setup.pattern = true,
+            Some("coded") => {
+                setup.pattern = true;
+                setup.coded = Some(500_000);
+            }
+            _ => {}
+        }
         return Ok(setup);
     }
     while let Some(arg) = args.next() {
@@ -319,6 +328,12 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
             }
             "--ticket-file" => setup.ticket_file = Some(value("a path")?),
             "--pattern" => setup.pattern = true,
+            "--coded" => {
+                let text = value("a rate in kbit/s")?;
+                let kbits: u32 = text.parse().map_err(|_| format!("not a number: {text}"))?;
+                setup.pattern = true;
+                setup.coded = Some(kbits.clamp(30, 20_000).saturating_mul(1000));
+            }
             other => return Err(format!("unknown option: {other}")),
         }
     }
