@@ -468,6 +468,10 @@ a slow one). `MoQ` has the parameter for the limit (a subgroup's delivery timeou
      is a stream of its own: the khef drops it without looking inside, and the picture
      runs at half its rate. (`MoQ` and our wire code already have subgroups; the
      software encoder can make the layers; hardware encoders vary.)
+     To whoever is watching, this must not look like loss on the network: the decoder
+     is given a whole stream at a lower rate and conceals nothing, and nobody asks for
+     a key frame on account of it. It is counted and shown for what it is, a lower
+     rate of pictures (in the details, and on the tile itself if it is bad enough).
   2. Abandon the group on that link, and send nothing more of the track there until
      the link has drained. Then pick up at the next group; if none is coming, ask for
      one, no more often than a set interval.
@@ -486,6 +490,15 @@ a slow one). `MoQ` has the parameter for the limit (a subgroup's delivery timeou
   had to shed and how much. The conductor routes around the link, or sets what the
   link may carry, or caps the size that crosses it. This is the same work as routing
   video apart from audio (plan, backlog).
+
+**Going back up.** Everything above only sends less, and each step needs its way
+back. A subscriber that took a smaller size returns to the larger when the conductor
+gives it another route, or when the link recovers; a khef that dropped a layer or held
+a track resumes it. Knowing that a link could carry more than is being sent on it is
+its own subject: probing, and estimating what a link can carry above what it carries
+now. None of that is designed yet. It comes with the work on bad networks, after
+video runs well on good ones, and with test suites that hold each of these rules to
+what is written here.
 
 **Key frames.** Asked for when someone begins to watch or has lost their place, the
 requests for one track joined into one at each khef and held to no more than one in a
