@@ -444,6 +444,60 @@ otherwise closed once the planned peerings are up.
   no route yet for a subscribe **holds it pending** (bounded) rather than refusing.
 - Entitlements and per-subscriber limits in the plan bound what a client may ask for.
 
+### When a link cannot carry its video
+
+Not built; the shape agreed 2026-11-24, to be built in the order given at the end.
+
+A link between two khefs carries pictures for the neighbour itself and for everyone
+behind it, so what one khef does to a link is felt by people it knows nothing about.
+And the reflex of a video system, asking for a key frame, is the wrong one here: a key
+frame is the largest thing there is to send, and a link that is behind is the last
+place to send one. So the rule is to **shed first and resume when the link has
+drained**, and never to mend a full link by asking for more.
+
+**What is measured.** For each link, how long the oldest bytes of each group have
+waited to be sent (a time, not a count of bytes: it means the same on a fast link and
+a slow one). `MoQ` has the parameter for the limit (a subgroup's delivery timeout).
+
+**Three who can act, each on what only it knows.**
+
+- **The khef at the link, at once** (within a few hundred milliseconds, by itself, and
+  only ever sending less):
+  1. Drop the frames that nothing depends on, if the track has them. With pictures
+     coded in two layers of time, the second layer goes in a subgroup of its own, which
+     is a stream of its own: the khef drops it without looking inside, and the picture
+     runs at half its rate. (`MoQ` and our wire code already have subgroups; the
+     software encoder can make the layers; hardware encoders vary.)
+  2. Abandon the group on that link, and send nothing more of the track there until
+     the link has drained. Then pick up at the next group; if none is coming, ask for
+     one, no more often than a set interval.
+  3. If it keeps happening, stop the track on that link and say so downstream, so that
+     the tile shows why: "paused, the network cannot carry it", which is not the same
+     as a camera turned off.
+
+  Among several tracks on a link, the least wanted goes first. Each subscription
+  carries how much it is wanted (a thumbnail less than whoever is talking, a shared
+  screen most), and a khef passes on the most wanted of those behind it.
+- **The subscriber, in seconds**: told that its track is being shed on the way, it
+  asks for a smaller size in its place. Sizes are separate tracks, so this is an
+  ordinary change of subscription, and it is the subscriber that knows how large the
+  tile is.
+- **The conductor, more slowly and for longer**: each khef's report says where it has
+  had to shed and how much. The conductor routes around the link, or sets what the
+  link may carry, or caps the size that crosses it. This is the same work as routing
+  video apart from audio (plan, backlog).
+
+**Key frames.** Asked for when someone begins to watch or has lost their place, the
+requests for one track joined into one at each khef and held to no more than one in a
+set interval. And one by itself at a long interval as a backstop, so that nothing
+that goes wrong leaves a picture frozen for longer than that.
+
+**In what order.** With the forwarding of video: the limit on waiting, abandoning the
+group, resuming when drained (2 above, without the layers), and counting each time it
+happens. Then, each by itself: how much a subscription is wanted; the two layers of
+time; telling the subscriber and the smaller size; the paused tile; the conductor's
+part.
+
 ## 8. Audio: top-N over a pre-wired overlay
 
 - A client sends one `SUBSCRIBE_TRACKS` for prefix `(m, audio, main)` with a **top-N filter** on

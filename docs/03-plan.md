@@ -344,10 +344,12 @@ takes less than is sent sees its pictures fall further and further behind, and t
 sender's memory grows. Sound is not at risk in the same way: it goes in datagrams,
 which are dropped when they cannot go.
 
-To do, with the forwarding of video: a limit on what may wait for one link; when it is
-passed, or when a newer group begins, the older group is abandoned on that link (the
-session can already abandon a stream part way) and the subscriber picks up at the next
-key frame. And that it happened is a sign of congestion, for whoever routes.
+What is to be done about it is in the design (section 7, "When a link cannot carry its
+video"): the khef at the link sheds at once, the subscriber asks for a smaller size, the
+conductor routes or limits. First, with the forwarding of video: a limit on how long
+anything may wait for one link, the group abandoned on that link when it is passed,
+nothing more of the track sent there until the link has drained, and a count of each
+time. Not to be mended by asking for a key frame, which is the largest thing to send.
 
 ### Remembering each participant's delay
 
