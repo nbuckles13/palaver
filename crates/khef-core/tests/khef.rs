@@ -6,8 +6,8 @@
 )]
 
 use palaver_khef_core::{
-    Action, AudioOut, AudioPlan, Khef, KhefConfig, LinkWatchConfig, Output, Role, StreamId,
-    StreamKind, TopNConfig,
+    Action, AudioOut, AudioPlan, GroupReader, GroupWriter, Khef, KhefConfig, LinkWatchConfig,
+    Output, Role, StreamId, StreamKind, TopNConfig, VideoConfig, VideoFrom, VideoPlan, VideoRoute,
 };
 use palaver_moq_wire::{FullTrackName, PalaverExtensions, Setup};
 use palaver_proto::{MeetingTag, ParticipantId, Source, Timestamp, Track, TrackName};
@@ -61,7 +61,58 @@ fn config() -> KhefConfig {
             _ => None,
         },
         max_control_tracks: 256,
+        video: VideoConfig::default(),
     }
+}
+
+/// The alias of `node`'s camera track in these tests.
+fn cam(node: Id) -> u64 {
+    100 + u64::from(node)
+}
+
+/// The name of `node`'s camera track.
+fn camera(node: Id) -> FullTrackName {
+    TrackName {
+        meeting: meeting(),
+        track: Track::Video {
+            source: Source::Main,
+            participant: participant(node),
+            rendition: b"360p".to_vec(),
+        },
+    }
+    .to_full_name()
+    .unwrap()
+}
+
+/// The neighbour of `from` on the way to `to`, over `edges`.
+fn toward(edges: &[(Id, Id)], from: Id, to: Id) -> Option<Id> {
+    let next = |at: Id| {
+        edges
+            .iter()
+            .filter_map(move |(a, b)| match (*a == at, *b == at) {
+                (true, _) => Some(*b),
+                (_, true) => Some(*a),
+                _ => None,
+            })
+    };
+    // Walk out from `to`: the first time `from` is reached, it is from its next hop.
+    let mut seen = BTreeSet::from([to]);
+    let mut edge = vec![to];
+    while !edge.is_empty() {
+        let mut further = vec![];
+        for at in edge {
+            for beyond in next(at) {
+                if beyond == from {
+                    return Some(at);
+                }
+                if seen.insert(beyond) {
+                    further.push(beyond);
+                }
+            }
+        }
+        edge = further;
+    }
+    None
 }
 
 /// A control object as a node's control logic saw it arrive.
@@ -82,6 +133,54 @@ struct Node {
     dead: Vec<Id>,
     /// Audio played by this node's client: (alias, group).
     played: Vec<(u64, u64)>,
+    /// What the khef said of this node's camera: (alias, wanted).
+    produce: Vec<(u64, bool)>,
+    /// The key frames it asked of the camera.
+    keys: Vec<u64>,
+    /// Frames of video given to this node's client: (alias, group, frame).
+    frames: Vec<(u64, u64, Vec<u8>)>,
+    readers: BTreeMap<(u64, u64), GroupReader>,
+    /// Groups the client was told were given up: (alias, group).
+    resets: Vec<(u64, u64)>,
+}
+
+impl Node {
+    /// Do what the khef said about video.
+    fn video(&mut self, output: Output<Id>) {
+        match output {
+            Output::Produce { alias, wanted } => self.produce.push((alias, wanted)),
+            Output::KeyFrame { alias } => self.keys.push(alias),
+            Output::Video {
+                alias,
+                group,
+                start,
+                bytes,
+                fin,
+            } => {
+                if start {
+                    self.readers.insert((alias, group), GroupReader::new());
+                }
+                let mut whole = vec![];
+                self.readers
+                    .get_mut(&(alias, group))
+                    .unwrap()
+                    .feed(&bytes, &mut whole)
+                    .unwrap();
+                for object in whole {
+                    assert_eq!(object.group, group);
+                    self.frames.push((alias, group, object.payload));
+                }
+                if fin {
+                    self.readers.remove(&(alias, group));
+                }
+            }
+            Output::VideoReset { alias, group } => {
+                self.readers.remove(&(alias, group));
+                self.resets.push((alias, group));
+            }
+            _ => panic!("not about video"),
+        }
+    }
 }
 
 /// Something in flight from one node to another.
@@ -106,6 +205,8 @@ struct Net {
     datagrams: BTreeMap<(Id, Id), Vec<Vec<u8>>>,
     /// Control objects sent on streams, counted per (from, to).
     streams_opened: BTreeMap<(Id, Id), u64>,
+    /// How many frames of each camera's groups have been made: (node, group).
+    filmed: BTreeMap<(Id, u64), usize>,
     now: Timestamp,
 }
 
@@ -121,6 +222,11 @@ impl Net {
                         arrivals: vec![],
                         dead: vec![],
                         played: vec![],
+                        produce: vec![],
+                        keys: vec![],
+                        frames: vec![],
+                        readers: BTreeMap::new(),
+                        resets: vec![],
                     };
                     (*id, node)
                 })
@@ -128,6 +234,7 @@ impl Net {
             stopped: BTreeSet::new(),
             datagrams: BTreeMap::new(),
             streams_opened: BTreeMap::new(),
+            filmed: BTreeMap::new(),
             now: at(0),
         }
     }
@@ -217,6 +324,7 @@ impl Net {
                                 .accept_control(Some(&from), &track, group, &payload, now);
                         }
                         Output::LinkDead { peer } => node.dead.push(peer),
+                        video => node.video(video),
                     }
                 }
             }
@@ -347,6 +455,87 @@ impl Net {
             }
             self.settle();
         }
+    }
+
+    /// Give every node the video plan for these edges, over all nodes' cameras.
+    fn video_tree(&mut self, edges: &[(Id, Id)]) {
+        let ids: Vec<Id> = self.nodes.keys().copied().collect();
+        for id in &ids {
+            self.video_plan_at(*id, edges);
+        }
+        self.settle();
+    }
+
+    /// Give one node the video plan for these edges; the rest are not carried yet.
+    fn video_plan_at(&mut self, node: Id, edges: &[(Id, Id)]) {
+        let ids: Vec<Id> = self.nodes.keys().copied().collect();
+        let tracks = ids
+            .iter()
+            .filter_map(|of| {
+                let from = if *of == node {
+                    VideoFrom::Here
+                } else {
+                    VideoFrom::Link(toward(edges, node, *of)?)
+                };
+                let route = VideoRoute {
+                    name: camera(*of),
+                    from,
+                };
+                Some((cam(*of), route))
+            })
+            .collect();
+        let now = self.now;
+        self.khef(node).set_video_plan(VideoPlan { tracks }, now);
+    }
+
+    /// `node`'s client begins to watch `of`'s camera.
+    fn watch(&mut self, node: Id, of: Id) {
+        let now = self.now;
+        self.khef(node).watch(cam(of), now);
+        self.settle();
+    }
+
+    fn unwatch(&mut self, node: Id, of: Id) {
+        let now = self.now;
+        self.khef(node).unwatch(cam(of), now);
+        self.settle();
+    }
+
+    /// `node`'s camera makes these frames of `group`, the first of them beginning it and,
+    /// if `whole`, the last ending it.
+    fn film(&mut self, node: Id, group: u64, begin: bool, frames: &[&[u8]], whole: bool) {
+        let now = self.now;
+        let mut bytes = vec![];
+        // A writer begun again writes the header again: keep only the objects' bytes.
+        let mut writer = GroupWriter::begin(cam(node), group, &mut bytes);
+        if !begin {
+            bytes.clear();
+            // The objects written before are counted so that these follow them.
+            for _ in 0..self.filmed.get(&(node, group)).copied().unwrap_or(0) {
+                assert!(writer.object(b"", &mut vec![]));
+            }
+        }
+        for (i, frame) in frames.iter().enumerate() {
+            assert!(writer.object(frame, &mut bytes));
+            let fin = whole && i + 1 == frames.len();
+            self.khef(node)
+                .local_video(cam(node), group, begin && i == 0, &bytes, fin, now);
+            bytes.clear();
+        }
+        *self.filmed.entry((node, group)).or_default() += frames.len();
+        self.settle();
+    }
+
+    fn frames(&self, node: Id) -> Vec<(u64, u64, &[u8])> {
+        self.nodes[&node]
+            .frames
+            .iter()
+            .map(|(alias, group, frame)| (*alias, *group, &frame[..]))
+            .collect()
+    }
+
+    fn produce(&self, node: Id) -> &[(u64, bool)] {
+        &self.nodes[&node].produce
     }
 
     fn arrivals(&self, node: Id) -> &[Arrival] {
@@ -833,4 +1022,253 @@ fn a_khef_with_no_links_has_nothing_to_wake_for() {
         khef.latest_control(&Track::Plan, at(0)),
         Some((1, &b"plan"[..]))
     );
+}
+
+// --- Video ---
+
+const LINE: &[(Id, Id)] = &[(1, 2), (2, 3)];
+
+/// Nodes 1, 2, 3 in a line, each with the video plan for it.
+fn video_line() -> Net {
+    let mut net = Net::new(&[1, 2, 3]);
+    net.link(1, 2);
+    net.link(2, 3);
+    net.video_tree(LINE);
+    net
+}
+
+/// Node 2 in the middle of 1, 3 and 4.
+fn star() -> Net {
+    let mut net = Net::new(&[1, 2, 3, 4]);
+    net.link(1, 2);
+    net.link(2, 3);
+    net.link(2, 4);
+    net.video_tree(&[(1, 2), (2, 3), (2, 4)]);
+    net
+}
+
+#[test]
+fn a_camera_nobody_watches_is_not_made_and_goes_nowhere() {
+    let mut net = video_line();
+    let before = net.streams_opened.clone();
+    assert_eq!(net.produce(1), []);
+    net.film(1, 0, true, &[b"key", b"delta"], true);
+    assert_eq!(net.streams_opened, before);
+    assert_eq!(net.frames(2), []);
+}
+
+#[test]
+fn a_watched_camera_is_asked_for_along_the_line_and_its_pictures_come_back() {
+    let mut net = video_line();
+    net.watch(3, 1);
+    assert_eq!(net.produce(1), [(cam(1), true)]);
+    assert_eq!(net.produce(2), [], "only the node whose camera it is");
+    net.film(1, 0, true, &[b"key", b"delta one"], false);
+    // A group is passed on as it comes, not when it is whole.
+    assert_eq!(
+        net.frames(3),
+        [(cam(1), 0, &b"key"[..]), (cam(1), 0, &b"delta one"[..])]
+    );
+    net.film(1, 0, false, &[b"delta two"], true);
+    net.film(1, 1, true, &[b"key again"], true);
+    let got: Vec<&[u8]> = net.frames(3).iter().map(|(_, _, frame)| *frame).collect();
+    assert_eq!(got, [&b"key"[..], b"delta one", b"delta two", b"key again"]);
+    assert_eq!(
+        net.frames(2),
+        [],
+        "the khef in the middle only passes it on"
+    );
+    assert_eq!(net.frames(1), [], "nobody is shown their own camera");
+}
+
+#[test]
+fn two_watchers_share_one_request_and_the_camera_stops_when_the_last_has_gone() {
+    let mut net = star();
+    net.watch(3, 1);
+    let asked = net.streams_opened[&(2, 1)];
+    net.watch(4, 1);
+    assert_eq!(
+        net.streams_opened[&(2, 1)],
+        asked,
+        "node 2 asks node 1 once"
+    );
+    assert_eq!(net.produce(1), [(cam(1), true)]);
+    net.film(1, 0, true, &[b"key"], true);
+    assert_eq!(net.frames(3), [(cam(1), 0, &b"key"[..])]);
+    net.unwatch(3, 1);
+    assert_eq!(net.produce(1), [(cam(1), true)]);
+    net.film(1, 1, true, &[b"key"], true);
+    assert_eq!(net.frames(3).len(), 1, "no more for who left");
+    assert_eq!(net.frames(4).len(), 2, "all of it for who stays");
+    net.unwatch(4, 1);
+    assert_eq!(net.produce(1), [(cam(1), true), (cam(1), false)]);
+    let before = net.streams_opened.clone();
+    net.film(1, 2, true, &[b"key"], true);
+    assert_eq!(net.streams_opened, before);
+}
+
+#[test]
+fn whoever_begins_to_watch_part_way_waits_for_a_key_frame_asked_for_no_more_than_once() {
+    let mut net = star();
+    net.watch(3, 1);
+    net.film(1, 0, true, &[b"key"], false);
+    net.run(100);
+    net.watch(4, 1);
+    net.film(1, 0, false, &[b"delta"], false);
+    assert_eq!(net.frames(3).len(), 2);
+    assert_eq!(net.frames(4), [], "a group cannot be joined part way");
+    assert_eq!(net.nodes[&1].keys, [], "one was asked for a moment ago");
+    // A third, a moment later, is joined into the same request.
+    net.unwatch(3, 1);
+    net.watch(3, 1);
+    net.run(800);
+    assert_eq!(net.nodes[&1].keys, []);
+    net.run(200);
+    assert_eq!(net.nodes[&1].keys, [cam(1)]);
+    net.film(1, 1, true, &[b"key again"], true);
+    assert_eq!(net.frames(4), [(cam(1), 1, &b"key again"[..])]);
+    net.run(2000);
+    assert_eq!(
+        net.nodes[&1].keys,
+        [cam(1)],
+        "and it is not asked for again"
+    );
+}
+
+#[test]
+fn a_watcher_that_lost_its_place_asks_for_a_key_frame_through_every_khef() {
+    let mut net = video_line();
+    net.watch(3, 1);
+    net.run(1100);
+    let now = net.now;
+    net.khef(3).ask_key_frame(cam(1), now);
+    net.settle();
+    assert_eq!(net.nodes[&1].keys, [cam(1)]);
+    // Asked again at once, it waits its time, at the first khef that hears it.
+    net.khef(3).ask_key_frame(cam(1), now);
+    net.settle();
+    assert_eq!(net.nodes[&1].keys, [cam(1)]);
+    net.run(1100);
+    assert_eq!(net.nodes[&1].keys, [cam(1), cam(1)]);
+    // Nobody can ask for a key frame of what they do not watch.
+    let now = net.now;
+    net.khef(2).ask_key_frame(cam(1), now);
+    net.settle();
+    assert_eq!(net.nodes[&1].keys.len(), 2);
+}
+
+#[test]
+fn a_group_given_up_part_way_is_given_up_all_the_way_down() {
+    let mut net = video_line();
+    net.watch(3, 1);
+    net.film(1, 0, true, &[b"key"], false);
+    let now = net.now;
+    net.khef(1).local_video_reset(cam(1), 0, now);
+    net.settle();
+    assert_eq!(net.nodes[&3].resets, [(cam(1), 0)]);
+    // What is made of it afterwards goes nowhere, and the next group is whole.
+    net.film(1, 0, false, &[b"late"], true);
+    net.film(1, 1, true, &[b"key again"], true);
+    let got: Vec<&[u8]> = net.frames(3).iter().map(|(_, _, frame)| *frame).collect();
+    assert_eq!(got, [&b"key"[..], b"key again"]);
+}
+
+#[test]
+fn when_the_plan_changes_the_way_the_pictures_come_the_new_way() {
+    // A square: 4 can be reached from 1 through 2 or through 3.
+    let mut net = Net::new(&[1, 2, 3, 4]);
+    for (a, b) in [(1, 2), (2, 4), (1, 3), (3, 4)] {
+        net.link(a, b);
+    }
+    net.video_tree(&[(1, 2), (2, 4), (1, 3)]);
+    net.watch(4, 1);
+    net.film(1, 0, true, &[b"by two"], true);
+    assert_eq!(net.frames(4).len(), 1);
+    let by_two = net.streams_opened[&(2, 4)];
+    net.video_tree(&[(1, 3), (3, 4), (1, 2)]);
+    assert_eq!(net.produce(1).last(), Some(&(cam(1), true)));
+    net.film(1, 1, true, &[b"by three"], true);
+    assert_eq!(net.frames(4).last(), Some(&(cam(1), 1, &b"by three"[..])));
+    assert_eq!(
+        net.streams_opened[&(2, 4)],
+        by_two,
+        "nothing more through 2"
+    );
+}
+
+#[test]
+fn a_neighbour_that_has_not_had_the_plan_is_asked_again() {
+    let mut net = Net::new(&[1, 2]);
+    net.link(1, 2);
+    net.video_plan_at(2, &[(1, 2)]);
+    net.watch(2, 1);
+    assert_eq!(net.produce(1), [], "node 1 knows of no such track");
+    net.video_plan_at(1, &[(1, 2)]);
+    net.settle();
+    assert_eq!(net.produce(1), []);
+    assert!(net.khef(2).next_wake().is_some());
+    net.run(500);
+    assert_eq!(net.produce(1), [(cam(1), true)]);
+    net.film(1, 0, true, &[b"key"], true);
+    assert_eq!(net.frames(2), [(cam(1), 0, &b"key"[..])]);
+}
+
+#[test]
+fn a_track_that_leaves_the_plan_ends_and_one_that_returns_is_watched_again() {
+    let mut net = video_line();
+    net.watch(3, 1);
+    net.film(1, 0, true, &[b"key"], false);
+    let ids: Vec<Id> = net.nodes.keys().copied().collect();
+    for id in &ids {
+        let now = net.now;
+        net.khef(*id).set_video_plan(VideoPlan::default(), now);
+    }
+    net.settle();
+    assert_eq!(net.produce(1), [(cam(1), true), (cam(1), false)]);
+    assert_eq!(net.nodes[&3].resets, [(cam(1), 0)]);
+    // The client still wants it: when the plan has it again, it comes.
+    net.video_tree(LINE);
+    net.run(500);
+    assert_eq!(net.produce(1).last(), Some(&(cam(1), true)));
+    net.film(1, 5, true, &[b"back"], true);
+    assert_eq!(net.frames(3).last(), Some(&(cam(1), 5, &b"back"[..])));
+}
+
+#[test]
+fn when_the_link_to_the_only_watcher_drops_the_camera_stops() {
+    let mut net = video_line();
+    net.watch(3, 1);
+    net.film(1, 0, true, &[b"key"], false);
+    let now = net.now;
+    net.khef(2).link_down(&3, now);
+    net.khef(3).link_down(&2, now);
+    net.settle();
+    assert_eq!(net.produce(1), [(cam(1), true), (cam(1), false)]);
+    assert_eq!(net.nodes[&3].resets, [(cam(1), 0)]);
+    // The link returns, and with it the watching.
+    net.link(2, 3);
+    assert_eq!(net.produce(1).last(), Some(&(cam(1), true)));
+    net.film(1, 1, true, &[b"key"], true);
+    assert_eq!(net.frames(3).last(), Some(&(cam(1), 1, &b"key"[..])));
+}
+
+#[test]
+fn a_track_is_not_sent_back_the_way_it_comes() {
+    let mut net = Net::new(&[1, 2]);
+    net.link(1, 2);
+    net.video_tree(&[(1, 2)]);
+    // Node 1 believes its own camera comes from node 2: a plan gone wrong.
+    let tracks = BTreeMap::from([(
+        cam(1),
+        VideoRoute {
+            name: camera(1),
+            from: VideoFrom::Link(2),
+        },
+    )]);
+    let now = net.now;
+    net.khef(1).set_video_plan(VideoPlan { tracks }, now);
+    net.watch(2, 1);
+    net.run(2000);
+    assert_eq!(net.produce(1), []);
+    assert_eq!(net.frames(2), []);
 }

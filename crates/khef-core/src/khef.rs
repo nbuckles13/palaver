@@ -1,6 +1,6 @@
 //! The khef: the `MoQ` relay inside every node.
 //!
-//! One [`Khef`] holds a [`Session`] and a [`LinkWatch`] for each neighbour and does three
+//! One [`Khef`] holds a [`Session`] and a [`LinkWatch`] for each neighbour and does four
 //! things across them:
 //!
 //! - **Control tracks flood.** A report or plan that the node's control logic has accepted is
@@ -14,11 +14,17 @@
 //!   Where it is selected it goes out **exactly as it arrived**: every khef uses the alias
 //!   the plan assigns, so there is nothing to rewrite, and the khef only says which links to
 //!   send the caller's buffer to.
+//! - **Video goes where it is watched.** A track is asked for by name, hop by hop along the
+//!   way the plan gives, and its groups are passed back as they arrive (see [`video`]).
 //! - **Links are watched.** A link that falls silent is reported dead; a link with nothing
 //!   to carry is given a filler.
 //!
 //! Sans-IO: the caller owns the connections, feeds in what arrives with the time, and
 //! carries out what comes back. `N` names a neighbour.
+
+mod video;
+
+pub use video::{VideoConfig, VideoFrom, VideoPlan, VideoRoute};
 
 use crate::session::NOT_SUPPORTED;
 use crate::{
@@ -49,6 +55,7 @@ pub struct KhefConfig {
     pub control_lifetime: fn(&Track) -> Option<Duration>,
     /// How many control tracks are remembered.
     pub max_control_tracks: usize,
+    pub video: VideoConfig,
 }
 
 /// What the plan says about audio, as far as this khef is concerned.
@@ -92,6 +99,24 @@ pub enum Output<N> {
     },
     /// The link to `peer` has fallen silent and has been dropped. Close the connection.
     LinkDead { peer: N },
+    /// Somebody watches this node's own video track `alias` (`wanted`), or nobody does any
+    /// more. Make it only while it is wanted, beginning with a key frame, and give it to
+    /// [`Khef::local_video`].
+    Produce { alias: u64, wanted: bool },
+    /// Begin a new group, with a key frame, on this node's own video track `alias`.
+    KeyFrame { alias: u64 },
+    /// Bytes of one group of a video track the client watches, in order. The first
+    /// (`start`) begin with the stream's header: read them with [`crate::GroupReader`].
+    /// `fin` when the group is whole.
+    Video {
+        alias: u64,
+        group: u64,
+        start: bool,
+        bytes: Vec<u8>,
+        fin: bool,
+    },
+    /// A group the client was being given was given up part way.
+    VideoReset { alias: u64, group: u64 },
 }
 
 /// Where an audio packet goes.
@@ -136,6 +161,8 @@ pub struct Khef<N> {
     audio: AudioPlan<N>,
     client: TopN<u64>,
     dedupe: Dedupe<u64>,
+    video: VideoPlan<N>,
+    watching: BTreeMap<u64, video::Watched<N>>,
     outputs: VecDeque<Output<N>>,
 }
 
@@ -154,6 +181,8 @@ impl<N: Ord + Clone> Khef<N> {
             audio: AudioPlan::default(),
             client: TopN::new(TopNConfig::default()),
             dedupe: Dedupe::new(AUDIO_DEDUPE_WINDOW),
+            video: VideoPlan::default(),
+            watching: BTreeMap::new(),
             outputs: VecDeque::new(),
         }
     }
@@ -206,12 +235,14 @@ impl<N: Ord + Clone> Khef<N> {
         self.wire_audio(&peer, &mut link);
         self.links.insert(peer.clone(), link);
         self.pump(&peer, now);
+        self.video_link_up(now);
     }
 
     /// The connection to `peer` is gone.
-    pub fn link_down(&mut self, peer: &N) {
+    pub fn link_down(&mut self, peer: &N, now: Timestamp) {
         if self.links.remove(peer).is_some() {
             self.flood.disconnect(peer);
+            self.video_link_down(peer, now);
         }
     }
 
@@ -253,7 +284,7 @@ impl<N: Ord + Clone> Khef<N> {
             .map(|(peer, _)| peer.clone())
             .collect();
         for peer in dead {
-            self.link_down(&peer);
+            self.link_down(&peer, now);
             self.outputs.push_back(Output::LinkDead { peer });
         }
         for (peer, link) in &mut self.links {
@@ -267,12 +298,17 @@ impl<N: Ord + Clone> Khef<N> {
                 });
             }
         }
+        self.video_poll(now);
     }
 
     /// When to call [`Khef::poll`] next if nothing else happens. `None` with no links.
     #[must_use]
     pub fn next_wake(&self) -> Option<Timestamp> {
-        self.links.values().map(|link| link.watch.next_wake()).min()
+        self.links
+            .values()
+            .map(|link| link.watch.next_wake())
+            .chain(self.video_wake())
+            .min()
     }
 
     // --- Control tracks ---
@@ -609,21 +645,16 @@ impl<N: Ord + Clone> Khef<N> {
                     link.audio_request = None;
                 }
             }
-            // Single tracks by name, which is how video travels, are not served yet.
-            Event::Wanted { request, .. } => {
-                link.session
-                    .refuse(request, NOT_SUPPORTED, "single tracks are not served yet");
-            }
-            Event::Ready { .. }
-            | Event::TracksAccepted { .. }
-            | Event::TrackAccepted { .. }
+            // Single tracks by name: how video travels.
+            event @ (Event::Wanted { .. }
             | Event::Unwanted { .. }
             | Event::GroupWanted { .. }
             | Event::Subscribed { .. }
             | Event::SubscribeRefused { .. }
             | Event::SubscriptionEnded { .. }
             | Event::Group { .. }
-            | Event::GroupReset { .. } => {}
+            | Event::GroupReset { .. }) => self.video_event(peer, event, now),
+            Event::Ready { .. } | Event::TracksAccepted { .. } | Event::TrackAccepted { .. } => {}
         }
     }
 }

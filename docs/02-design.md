@@ -505,11 +505,33 @@ requests for one track joined into one at each khef and held to no more than one
 set interval. And one by itself at a long interval as a backstop, so that nothing
 that goes wrong leaves a picture frozen for longer than that.
 
-**In what order.** With the forwarding of video: the limit on waiting, abandoning the
-group, resuming when drained (2 above, without the layers), and counting each time it
-happens. Then, each by itself: how much a subscription is wanted; the two layers of
-time; telling the subscriber and the smaller size; the paused tile; the conductor's
-part.
+**In what order.** First video that runs well on a good network, with none of this
+(decided 2026-11-25). Then, with test suites for each: the limit on waiting, abandoning
+the group, resuming when drained (2 above, without the layers), and counting each time
+it happens; how much a subscription is wanted; the two layers of time; telling the
+subscriber and the smaller size; the paused tile; the conductor's part; going back up.
+
+### Video through the khef, as built
+
+- **The plan gives each khef, for every video track, where it comes from**: this node's
+  own camera, or the neighbour on the way to it (to begin with, along the audio tree).
+- **Asked for hop by hop.** A khef that wants a track, for its own client or for a
+  neighbour that asked, sends one `SUBSCRIBE` to that neighbour, however many want it.
+  When the last has gone it gives the subscription up. The node with the camera is told
+  when the first watcher arrives and when the last has left, and makes pictures only
+  between the two.
+- **Groups are passed on as they arrive**, a stream per group, the bytes unchanged.
+  A group cannot be joined part way: whoever begins to watch gets the next group.
+- **Key frames.** A new subscription asks for a new group. A watcher that joins a track
+  already flowing, or loses its place, asks for one too; each khef makes at most one
+  such request per track in a second, and those that come sooner wait and are made as
+  one.
+- **When the way changes** the khef gives up its subscription and makes another by the
+  new way; groups part way through are given up all the way down. A neighbour that
+  refuses (it may not have the plan yet) is asked again after half a second. A track
+  is never sent back to the neighbour it comes from.
+- **Not yet**: keeping the group in hand for whoever joins part way; the new way taken
+  up before the old is dropped; anything for a link that cannot keep up.
 
 ## 8. Audio: top-N over a pre-wired overlay
 
