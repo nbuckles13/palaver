@@ -346,10 +346,13 @@ which are dropped when they cannot go.
 
 What is to be done about it is in the design (section 7, "When a link cannot carry its
 video"): the khef at the link sheds at once, the subscriber asks for a smaller size, the
-conductor routes or limits. First, with the forwarding of video: a limit on how long
+conductor routes or limits. It comes after video runs well on a good network (decided
+2026-11-25), and with test suites for each rule. First of it: a limit on how long
 anything may wait for one link, the group abandoned on that link when it is passed,
 nothing more of the track sent there until the link has drained, and a count of each
 time. Not to be mended by asking for a key frame, which is the largest thing to send.
+Also to be designed then: going back up when a link recovers or a new way is given,
+which needs probing and an estimate of what a link can carry above what it carries.
 
 ### Remembering each participant's delay
 

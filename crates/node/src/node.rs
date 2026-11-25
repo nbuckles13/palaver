@@ -3,7 +3,7 @@ use palaver_control::{
 };
 use palaver_khef_core::{
     Action, AudioOut, AudioPlan, Khef, KhefConfig, LinkWatchConfig, Output as KhefOutput, Role,
-    StreamId, StreamKind, TopNConfig,
+    StreamId, StreamKind, TopNConfig, VideoConfig,
 };
 use palaver_moq_wire::Setup;
 use palaver_proto::{
@@ -118,6 +118,7 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
             link_watch: config.link_watch,
             control_lifetime,
             max_control_tracks: MAX_CONTROL_TRACKS,
+            video: VideoConfig::default(),
         });
         let mut node = Self {
             control,
@@ -262,7 +263,7 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         if self.links.remove(peer).is_none() {
             return;
         }
-        self.khef.link_down(peer);
+        self.khef.link_down(peer, now);
         self.refresh_view();
         // If the plan still names the peer, try to get it back.
         self.apply_plan(now);
@@ -430,6 +431,12 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
                     self.apply_plan(now);
                 }
             }
+            // Video does not reach the node's client yet: nothing is watched, so the khef
+            // has none of these to say.
+            KhefOutput::Produce { .. }
+            | KhefOutput::KeyFrame { .. }
+            | KhefOutput::Video { .. }
+            | KhefOutput::VideoReset { .. } => {}
             KhefOutput::LinkDead { peer } => {
                 self.links.remove(&peer);
                 self.outputs.push_back(Output::Hangup { peer });
@@ -595,7 +602,7 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         if !to_close.is_empty() {
             for peer in to_close {
                 self.links.remove(&peer);
-                self.khef.link_down(&peer);
+                self.khef.link_down(&peer, now);
                 self.outputs.push_back(Output::Hangup { peer });
             }
             self.refresh_view();

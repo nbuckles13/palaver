@@ -18,7 +18,9 @@ pub mod top_n;
 pub use dedupe::Dedupe;
 pub use flood::{Cached, Flood, Offer};
 pub use group::{GroupError, GroupObject, GroupReader, GroupWriter};
-pub use khef::{AudioOut, AudioPlan, Khef, KhefConfig, Output};
+pub use khef::{
+    AudioOut, AudioPlan, Khef, KhefConfig, Output, VideoConfig, VideoFrom, VideoPlan, VideoRoute,
+};
 pub use link_watch::{LinkWatch, LinkWatchConfig};
 pub use session::{Action, CloseCode, Event, Role, Session, StreamId, StreamKind};
 pub use top_n::{TopN, TopNConfig};
