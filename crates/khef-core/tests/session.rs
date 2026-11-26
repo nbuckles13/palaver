@@ -659,14 +659,14 @@ fn a_closed_session_does_nothing_more() {
 fn watching() -> (End, End, StreamId, StreamId, u64) {
     let (mut a, mut b) = pair();
     let wanted = track(&["m", "video", "p12"], "360p");
-    let request = a.session.subscribe(wanted.clone(), true).unwrap();
+    let request = a.session.subscribe(wanted.clone(), Some(0)).unwrap();
     run(&mut a, &mut b);
     let events = b.take_events();
     let [
         Event::Wanted {
             request: at_b,
             track: asked,
-            new_group: true,
+            new_group: Some(0),
         },
     ] = &events[..]
     else {
@@ -712,11 +712,11 @@ fn one_track_is_asked_for_by_name_and_answered_with_its_alias() {
     let (mut c, mut d) = pair();
     let first = c
         .session
-        .subscribe(track(&["m", "video", "p1"], "360p"), false)
+        .subscribe(track(&["m", "video", "p1"], "360p"), None)
         .unwrap();
     let second = c
         .session
-        .subscribe(track(&["m", "video", "p2"], "360p"), false)
+        .subscribe(track(&["m", "video", "p2"], "360p"), None)
         .unwrap();
     run(&mut c, &mut d);
     let asked: Vec<StreamId> = d
@@ -725,7 +725,7 @@ fn one_track_is_asked_for_by_name_and_answered_with_its_alias() {
         .map(|event| match event {
             Event::Wanted {
                 request,
-                new_group: false,
+                new_group: None,
                 ..
             } => *request,
             other => panic!("{other:?}"),
@@ -806,7 +806,7 @@ fn a_group_that_overtakes_the_answer_to_the_subscription_waits_for_it() {
     let (mut a, mut b) = pair();
     let request = a
         .session
-        .subscribe(track(&["m", "video", "p12"], "360p"), false)
+        .subscribe(track(&["m", "video", "p12"], "360p"), None)
         .unwrap();
     let to_b = a.flush();
     for wire in to_b {
@@ -834,9 +834,15 @@ fn a_group_that_overtakes_the_answer_to_the_subscription_waits_for_it() {
 #[test]
 fn a_new_group_can_be_asked_for_on_a_subscription() {
     let (mut a, mut b, request, at_b, _) = watching();
-    a.session.ask_for_group(request);
+    a.session.ask_for_group(request, 8);
     run(&mut a, &mut b);
-    assert_eq!(b.take_events(), [Event::GroupWanted { request: at_b }]);
+    assert_eq!(
+        b.take_events(),
+        [Event::GroupWanted {
+            request: at_b,
+            group: 8
+        }]
+    );
     // The answer changes nothing for the one who asked.
     assert_eq!(a.take_events(), []);
     assert_eq!((a.closed, b.closed), (None, None));
@@ -901,7 +907,7 @@ fn the_publisher_can_end_a_subscription() {
     // The alias is free again for another track.
     let again = a
         .session
-        .subscribe(track(&["m", "video", "p13"], "360p"), false)
+        .subscribe(track(&["m", "video", "p13"], "360p"), None)
         .unwrap();
     run(&mut a, &mut b);
     let events = b.take_events();
@@ -925,7 +931,7 @@ fn an_alias_given_for_a_subscription_must_be_free() {
     // The peer answers a second subscription with the alias it already gave.
     let second = a
         .session
-        .subscribe(track(&["m", "video", "p13"], "360p"), false)
+        .subscribe(track(&["m", "video", "p13"], "360p"), None)
         .unwrap();
     a.flush();
     let ok = Message::SubscribeOk(SubscribeOk {

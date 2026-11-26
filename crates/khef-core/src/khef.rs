@@ -103,7 +103,9 @@ pub enum Output<N> {
     /// more. Make it only while it is wanted, beginning with a key frame, and give it to
     /// [`Khef::local_video`].
     Produce { alias: u64, wanted: bool },
-    /// Begin a new group, with a key frame, on this node's own video track `alias`.
+    /// Begin a new group, with a key frame, on this node's own video track `alias`, as
+    /// soon as the encoder allows: how often it makes key frames is its own to limit. The
+    /// khef asks once for each new group that is needed, and not again until it has begun.
     KeyFrame { alias: u64 },
     /// Bytes of one group of a video track the client watches, in order. The first
     /// (`start`) begin with the stream's header: read them with [`crate::GroupReader`].

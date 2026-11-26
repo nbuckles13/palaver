@@ -501,8 +501,8 @@ video runs well on good ones, and with test suites that hold each of these rules
 what is written here.
 
 **Key frames.** Asked for when someone begins to watch or has lost their place, the
-requests for one track joined into one at each khef and held to no more than one in a
-set interval. And one by itself at a long interval as a backstop, so that nothing
+requests for the same group joined into one at each khef (below), and the encoder
+free to hold them to so many a second. And one by itself at a long interval as a backstop, so that nothing
 that goes wrong leaves a picture frozen for longer than that.
 
 **In what order.** First video that runs well on a good network, with none of this
@@ -522,10 +522,14 @@ subscriber and the smaller size; the paused tile; the conductor's part; going ba
   between the two.
 - **Groups are passed on as they arrive**, a stream per group, the bytes unchanged.
   A group cannot be joined part way: whoever begins to watch gets the next group.
-- **Key frames.** A new subscription asks for a new group. A watcher that joins a track
-  already flowing, or loses its place, asks for one too; each khef makes at most one
-  such request per track in a second, and those that come sooner wait and are made as
-  one.
+- **Key frames**, as the draft has it (`NEW_GROUP_REQUEST`, section 10.2.19 of draft
+  20). A request names the group that must answer it: the largest group the asker
+  knows of, plus one (zero if it knows of none). A khef passes a request on only if it
+  has not seen that group begin and has not already asked for it, so any number of
+  requests for the same key frame become one, with no clock in the khef. A new
+  subscription asks for a new group; so does a watcher that joins a track already
+  flowing or loses its place. How often key frames are made is the encoder's alone to
+  limit.
 - **When the way changes** the khef gives up its subscription and makes another by the
   new way; groups part way through are given up all the way down. A neighbour that
   refuses (it may not have the plan yet) is asked again after half a second. A track

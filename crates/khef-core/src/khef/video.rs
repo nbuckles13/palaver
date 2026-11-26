@@ -9,6 +9,13 @@
 //!
 //! Nothing is sent, or even made, that nobody watches: the node with the camera is told
 //! when the first watcher arrives and when the last has gone.
+//!
+//! **Key frames** are asked for as the draft has it (`NEW_GROUP_REQUEST`, section
+//! 10.2.19): a request names the group it must be answered by, which is the largest
+//! group the asker knows of plus one. A khef that has already seen that group, or has
+//! already asked for it, has nothing to pass on, so any number of requests for the same
+//! key frame become one, and nobody waits on a clock. How often key frames may be made
+//! is the encoder's business alone.
 
 use super::{Khef, Output};
 use crate::session::NOT_SUPPORTED;
@@ -21,9 +28,6 @@ use std::time::Duration;
 /// How the khef paces what it asks of others for video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoConfig {
-    /// The least time between two requests for a key frame on one track. Requests that
-    /// come sooner are joined into one, made when the time is up.
-    pub key_frame_gap: Duration,
     /// How long after a neighbour refuses or ends a track before it is asked again. (It
     /// may only not have had the plan yet.)
     pub retry_after: Duration,
@@ -32,7 +36,6 @@ pub struct VideoConfig {
 impl Default for VideoConfig {
     fn default() -> Self {
         Self {
-            key_frame_gap: Duration::from_secs(1),
             retry_after: Duration::from_millis(500),
         }
     }
@@ -96,10 +99,11 @@ pub(super) struct Watched<N> {
     /// For a track of this node's own: the client has been told to make it.
     producing: bool,
     open: BTreeMap<Origin, Open<N>>,
-    /// When a key frame was last asked for, and whether another request is waiting for
-    /// [`VideoConfig::key_frame_gap`] to pass.
-    asked: Option<Timestamp>,
-    owed: bool,
+    /// The largest group of the track seen to begin.
+    largest: Option<u64>,
+    /// The group we have asked for and not yet seen: a request for that group or an
+    /// earlier one has nothing to add.
+    outstanding: Option<u64>,
     /// When to ask the neighbour again, after it said no.
     retry: Option<Timestamp>,
 }
@@ -112,10 +116,18 @@ impl<N> Default for Watched<N> {
             upstream: None,
             producing: false,
             open: BTreeMap::new(),
-            asked: None,
-            owed: false,
+            largest: None,
+            outstanding: None,
             retry: None,
         }
+    }
+}
+
+impl<N> Watched<N> {
+    /// The group that would be new to someone who has none of those begun so far: what a
+    /// request for a key frame names. Zero if no group has been seen.
+    fn next_group(&self) -> u64 {
+        self.largest.map_or(0, |largest| largest.saturating_add(1))
     }
 }
 
@@ -162,10 +174,12 @@ impl<N: Ord + Clone> Khef<N> {
     }
 
     /// The node's own client has lost its place in a track it watches, and needs a key
-    /// frame to go on.
+    /// frame to go on: a group after any that has begun.
     pub fn ask_key_frame(&mut self, alias: u64, now: Timestamp) {
-        if self.watching.get(&alias).is_some_and(|w| w.client) {
-            self.key(alias, now);
+        if let Some(watched) = self.watching.get(&alias)
+            && watched.client
+        {
+            self.key(alias, watched.next_group(), now);
         }
     }
 
@@ -201,17 +215,9 @@ impl<N: Ord + Clone> Khef<N> {
 
     /// When the khef next has something to do for video, if it does.
     pub(super) fn video_wake(&self) -> Option<Timestamp> {
-        let gap = self.config.video.key_frame_gap;
         self.watching
             .values()
-            .flat_map(|watched| {
-                let owed = watched
-                    .asked
-                    .filter(|_| watched.owed)
-                    .map(|asked| asked.saturating_add(gap));
-                [owed, watched.retry]
-            })
-            .flatten()
+            .filter_map(|watched| watched.retry)
             .min()
     }
 
@@ -225,8 +231,6 @@ impl<N: Ord + Clone> Khef<N> {
             if watched.retry.is_some_and(|at| at <= now) {
                 watched.retry = None;
                 self.feed(alias, true, now);
-            } else if watched.owed {
-                self.key(alias, now);
             }
         }
     }
@@ -282,9 +286,9 @@ impl<N: Ord + Clone> Khef<N> {
                     self.starve(alias, now);
                 }
             }
-            Event::GroupWanted { request } => {
+            Event::GroupWanted { request, group } => {
                 if let Some(alias) = self.asked_by(peer, request) {
-                    self.key(alias, now);
+                    self.key(alias, group, now);
                 }
             }
             Event::Subscribed { request, alias } => {
@@ -348,7 +352,7 @@ impl<N: Ord + Clone> Khef<N> {
         peer: &N,
         request: StreamId,
         track: &FullTrackName,
-        new_group: bool,
+        new_group: Option<u64>,
         now: Timestamp,
     ) {
         let found = self
@@ -382,7 +386,9 @@ impl<N: Ord + Clone> Khef<N> {
             .or_default()
             .links
             .insert(peer.clone(), request);
-        self.feed(alias, new_group, now);
+        // Whatever group the neighbour named, it is new here and has none of the track:
+        // what it needs is a group after any that has begun.
+        self.feed(alias, new_group.is_some(), now);
     }
 
     /// The track `peer` asked for with `request`.
@@ -422,8 +428,8 @@ impl<N: Ord + Clone> Khef<N> {
         match &route.from {
             VideoFrom::Here if !watched.producing => {
                 watched.producing = true;
-                watched.asked = Some(now);
-                watched.owed = false;
+                // What begins, begins with a key frame.
+                watched.outstanding = Some(0);
                 self.outputs.push_back(Output::Produce {
                     alias,
                     wanted: true,
@@ -435,41 +441,40 @@ impl<N: Ord + Clone> Khef<N> {
                     return;
                 };
                 // What begins for us begins with a key frame.
-                if let Some(request) = link.session.subscribe(route.name.clone(), true) {
+                if let Some(request) = link.session.subscribe(route.name.clone(), Some(0)) {
                     watched.upstream = Some((up.clone(), request));
-                    watched.asked = Some(now);
-                    watched.owed = false;
+                    watched.outstanding = Some(0);
                     watched.retry = None;
                 }
                 self.pump(&up, now);
             }
-            _ if key => self.key(alias, now),
+            _ if key => {
+                let group = watched.next_group();
+                self.key(alias, group, now);
+            }
             _ => {}
         }
     }
 
-    /// Ask for a key frame on a track that is on its way here, unless one was asked for
-    /// too lately: then the request waits, and is made once for all who asked meanwhile.
-    fn key(&mut self, alias: u64, now: Timestamp) {
-        let gap = self.config.video.key_frame_gap;
+    /// Ask for a key frame on a track that is on its way here: a new group numbered at
+    /// least `group` (zero: any). Nothing is asked if that group has already begun, or
+    /// has already been asked for.
+    fn key(&mut self, alias: u64, group: u64, now: Timestamp) {
         let Some(watched) = self.watching.get_mut(&alias) else {
             return;
         };
-        if watched
-            .asked
-            .is_some_and(|asked| asked.saturating_add(gap) > now)
-        {
-            watched.owed = true;
+        let seen = group != 0 && watched.largest.is_some_and(|largest| group <= largest);
+        let asked = watched.outstanding.is_some_and(|asked| group <= asked);
+        if seen || asked {
             return;
         }
-        watched.owed = false;
         if watched.producing {
-            watched.asked = Some(now);
+            watched.outstanding = Some(group);
             self.outputs.push_back(Output::KeyFrame { alias });
         } else if let Some((up, request)) = watched.upstream.clone() {
-            watched.asked = Some(now);
+            watched.outstanding = Some(group);
             if let Some(link) = self.links.get_mut(&up) {
-                link.session.ask_for_group(request);
+                link.session.ask_for_group(request, group);
             }
             self.pump(&up, now);
         }
@@ -481,6 +486,10 @@ impl<N: Ord + Clone> Khef<N> {
             return;
         };
         if piece.start {
+            if watched.largest.is_none_or(|largest| piece.group > largest) {
+                watched.largest = Some(piece.group);
+                watched.outstanding = None;
+            }
             let mut to = Vec::new();
             for peer in watched.links.keys() {
                 if let Some(link) = self.links.get_mut(peer)
@@ -553,8 +562,7 @@ impl<N: Ord + Clone> Khef<N> {
         let Some(watched) = self.watching.get_mut(&alias) else {
             return;
         };
-        watched.asked = None;
-        watched.owed = false;
+        watched.outstanding = None;
         watched.retry = None;
         if core::mem::take(&mut watched.producing) {
             self.outputs.push_back(Output::Produce {
@@ -582,8 +590,7 @@ impl<N: Ord + Clone> Khef<N> {
         let Some(watched) = self.watching.get_mut(&alias) else {
             return;
         };
-        watched.asked = None;
-        watched.owed = false;
+        watched.outstanding = None;
         watched.retry = Some(now.saturating_add(retry_after));
         let open: Vec<Origin> = watched.open.keys().copied().collect();
         for origin in open {

@@ -154,18 +154,20 @@ pub enum Event {
         object: u64,
         payload: Vec<u8>,
     },
-    /// The peer asks for one track by name; `new_group` if it asks that a new group begin
+    /// The peer asks for one track by name. With `new_group`, it asks also that a new
+    /// group begin: one numbered at least that, which is the largest group the peer knows
+    /// of plus one, or zero if it knows of none (section 10.2.19).
     /// for it. Answer with [`Session::accept_subscription`] or [`Session::refuse`].
     Wanted {
         request: StreamId,
         track: FullTrackName,
-        new_group: bool,
+        new_group: Option<u64>,
     },
     /// The peer no longer wants a track it asked for.
     Unwanted { request: StreamId },
     /// The peer asks that a new group begin on a track it is subscribed to: it has lost
     /// its place and needs a key frame.
-    GroupWanted { request: StreamId },
+    GroupWanted { request: StreamId, group: u64 },
     /// The peer accepted our subscription. The track's groups will carry `alias`.
     Subscribed { request: StreamId, alias: u64 },
     /// The peer refused our subscription, or abandoned it.
@@ -457,8 +459,9 @@ impl Session {
     // --- One track, by name ---
 
     /// Ask the peer for one track by name; with `new_group`, ask also that a new group
-    /// begin for us. `None` if the session is closed.
-    pub fn subscribe(&mut self, track: FullTrackName, new_group: bool) -> Option<StreamId> {
+    /// begin for us, numbered at least that (see [`Session::ask_for_group`]). `None` if
+    /// the session is closed.
+    pub fn subscribe(&mut self, track: FullTrackName, new_group: Option<u64>) -> Option<StreamId> {
         if self.closed {
             return None;
         }
@@ -467,7 +470,7 @@ impl Session {
             track,
             params: Params {
                 forward: Some(true),
-                new_group_request: new_group.then_some(0),
+                new_group_request: new_group,
                 ..Params::default()
             },
         });
@@ -495,8 +498,9 @@ impl Session {
         }
     }
 
-    /// Ask that a new group begin on a track we are subscribed to.
-    pub fn ask_for_group(&mut self, request: StreamId) {
+    /// Ask that a new group begin on a track we are subscribed to: one numbered at least
+    /// `group`, the largest we know of plus one, or zero if we know of none.
+    pub fn ask_for_group(&mut self, request: StreamId, group: u64) {
         if self.closed
             || !matches!(
                 self.outgoing.get(&request),
@@ -508,7 +512,7 @@ impl Session {
         let update = Message::RequestUpdate(RequestUpdate {
             request_id: self.take_request_id(),
             params: Params {
-                new_group_request: Some(0),
+                new_group_request: Some(group),
                 ..Params::default()
             },
         });
@@ -1305,9 +1309,11 @@ impl Session {
                 if !self.their_request_id_is_valid(update.request_id) {
                     return;
                 }
-                let answer = if update.params.new_group_request.is_some() {
-                    self.events
-                        .push_back(Event::GroupWanted { request: stream });
+                let answer = if let Some(group) = update.params.new_group_request {
+                    self.events.push_back(Event::GroupWanted {
+                        request: stream,
+                        group,
+                    });
                     Message::RequestOk(RequestOk {
                         params: Params::default(),
                         track_properties: Vec::new(),
@@ -1400,7 +1406,7 @@ impl Session {
                 self.events.push_back(Event::Wanted {
                     request: stream,
                     track: request.track,
-                    new_group: request.params.new_group_request.is_some(),
+                    new_group: request.params.new_group_request,
                 });
             }
             _ => self.close(

@@ -1108,50 +1108,48 @@ fn two_watchers_share_one_request_and_the_camera_stops_when_the_last_has_gone() 
 }
 
 #[test]
-fn whoever_begins_to_watch_part_way_waits_for_a_key_frame_asked_for_no_more_than_once() {
+fn whoever_begins_to_watch_part_way_gets_a_key_frame_asked_for_once_for_all_who_need_it() {
     let mut net = star();
     net.watch(3, 1);
+    assert_eq!(net.nodes[&1].keys, [], "what begins, begins with one");
     net.film(1, 0, true, &[b"key"], false);
-    net.run(100);
     net.watch(4, 1);
+    assert_eq!(net.nodes[&1].keys, [cam(1)], "asked for at once");
     net.film(1, 0, false, &[b"delta"], false);
     assert_eq!(net.frames(3).len(), 2);
     assert_eq!(net.frames(4), [], "a group cannot be joined part way");
-    assert_eq!(net.nodes[&1].keys, [], "one was asked for a moment ago");
-    // A third, a moment later, is joined into the same request.
+    // Another who needs the same group adds nothing: node 2 has already asked for it.
     net.unwatch(3, 1);
     net.watch(3, 1);
-    net.run(800);
-    assert_eq!(net.nodes[&1].keys, []);
-    net.run(200);
+    net.run(2000);
     assert_eq!(net.nodes[&1].keys, [cam(1)]);
     net.film(1, 1, true, &[b"key again"], true);
     assert_eq!(net.frames(4), [(cam(1), 1, &b"key again"[..])]);
-    net.run(2000);
-    assert_eq!(
-        net.nodes[&1].keys,
-        [cam(1)],
-        "and it is not asked for again"
-    );
+    assert_eq!(net.frames(3).last(), Some(&(cam(1), 1, &b"key again"[..])));
+    // Whoever comes after that group began needs the one after it.
+    net.unwatch(4, 1);
+    net.watch(4, 1);
+    assert_eq!(net.nodes[&1].keys, [cam(1), cam(1)]);
 }
 
 #[test]
 fn a_watcher_that_lost_its_place_asks_for_a_key_frame_through_every_khef() {
     let mut net = video_line();
     net.watch(3, 1);
-    net.run(1100);
+    net.film(1, 0, true, &[b"key"], true);
     let now = net.now;
     net.khef(3).ask_key_frame(cam(1), now);
     net.settle();
     assert_eq!(net.nodes[&1].keys, [cam(1)]);
-    // Asked again at once, it waits its time, at the first khef that hears it.
+    // Asked again before the group has come, there is nothing to add.
     net.khef(3).ask_key_frame(cam(1), now);
     net.settle();
     assert_eq!(net.nodes[&1].keys, [cam(1)]);
-    net.run(1100);
+    net.film(1, 1, true, &[b"key"], true);
+    net.khef(3).ask_key_frame(cam(1), now);
+    net.settle();
     assert_eq!(net.nodes[&1].keys, [cam(1), cam(1)]);
     // Nobody can ask for a key frame of what they do not watch.
-    let now = net.now;
     net.khef(2).ask_key_frame(cam(1), now);
     net.settle();
     assert_eq!(net.nodes[&1].keys.len(), 2);
