@@ -384,9 +384,10 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         self.service(now);
     }
 
-    /// The decoder has lost its place in a track this node watches, and needs a key frame.
-    pub fn ask_key_frame(&mut self, alias: u64, now: Timestamp) {
-        self.khef.ask_key_frame(alias, now);
+    /// The decoder has lost its place in group `lost` of a track this node watches, and
+    /// needs a key frame: a group after that one.
+    pub fn ask_key_frame(&mut self, alias: u64, lost: u64, now: Timestamp) {
+        self.khef.ask_key_frame(alias, lost, now);
         self.service(now);
     }
 

@@ -12,12 +12,14 @@
 
 use bytes::Bytes;
 use palaver_khef_core::LinkWatchConfig;
+use palaver_media::picture::{Pattern, Size};
+use palaver_media::video::{Settings, SoftwareDecoder, SoftwareEncoder};
 use palaver_net::admission::{AdmissionKey, Admitted};
 use palaver_net::identity::{Identity, meeting_tag};
 use palaver_net::memory::{MemoryEndpoint, MemoryNetwork};
 use palaver_net::transport::Peer;
 use palaver_proto::{MediaTrack, ParticipantId, Secret, Signer, Source};
-use palaver_sdk::{Engine, EngineConfig, Status};
+use palaver_sdk::{Engine, EngineConfig, Status, VideoIn, VideoReceiver, VideoSender};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -33,11 +35,18 @@ fn config(name: &str, secret: u8) -> EngineConfig {
     EngineConfig {
         meeting: meeting_tag(&Secret::new([secret; 32])).unwrap(),
         name: name.into(),
-        tracks: vec![MediaTrack {
-            audio: true,
-            source: Source::Main,
-            rendition: b"opus".to_vec(),
-        }],
+        tracks: vec![
+            MediaTrack {
+                audio: true,
+                source: Source::Main,
+                rendition: b"opus".to_vec(),
+            },
+            MediaTrack {
+                audio: false,
+                source: Source::Main,
+                rendition: b"180p".to_vec(),
+            },
+        ],
         addresses: Vec::new(),
         link_watch: LinkWatchConfig::default(),
     }
@@ -263,4 +272,84 @@ async fn a_joiner_nobody_can_answer_gets_in_once_a_member_reaches_for_it() {
     joiner.until_roster(&both).await;
     member_.until_roster(&both).await;
     assert!(!joiner.engine.status().borrow().nobody_answers);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_camera_watched_across_the_meeting_is_coded_sent_and_shown() {
+    let network = MemoryNetwork::new();
+    let mut members = meeting(&network, 3).await;
+    for m in &members {
+        m.until("links to both", |s| s.links.len() == 2).await;
+    }
+    let filmed = members[1].id();
+    // Every node sees every camera in the plan, and knows its own.
+    let status = members[2]
+        .until("three cameras", |s| s.videos.len() == 3)
+        .await;
+    let camera = status
+        .videos
+        .iter()
+        .find(|track| track.participant == filmed)
+        .unwrap();
+    assert!(!camera.own);
+    assert_eq!(camera.rendition, b"180p");
+    let alias = camera.alias;
+
+    let mut screen = members[2].engine.video().unwrap();
+    let mut lens = members[1].engine.video().unwrap();
+    assert!(members[1].engine.video().is_none(), "there is one door");
+    screen.watch(alias, true);
+    let wanted = timeout(PATIENCE, lens.next()).await.unwrap();
+    assert_eq!(
+        wanted,
+        Some(VideoIn::Produce {
+            alias,
+            wanted: true
+        })
+    );
+
+    let size = Size::new(320, 180).unwrap();
+    let encoder = SoftwareEncoder::new(Settings::new(size, 300_000)).unwrap();
+    let mut sender = VideoSender::new(encoder, alias, 1000, 15);
+    sender.set_wanted(true);
+    let mut receiver = VideoReceiver::new(SoftwareDecoder::new().unwrap());
+    let mut pattern = Pattern::new(size, 1);
+    let mut shown = Vec::new();
+    for _ in 0..10 {
+        let mut pieces = Vec::new();
+        sender
+            .picture(&pattern.next_picture(), &mut pieces)
+            .unwrap();
+        for piece in pieces {
+            lens.send(alias, piece.group, piece.start, piece.bytes, piece.fin);
+        }
+        tokio::time::sleep(Duration::from_millis(33)).await;
+        while let Some(event) = screen.try_next() {
+            let VideoIn::Group {
+                alias: of,
+                group,
+                start,
+                bytes,
+                ..
+            } = event
+            else {
+                panic!("{event:?}")
+            };
+            assert_eq!((of, group), (alias, 1000));
+            assert_eq!(receiver.group(group, start, &bytes, &mut shown), None);
+        }
+    }
+    assert_eq!(shown.len(), 10, "every picture, in step with the camera");
+    assert!(shown.iter().all(|picture| picture.size() == size));
+
+    // Nobody watching, nothing to make.
+    screen.watch(alias, false);
+    let unwanted = timeout(PATIENCE, lens.next()).await.unwrap();
+    assert_eq!(
+        unwanted,
+        Some(VideoIn::Produce {
+            alias,
+            wanted: false
+        })
+    );
 }

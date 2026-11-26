@@ -31,7 +31,7 @@ use palaver_net::identity::{Ed25519, Identity, participant_id};
 use palaver_net::transport::{
     Connection, DialError, Endpoint, Peer, RecvStream, SendStream, Side, StreamError,
 };
-use palaver_node::{Config as NodeConfig, Node, Output};
+use palaver_node::{Config as NodeConfig, Node, Output, VideoTrack};
 use palaver_proto::{MediaTrack, MeetingTag, ParticipantId, PlanStamp, Redacted, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -103,6 +103,8 @@ pub struct Status {
     pub links: Vec<ParticipantId>,
     /// Whose microphone each audio alias is, by the plan.
     pub microphones: Vec<(u64, ParticipantId)>,
+    /// Every video track in the plan, this node's own among them.
+    pub videos: Vec<VideoTrack>,
     /// The node was told to join and nobody it was sent to has answered. It keeps
     /// trying. This is the moment to give the person who invited it a ticket with this
     /// node in it, for them to [`Engine::reach`].
@@ -133,6 +135,107 @@ enum Command {
         level: u8,
         payload: Bytes,
     },
+    Watch {
+        alias: u64,
+        watch: bool,
+    },
+    KeyFrame {
+        alias: u64,
+        lost: u64,
+    },
+    Video {
+        alias: u64,
+        group: u64,
+        start: bool,
+        bytes: Vec<u8>,
+        fin: bool,
+    },
+    VideoReset {
+        alias: u64,
+        group: u64,
+    },
+}
+
+/// Something about video, for whatever makes and shows this node's pictures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoIn {
+    /// Somebody watches this node's own video track `alias` (`wanted`), or nobody does
+    /// any more. Make it only while it is wanted, beginning with a key frame.
+    Produce { alias: u64, wanted: bool },
+    /// Begin a new group, with a key frame, on this node's own track `alias`, as soon
+    /// as the encoder allows.
+    KeyFrame { alias: u64 },
+    /// Bytes of one group of a track this node watches, in order. The first (`start`)
+    /// begin with the stream's header; `fin` when the group is whole.
+    Group {
+        alias: u64,
+        group: u64,
+        start: bool,
+        bytes: Vec<u8>,
+        fin: bool,
+    },
+    /// A group this node was being given was given up part way.
+    Reset { alias: u64, group: u64 },
+}
+
+/// The engine's door for video.
+///
+/// What to watch and what this node's camera makes go in, and what there is to show
+/// comes out. Taken once ([`Engine::video`]) and kept by whatever runs the pictures,
+/// apart from the sound.
+///
+/// Nothing here waits or is dropped: a group with a piece missing is no use, so pieces
+/// queue without limit both ways. (What happens when a link or a reader cannot keep up
+/// is to come; see the design, section 7.)
+pub struct VideoPort {
+    commands: mpsc::UnboundedSender<Command>,
+    events: mpsc::UnboundedReceiver<VideoIn>,
+}
+
+impl VideoPort {
+    /// Begin to watch the video track with `alias`, or stop. Watching lasts through
+    /// changes of plan.
+    pub fn watch(&self, alias: u64, watch: bool) {
+        let _ = self.commands.send(Command::Watch { alias, watch });
+    }
+
+    /// The decoder lost its place in group `lost` of a track being watched, and needs a
+    /// group after it.
+    pub fn ask_key_frame(&self, alias: u64, lost: u64) {
+        let _ = self.commands.send(Command::KeyFrame { alias, lost });
+    }
+
+    /// The next bytes of a group of this node's own track: the first (`start`) begin
+    /// with the stream's header, and `fin` ends the group.
+    pub fn send(&self, alias: u64, group: u64, start: bool, bytes: Vec<u8>, fin: bool) {
+        let _ = self.commands.send(Command::Video {
+            alias,
+            group,
+            start,
+            bytes,
+            fin,
+        });
+    }
+
+    /// Give up a group of this node's own part way.
+    pub fn give_up(&self, alias: u64, group: u64) {
+        let _ = self.commands.send(Command::VideoReset { alias, group });
+    }
+
+    /// The next thing about video. `None` once the engine has stopped.
+    pub async fn next(&mut self) -> Option<VideoIn> {
+        self.events.recv().await
+    }
+
+    /// The same, from a thread that is not the runtime's.
+    pub fn blocking_next(&mut self) -> Option<VideoIn> {
+        self.events.blocking_recv()
+    }
+
+    /// The next thing if one is waiting; never waits.
+    pub fn try_next(&mut self) -> Option<VideoIn> {
+        self.events.try_recv().ok()
+    }
 }
 
 /// A running node.
@@ -142,6 +245,7 @@ pub struct Engine {
     microphone: mpsc::Sender<Command>,
     status: watch::Receiver<Status>,
     audio: mpsc::Receiver<AudioIn>,
+    video: Option<VideoPort>,
     task: JoinHandle<()>,
 }
 
@@ -156,6 +260,8 @@ impl Engine {
         let (audio_out, audio) = mpsc::channel(AUDIO_IN_QUEUE);
         let (status_out, status) = watch::channel(Status::default());
         let (inputs, inputs_in) = mpsc::channel(INPUT_QUEUE);
+        let (camera, camera_in) = mpsc::unbounded_channel();
+        let (video_out, video_in) = mpsc::unbounded_channel();
         let endpoint = Arc::new(endpoint);
 
         // The first report's sequence number must be higher than any this key used before.
@@ -208,11 +314,13 @@ impl Engine {
             inputs,
             started: Instant::now(),
             audio_out,
+            video_out,
             status: status_out,
             scratch: Vec::new(),
         };
         let task = tokio::spawn(async move {
-            run.run(commands_in, microphone_in, inputs_in).await;
+            run.run(commands_in, microphone_in, camera_in, inputs_in)
+                .await;
             accepting.abort();
         });
         Self {
@@ -221,8 +329,17 @@ impl Engine {
             microphone,
             status,
             audio,
+            video: Some(VideoPort {
+                commands: camera,
+                events: video_in,
+            }),
             task,
         }
+    }
+
+    /// The door for video. There is one: `None` once it has been taken.
+    pub const fn video(&mut self) -> Option<VideoPort> {
+        self.video.take()
     }
 
     #[must_use]
@@ -461,6 +578,7 @@ struct Run<E: Endpoint> {
     inputs: mpsc::Sender<Input<E::Connection>>,
     started: Instant,
     audio_out: mpsc::Sender<AudioIn>,
+    video_out: mpsc::UnboundedSender<VideoIn>,
     status: watch::Sender<Status>,
     scratch: Vec<u8>,
 }
@@ -476,6 +594,7 @@ impl<E: Endpoint> Run<E> {
         mut self,
         mut commands: mpsc::Receiver<Command>,
         mut microphone: mpsc::Receiver<Command>,
+        mut camera: mpsc::UnboundedReceiver<Command>,
         mut inputs: mpsc::Receiver<Input<E::Connection>>,
     ) {
         loop {
@@ -492,6 +611,7 @@ impl<E: Endpoint> Run<E> {
                     Some(command) => self.command(command),
                 },
                 Some(frame) = microphone.recv() => self.command(frame),
+                Some(video) = camera.recv() => self.command(video),
                 Some(input) = inputs.recv() => self.input(input),
                 () = sleep_until(wake) => {
                     let now = self.now();
@@ -567,6 +687,20 @@ impl<E: Endpoint> Run<E> {
                     self.send_datagram(peer, datagram.clone());
                 }
             }
+            Command::Watch { alias, watch: true } => self.node.watch(alias, now),
+            Command::Watch {
+                alias,
+                watch: false,
+            } => self.node.unwatch(alias, now),
+            Command::KeyFrame { alias, lost } => self.node.ask_key_frame(alias, lost, now),
+            Command::Video {
+                alias,
+                group,
+                start,
+                bytes,
+                fin,
+            } => self.node.local_video(alias, group, start, &bytes, fin, now),
+            Command::VideoReset { alias, group } => self.node.local_video_reset(alias, group, now),
         }
     }
 
@@ -734,11 +868,31 @@ impl<E: Endpoint> Run<E> {
                 }
                 Output::Datagram { peer, bytes } => self.send_datagram(&peer, Bytes::from(bytes)),
                 Output::Stream { peer, action } => self.stream(peer, action),
-                // Nothing is watched or made here yet, so the node has none of these to say.
-                Output::Produce { .. }
-                | Output::KeyFrame { .. }
-                | Output::Video { .. }
-                | Output::VideoReset { .. } => {}
+                // Whoever runs the pictures may have gone; then there is nobody to tell.
+                Output::Produce { alias, wanted } => {
+                    let _ = self.video_out.send(VideoIn::Produce { alias, wanted });
+                }
+                Output::KeyFrame { alias } => {
+                    let _ = self.video_out.send(VideoIn::KeyFrame { alias });
+                }
+                Output::Video {
+                    alias,
+                    group,
+                    start,
+                    bytes,
+                    fin,
+                } => {
+                    let _ = self.video_out.send(VideoIn::Group {
+                        alias,
+                        group,
+                        start,
+                        bytes,
+                        fin,
+                    });
+                }
+                Output::VideoReset { alias, group } => {
+                    let _ = self.video_out.send(VideoIn::Reset { alias, group });
+                }
             }
         }
         self.answer_dials();
@@ -776,6 +930,7 @@ impl<E: Endpoint> Run<E> {
                 microphones.sort();
                 microphones
             }),
+            videos: self.node.video_tracks().to_vec(),
         };
         self.status.send_if_modified(|held| {
             if *held == status {
