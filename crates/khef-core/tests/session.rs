@@ -832,6 +832,27 @@ fn a_group_that_overtakes_the_answer_to_the_subscription_waits_for_it() {
 }
 
 #[test]
+fn a_new_group_is_not_asked_for_before_the_publisher_has_said_it_may_be() {
+    let (mut a, mut b) = pair();
+    let wanted = track(&["m", "video", "p12"], "360p");
+    let request = a.session.subscribe(wanted, None).unwrap();
+    // Not answered yet: nothing says the track's groups can be asked for.
+    a.session.ask_for_group(request, 3);
+    run(&mut a, &mut b);
+    let events = b.take_events();
+    assert!(
+        matches!(
+            &events[..],
+            [Event::Wanted {
+                new_group: None,
+                ..
+            }]
+        ),
+        "{events:?}"
+    );
+}
+
+#[test]
 fn a_new_group_can_be_asked_for_on_a_subscription() {
     let (mut a, mut b, request, at_b, _) = watching();
     a.session.ask_for_group(request, 8);

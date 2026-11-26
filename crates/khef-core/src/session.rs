@@ -40,11 +40,11 @@
 //! the log. Nothing here panics on input.
 
 use palaver_moq_wire::{
-    Datagram, Error, Frame, FullTrackName, Message, Namespace, ObjectBody, PADDING_DATAGRAM,
+    Datagram, Error, Frame, FullTrackName, Kvp, Message, Namespace, ObjectBody, PADDING_DATAGRAM,
     Params, Publish, PublishDone, Reader, RequestError, RequestOk, RequestUpdate, Setup,
     SubgroupHeader, SubgroupId, SubgroupObject, SubgroupReader, SubgroupWriter, Subscribe,
-    SubscribeOk, SubscribeTracks, UniStream, is_padding_datagram, negotiated_palaver_version,
-    put_vi64, uni_stream,
+    SubscribeOk, SubscribeTracks, UniStream, Value, encode_kvps, int_property, is_padding_datagram,
+    negotiated_palaver_version, put_vi64, uni_stream,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -64,6 +64,9 @@ pub const UNINTERESTED: u64 = 0x20;
 pub const PREFIX_OVERLAP: u64 = 0x30;
 /// `PUBLISH_DONE` status: the track is no longer being published (section 12.4).
 pub const TRACK_ENDED: u64 = 0x2;
+/// Track property (section 12.6): one, if a subscriber may ask the track's publisher to
+/// begin a new group. Every track this profile serves by SUBSCRIBE says so.
+pub const DYNAMIC_GROUPS: u64 = 0x30;
 
 /// Most bytes buffered for one stream while waiting for the rest of a message: the longest
 /// message, its type and its length.
@@ -241,6 +244,8 @@ enum Outgoing {
     Subscription {
         alias: Option<u64>,
         answered: bool,
+        /// The publisher said that a new group may be asked for.
+        dynamic: bool,
     },
 }
 
@@ -480,6 +485,7 @@ impl Session {
             Outgoing::Subscription {
                 alias: None,
                 answered: false,
+                dynamic: false,
             },
         );
         Some(stream)
@@ -499,12 +505,13 @@ impl Session {
     }
 
     /// Ask that a new group begin on a track we are subscribed to: one numbered at least
-    /// `group`, the largest we know of plus one, or zero if we know of none.
+    /// `group`, the largest we know of plus one, or zero if we know of none. Nothing is
+    /// sent unless the peer has answered and said the track's groups can be asked for.
     pub fn ask_for_group(&mut self, request: StreamId, group: u64) {
         if self.closed
             || !matches!(
                 self.outgoing.get(&request),
-                Some(Outgoing::Subscription { .. })
+                Some(Outgoing::Subscription { dynamic: true, .. })
             )
         {
             return;
@@ -533,10 +540,18 @@ impl Session {
         }
         self.incoming
             .insert(request, Incoming::Subscription { alias });
+        let mut track_properties = Vec::new();
+        let dynamic = Kvp {
+            ty: DYNAMIC_GROUPS,
+            value: Value::Int(1),
+        };
+        if encode_kvps(&[dynamic], &mut track_properties).is_err() {
+            track_properties.clear();
+        }
         let ok = Message::SubscribeOk(SubscribeOk {
             track_alias: alias,
             params: Params::default(),
-            track_properties: Vec::new(),
+            track_properties,
         });
         self.send_message(request, &ok, false);
         true
@@ -1457,6 +1472,10 @@ impl Session {
                     Outgoing::Subscription {
                         alias: Some(ok.track_alias),
                         answered: true,
+                        dynamic: matches!(
+                            int_property(&ok.track_properties, DYNAMIC_GROUPS),
+                            Ok(Some(1))
+                        ),
                     },
                 );
                 self.events.push_back(Event::Subscribed {
