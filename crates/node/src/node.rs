@@ -3,12 +3,12 @@ use palaver_control::{
 };
 use palaver_khef_core::{
     Action, AudioOut, AudioPlan, Khef, KhefConfig, LinkWatchConfig, Output as KhefOutput, Role,
-    StreamId, StreamKind, TopNConfig, VideoConfig,
+    StreamId, StreamKind, TopNConfig, VideoConfig, VideoFrom, VideoPlan, VideoRoute,
 };
 use palaver_moq_wire::Setup;
 use palaver_proto::{
-    Link, MediaTrack, MeetingTag, ParticipantId, Plan, Redacted, Report, Signer, Source, Timestamp,
-    Track, TrackName, Verifier,
+    Edge, Link, MediaTrack, MeetingTag, ParticipantId, Plan, Redacted, Report, Signer, Source,
+    Timestamp, Track, TrackName, Verifier,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
@@ -47,6 +47,37 @@ pub enum Output {
     /// Close the connection to `peer`: the plan no longer names it, or it has fallen
     /// silent. The node has already forgotten the link.
     Hangup { peer: ParticipantId },
+    /// Somebody watches this node's own video track `alias` (`wanted`), or nobody does any
+    /// more. Make it only while it is wanted, beginning with a key frame, and give it to
+    /// [`Node::local_video`].
+    Produce { alias: u64, wanted: bool },
+    /// Begin a new group, with a key frame, on this node's own video track `alias`, as
+    /// soon as the encoder allows.
+    KeyFrame { alias: u64 },
+    /// Bytes of one group of a video track this node watches, in order. The first
+    /// (`start`) begin with the stream's header: read them with
+    /// [`palaver_khef_core::GroupReader`]. `fin` when the group is whole.
+    Video {
+        alias: u64,
+        group: u64,
+        start: bool,
+        bytes: Vec<u8>,
+        fin: bool,
+    },
+    /// A group this node was being given was given up part way.
+    VideoReset { alias: u64, group: u64 },
+}
+
+/// A video track of the meeting, as the plan this node follows lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoTrack {
+    /// What the track's groups carry, and what to [`Node::watch`].
+    pub alias: u64,
+    pub participant: ParticipantId,
+    pub source: Source,
+    pub rendition: Vec<u8>,
+    /// This node's own: made here, not watched.
+    pub own: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +128,9 @@ pub struct Node<S, V> {
     mic_alias: Option<u64>,
     /// What the khef was last told about audio, so it is told again only on a change.
     audio: AudioPlan<ParticipantId>,
+    /// The same for video, and the tracks it was made from.
+    video: VideoPlan<ParticipantId>,
+    video_tracks: Vec<VideoTrack>,
     counters: Counters,
     outputs: VecDeque<Output>,
 }
@@ -135,6 +169,8 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
             surplus_links: false,
             mic_alias: None,
             audio: AudioPlan::default(),
+            video: VideoPlan::default(),
+            video_tracks: Vec::new(),
             counters: Counters::default(),
             outputs: VecDeque::new(),
         };
@@ -329,6 +365,54 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
             .local_audio(self.mic_alias?, group, level, payload, out, now)
     }
 
+    /// Every video track in the plan this node follows.
+    #[must_use]
+    pub fn video_tracks(&self) -> &[VideoTrack] {
+        &self.video_tracks
+    }
+
+    /// Begin to watch the video track with `alias`. It stays wanted, through changes of
+    /// plan, until [`Node::unwatch`]; its groups come as [`Output::Video`].
+    pub fn watch(&mut self, alias: u64, now: Timestamp) {
+        self.khef.watch(alias, now);
+        self.service(now);
+    }
+
+    /// Stop watching a video track.
+    pub fn unwatch(&mut self, alias: u64, now: Timestamp) {
+        self.khef.unwatch(alias, now);
+        self.service(now);
+    }
+
+    /// The decoder has lost its place in a track this node watches, and needs a key frame.
+    pub fn ask_key_frame(&mut self, alias: u64, now: Timestamp) {
+        self.khef.ask_key_frame(alias, now);
+        self.service(now);
+    }
+
+    /// Bytes of a group of this node's own video track, in order: the first (`start`)
+    /// begin with the stream's header, as [`palaver_khef_core::GroupWriter`] writes it,
+    /// and `fin` ends the group. Nothing happens unless the track is wanted
+    /// ([`Output::Produce`]).
+    pub fn local_video(
+        &mut self,
+        alias: u64,
+        group: u64,
+        start: bool,
+        bytes: &[u8],
+        fin: bool,
+        now: Timestamp,
+    ) {
+        self.khef.local_video(alias, group, start, bytes, fin, now);
+        self.service(now);
+    }
+
+    /// Give up a group of this node's own part way.
+    pub fn local_video_reset(&mut self, alias: u64, group: u64, now: Timestamp) {
+        self.khef.local_video_reset(alias, group, now);
+        self.service(now);
+    }
+
     /// Time has passed: watch the links, and let the control logic send what is due.
     pub fn poll(&mut self, now: Timestamp) {
         self.khef.poll(now);
@@ -431,12 +515,26 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
                     self.apply_plan(now);
                 }
             }
-            // Video does not reach the node's client yet: nothing is watched, so the khef
-            // has none of these to say.
-            KhefOutput::Produce { .. }
-            | KhefOutput::KeyFrame { .. }
-            | KhefOutput::Video { .. }
-            | KhefOutput::VideoReset { .. } => {}
+            KhefOutput::Produce { alias, wanted } => {
+                self.outputs.push_back(Output::Produce { alias, wanted });
+            }
+            KhefOutput::KeyFrame { alias } => self.outputs.push_back(Output::KeyFrame { alias }),
+            KhefOutput::Video {
+                alias,
+                group,
+                start,
+                bytes,
+                fin,
+            } => self.outputs.push_back(Output::Video {
+                alias,
+                group,
+                start,
+                bytes,
+                fin,
+            }),
+            KhefOutput::VideoReset { alias, group } => {
+                self.outputs.push_back(Output::VideoReset { alias, group });
+            }
             KhefOutput::LinkDead { peer } => {
                 self.links.remove(&peer);
                 self.outputs.push_back(Output::Hangup { peer });
@@ -494,6 +592,140 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
             .collect()
     }
 
+    /// For each node the overlay reaches from `me`, the neighbour of `me` on the way to it.
+    fn first_hops(overlay: &[Edge], me: &ParticipantId) -> BTreeMap<ParticipantId, ParticipantId> {
+        let beside = |at: &ParticipantId| -> Vec<ParticipantId> {
+            overlay
+                .iter()
+                .filter_map(|edge| {
+                    if edge.0 == *at {
+                        Some(edge.1.clone())
+                    } else if edge.1 == *at {
+                        Some(edge.0.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut hops = BTreeMap::new();
+        let mut edge: VecDeque<(ParticipantId, ParticipantId)> = beside(me)
+            .into_iter()
+            .map(|first| (first.clone(), first))
+            .collect();
+        while let Some((at, first)) = edge.pop_front() {
+            if at == *me || hops.contains_key(&at) {
+                continue;
+            }
+            hops.insert(at.clone(), first.clone());
+            for further in beside(&at) {
+                edge.push_back((further, first.clone()));
+            }
+        }
+        hops
+    }
+
+    /// Where audio goes: every microphone in the plan, over this node's tree links. And
+    /// the alias of this node's own microphone.
+    fn audio_plan(
+        &self,
+        plan: &Plan,
+        me: &ParticipantId,
+    ) -> (AudioPlan<ParticipantId>, Option<u64>) {
+        let mut audio = AudioPlan {
+            links: plan
+                .audio_overlay
+                .iter()
+                .filter_map(|edge| {
+                    if edge.0 == *me {
+                        Some(edge.1.clone())
+                    } else if edge.1 == *me {
+                        Some(edge.0.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            tracks: BTreeMap::new(),
+            own: BTreeSet::new(),
+            top_n: TopNConfig {
+                n: usize::try_from(plan.audio_top_n).unwrap_or(usize::MAX),
+                ..TopNConfig::default()
+            },
+        };
+        let mut mic_alias = None;
+        for member in &plan.roster {
+            let participant = self.verifier.participant_id(&member.key);
+            for assigned in &member.tracks {
+                if !assigned.track.audio || assigned.track.source != Source::Main {
+                    continue;
+                }
+                let name = TrackName {
+                    meeting: self.meeting.clone(),
+                    track: assigned.track.of(participant.clone()),
+                };
+                let Some(name) = name.to_full_name() else {
+                    continue;
+                };
+                audio.tracks.insert(assigned.alias, name);
+                if participant == *me {
+                    audio.own.insert(assigned.alias);
+                    mic_alias.get_or_insert(assigned.alias);
+                }
+            }
+        }
+        (audio, mic_alias)
+    }
+
+    /// Where video goes: every video track in the plan, each from this node itself or
+    /// from the neighbour on the way to whoever makes it. To begin with the way is the
+    /// audio tree's.
+    fn video_plan(
+        &self,
+        plan: &Plan,
+        me: &ParticipantId,
+    ) -> (VideoPlan<ParticipantId>, Vec<VideoTrack>) {
+        let hops = Self::first_hops(&plan.audio_overlay, me);
+        let mut video = VideoPlan::default();
+        let mut listed = Vec::new();
+        for member in &plan.roster {
+            let participant = self.verifier.participant_id(&member.key);
+            let own = participant == *me;
+            for assigned in member
+                .tracks
+                .iter()
+                .filter(|assigned| !assigned.track.audio)
+            {
+                let name = TrackName {
+                    meeting: self.meeting.clone(),
+                    track: assigned.track.of(participant.clone()),
+                };
+                let Some(name) = name.to_full_name() else {
+                    continue;
+                };
+                listed.push(VideoTrack {
+                    alias: assigned.alias,
+                    participant: participant.clone(),
+                    source: assigned.track.source,
+                    rendition: assigned.track.rendition.clone(),
+                    own,
+                });
+                // A track of someone the tree does not reach yet is listed, and has no way.
+                let from = if own {
+                    VideoFrom::Here
+                } else if let Some(hop) = hops.get(&participant) {
+                    VideoFrom::Link(hop.clone())
+                } else {
+                    continue;
+                };
+                video
+                    .tracks
+                    .insert(assigned.alias, VideoRoute { name, from });
+            }
+        }
+        (video, listed)
+    }
+
     /// Bring this node's connections and its khef into line with the plan it holds.
     fn apply_plan(&mut self, now: Timestamp) {
         let Some(plan) = self.control.plan() else {
@@ -547,54 +779,17 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
         };
         self.surplus_links = surplus.len() > to_close.len();
 
-        // Where audio goes: every microphone in the plan, over this node's tree links.
-        let mut audio = AudioPlan {
-            links: plan
-                .audio_overlay
-                .iter()
-                .filter_map(|edge| {
-                    if edge.0 == me {
-                        Some(edge.1.clone())
-                    } else if edge.1 == me {
-                        Some(edge.0.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-            tracks: BTreeMap::new(),
-            own: BTreeSet::new(),
-            top_n: TopNConfig {
-                n: usize::try_from(plan.audio_top_n).unwrap_or(usize::MAX),
-                ..TopNConfig::default()
-            },
-        };
-        let mut mic_alias = None;
-        for member in &plan.roster {
-            let participant = self.verifier.participant_id(&member.key);
-            for assigned in &member.tracks {
-                if !assigned.track.audio || assigned.track.source != Source::Main {
-                    continue;
-                }
-                let name = TrackName {
-                    meeting: self.meeting.clone(),
-                    track: assigned.track.of(participant.clone()),
-                };
-                let Some(name) = name.to_full_name() else {
-                    continue;
-                };
-                audio.tracks.insert(assigned.alias, name);
-                if participant == me {
-                    audio.own.insert(assigned.alias);
-                    mic_alias.get_or_insert(assigned.alias);
-                }
-            }
-        }
-
+        let (audio, mic_alias) = self.audio_plan(plan, &me);
+        let (video, video_tracks) = self.video_plan(plan, &me);
         self.mic_alias = mic_alias;
         if audio != self.audio {
             self.audio = audio.clone();
             self.khef.set_audio_plan(audio, now);
+        }
+        self.video_tracks = video_tracks;
+        if video != self.video {
+            self.video = video.clone();
+            self.khef.set_video_plan(video, now);
         }
         for peer in to_dial {
             self.dial(peer);

@@ -19,7 +19,9 @@
 //! cryptography.
 
 use crate::{NodeId, Rng, World};
-use palaver_khef_core::{Action, AudioOut, LinkWatchConfig, Role, StreamId, StreamKind};
+use palaver_khef_core::{
+    Action, AudioOut, GroupReader, GroupWriter, LinkWatchConfig, Role, StreamId, StreamKind,
+};
 use palaver_moq_wire::{PalaverExtensions, Setup};
 use palaver_node::{Config, Counters, Node, Output};
 use palaver_proto::sign::fake::{FakeIdentity, FakeVerifier};
@@ -82,10 +84,66 @@ struct Member {
     control_streams: BTreeSet<u64>,
     /// Audio frames this node's client was given to play: (alias, frame).
     heard: Vec<(u64, u64)>,
+    /// What video did at this node.
+    video: Video,
     /// What the node had counted when last looked at.
     counted: Counters,
     /// The earliest wake already scheduled, so each call does not schedule another.
     wake_at: Option<Timestamp>,
+}
+
+/// What video did at one node.
+#[derive(Default)]
+struct Video {
+    /// Whether the node has been told that its camera is watched.
+    filming: bool,
+    /// How many key frames have been asked of its camera.
+    keys: u64,
+    /// The groups its camera is part way through.
+    writers: BTreeMap<u64, GroupWriter>,
+    /// The groups it is being given, by alias and number.
+    readers: BTreeMap<(u64, u64), GroupReader>,
+    /// Frames its client was given to show: (alias, group, frame).
+    seen: Vec<(u64, u64, Vec<u8>)>,
+    /// Groups it was told were given up part way: (alias, group).
+    given_up: Vec<(u64, u64)>,
+}
+
+impl Video {
+    /// Do what the node said about video.
+    fn carry_out(&mut self, output: Output) {
+        match output {
+            Output::Produce { wanted, .. } => self.filming = wanted,
+            Output::KeyFrame { .. } => self.keys = self.keys.saturating_add(1),
+            Output::Video {
+                alias,
+                group,
+                start,
+                bytes,
+                fin,
+            } => {
+                if start {
+                    self.readers.insert((alias, group), GroupReader::new());
+                }
+                let mut whole = Vec::new();
+                if let Some(reader) = self.readers.get_mut(&(alias, group))
+                    && reader.feed(&bytes, &mut whole).is_ok()
+                {
+                    for object in whole {
+                        self.seen.push((alias, group, object.payload));
+                    }
+                }
+                if fin {
+                    self.readers.remove(&(alias, group));
+                }
+            }
+            Output::VideoReset { alias, group } => {
+                self.readers.remove(&(alias, group));
+                self.given_up.push((alias, group));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Counters over a run.
@@ -218,6 +276,16 @@ impl Meeting {
         }
     }
 
+    /// The camera track every simulated node offers.
+    #[must_use]
+    pub fn camera() -> MediaTrack {
+        MediaTrack {
+            audio: false,
+            source: Source::Main,
+            rendition: b"360p".to_vec(),
+        }
+    }
+
     fn add(&mut self, node: NodeId) -> bool {
         if node >= MAX_NODES || self.by_id.values().any(|n| *n == node) {
             return false;
@@ -231,7 +299,7 @@ impl Meeting {
                 ..Setup::default()
             },
             link_watch: self.link_watch,
-            tracks: vec![Self::microphone()],
+            tracks: vec![Self::microphone(), Self::camera()],
             addresses: Vec::new(),
         };
         self.by_id.insert(Self::id_of(node), node);
@@ -243,6 +311,7 @@ impl Meeting {
                 kinds: BTreeMap::new(),
                 control_streams: BTreeSet::new(),
                 heard: Vec::new(),
+                video: Video::default(),
                 counted: Counters::default(),
                 wake_at: None,
             },
@@ -303,6 +372,90 @@ impl Meeting {
         self.carry_audio(node, out, &datagram);
         self.carry_out(node);
         spoke
+    }
+
+    /// The alias the plan `node` follows gives `of`'s camera.
+    #[must_use]
+    pub fn camera_alias(&self, node: NodeId, of: NodeId) -> Option<u64> {
+        self.plan_of(node)?
+            .alias_of(&Self::camera().of(Self::id_of(of)), &FakeVerifier)
+    }
+
+    /// Node `node`'s client begins to watch `of`'s camera, or stops. `false` if the plan
+    /// `node` follows does not list that camera.
+    pub fn watch(&mut self, node: NodeId, of: NodeId, watch: bool) -> bool {
+        let now = self.world.now();
+        let Some(alias) = self.camera_alias(node, of) else {
+            return false;
+        };
+        let Some(member) = self.nodes.get_mut(&node) else {
+            return false;
+        };
+        if watch {
+            member.node.watch(alias, now);
+        } else {
+            member.node.unwatch(alias, now);
+        }
+        self.carry_out(node);
+        true
+    }
+
+    /// Node `node`'s camera makes these frames of `group`, beginning the group if it has
+    /// not begun and, with `whole`, ending it. `false` if the plan has not given the
+    /// camera an alias yet.
+    pub fn film(&mut self, node: NodeId, group: u64, frames: &[&[u8]], whole: bool) -> bool {
+        let now = self.world.now();
+        let Some(alias) = self.camera_alias(node, node) else {
+            return false;
+        };
+        let Some(member) = self.nodes.get_mut(&node) else {
+            return false;
+        };
+        let mut bytes = Vec::new();
+        let mut start = !member.video.writers.contains_key(&group);
+        let writer = member
+            .video
+            .writers
+            .entry(group)
+            .or_insert_with(|| GroupWriter::begin(alias, group, &mut bytes));
+        for (i, frame) in frames.iter().enumerate() {
+            writer.object(frame, &mut bytes);
+            let fin = whole && i.saturating_add(1) == frames.len();
+            member
+                .node
+                .local_video(alias, group, start, &bytes, fin, now);
+            start = false;
+            bytes.clear();
+        }
+        if whole {
+            member.video.writers.remove(&group);
+        }
+        self.carry_out(node);
+        true
+    }
+
+    /// Whether `node` has been told that somebody watches its camera.
+    #[must_use]
+    pub fn filming(&self, node: NodeId) -> bool {
+        self.nodes
+            .get(&node)
+            .is_some_and(|member| member.video.filming)
+    }
+
+    /// How many key frames have been asked of `node`'s camera, beyond the one every
+    /// beginning begins with.
+    #[must_use]
+    pub fn key_frames_asked(&self, node: NodeId) -> u64 {
+        self.nodes.get(&node).map_or(0, |member| member.video.keys)
+    }
+
+    /// The frames of video `node`'s client was given, in order: (alias, group, frame).
+    #[must_use]
+    pub fn seen_by(&self, node: NodeId) -> &[(u64, u64, Vec<u8>)] {
+        self.nodes
+            .get(&node)
+            .map(|member| member.video.seen.as_slice())
+            .unwrap_or_default()
     }
 
     /// Run until the clock reads `until`.
@@ -653,6 +806,7 @@ impl Meeting {
                     };
                     self.carry_stream(node, peer, connection, action);
                 }
+                video => member.video.carry_out(video),
             }
         }
 

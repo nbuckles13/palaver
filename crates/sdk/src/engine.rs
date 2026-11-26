@@ -734,6 +734,11 @@ impl<E: Endpoint> Run<E> {
                 }
                 Output::Datagram { peer, bytes } => self.send_datagram(&peer, Bytes::from(bytes)),
                 Output::Stream { peer, action } => self.stream(peer, action),
+                // Nothing is watched or made here yet, so the node has none of these to say.
+                Output::Produce { .. }
+                | Output::KeyFrame { .. }
+                | Output::Video { .. }
+                | Output::VideoReset { .. } => {}
             }
         }
         self.answer_dials();

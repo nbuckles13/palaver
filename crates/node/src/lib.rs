@@ -25,4 +25,4 @@
 
 mod node;
 
-pub use node::{Config, Counters, Node, Output};
+pub use node::{Config, Counters, Node, Output, VideoTrack};
