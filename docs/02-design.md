@@ -530,6 +530,8 @@ subscriber and the smaller size; the paused tile; the conductor's part; going ba
   subscription asks for a new group; so does a watcher that joins a track already
   flowing or loses its place. How often key frames are made is the encoder's alone to
   limit.
+  Each track served this way carries the draft's `DYNAMIC_GROUPS` property, which is
+  what permits the request; a session does not ask where it is absent.
 - **When the way changes** the khef gives up its subscription and makes another by the
   new way; groups part way through are given up all the way down. A neighbour that
   refuses (it may not have the plan yet) is asked again after half a second. A track
