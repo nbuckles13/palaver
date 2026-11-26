@@ -1138,19 +1138,23 @@ fn a_watcher_that_lost_its_place_asks_for_a_key_frame_through_every_khef() {
     net.watch(3, 1);
     net.film(1, 0, true, &[b"key"], true);
     let now = net.now;
-    net.khef(3).ask_key_frame(cam(1), now);
+    net.khef(3).ask_key_frame(cam(1), 0, now);
     net.settle();
     assert_eq!(net.nodes[&1].keys, [cam(1)]);
     // Asked again before the group has come, there is nothing to add.
-    net.khef(3).ask_key_frame(cam(1), now);
+    net.khef(3).ask_key_frame(cam(1), 0, now);
     net.settle();
     assert_eq!(net.nodes[&1].keys, [cam(1)]);
     net.film(1, 1, true, &[b"key"], true);
-    net.khef(3).ask_key_frame(cam(1), now);
+    // A group after the one that was lost has begun: it is on its way already.
+    net.khef(3).ask_key_frame(cam(1), 0, now);
+    net.settle();
+    assert_eq!(net.nodes[&1].keys, [cam(1)]);
+    net.khef(3).ask_key_frame(cam(1), 1, now);
     net.settle();
     assert_eq!(net.nodes[&1].keys, [cam(1), cam(1)]);
     // Nobody can ask for a key frame of what they do not watch.
-    net.khef(2).ask_key_frame(cam(1), now);
+    net.khef(2).ask_key_frame(cam(1), 1, now);
     net.settle();
     assert_eq!(net.nodes[&1].keys.len(), 2);
 }

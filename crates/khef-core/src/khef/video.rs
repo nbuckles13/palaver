@@ -173,13 +173,12 @@ impl<N: Ord + Clone> Khef<N> {
         self.starve(alias, now);
     }
 
-    /// The node's own client has lost its place in a track it watches, and needs a key
-    /// frame to go on: a group after any that has begun.
-    pub fn ask_key_frame(&mut self, alias: u64, now: Timestamp) {
-        if let Some(watched) = self.watching.get(&alias)
-            && watched.client
-        {
-            self.key(alias, watched.next_group(), now);
+    /// The node's own client has lost its place in group `lost` of a track it watches,
+    /// and needs a key frame to go on: a group after that one. If one has begun already,
+    /// it is on its way and nothing is asked.
+    pub fn ask_key_frame(&mut self, alias: u64, lost: u64, now: Timestamp) {
+        if self.watching.get(&alias).is_some_and(|w| w.client) {
+            self.key(alias, lost.saturating_add(1), now);
         }
     }
 

@@ -536,6 +536,17 @@ subscriber and the smaller size; the paused tile; the conductor's part; going ba
   new way; groups part way through are given up all the way down. A neighbour that
   refuses (it may not have the plan yet) is asked again after half a second. A track
   is never sent back to the neighbour it comes from.
+- **The node** works out each track's way from the plan (the neighbour on the audio
+  tree towards whoever makes it) and lists every video track in the plan for the
+  application.
+- **The two ends** (`sdk::video`). The sender codes nothing while nobody watches. A key
+  frame begins a group and ends the one before; one that is asked for is made at once
+  if enough frames have passed since the last, and otherwise when they have (the
+  encoder's own limit; the khefs have none). Groups are numbered from the clock, so
+  that a node that starts again does not reuse numbers the khefs remember. The
+  receiver shows each frame as soon as it is whole; a group that begins takes the place
+  of an older one still arriving; when a frame cannot be decoded or a group is given up
+  it asks once for a group after the one it lost, and waits for one to begin.
 - **Not yet**: keeping the group in hand for whoever joins part way; the new way taken
   up before the old is dropped; anything for a link that cannot keep up.
 
