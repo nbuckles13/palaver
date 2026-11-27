@@ -204,7 +204,7 @@ fn in_a_meeting_a_microphone_that_gives_nothing_usable_is_said_under_the_meter()
 }
 
 #[test]
-fn this_machines_own_picture_is_shown_in_a_meeting_once_there_is_one() {
+fn this_machines_own_picture_is_shown_in_a_meeting_only_when_asked_for() {
     let mut desk = Desk::named("Ana");
     let slot = Arc::new(Slot::default());
     desk.harness.state_mut().watch(Arc::clone(&slot));
@@ -214,7 +214,12 @@ fn this_machines_own_picture_is_shown_in_a_meeting_once_there_is_one() {
     let size = Size::new(64, 36).unwrap();
     slot.put(Pattern::new(size, 1).next_picture());
     desk.show(|_| {});
+    // It is there, and hidden until asked for.
+    assert!(!desk.shows("Your picture"));
+    desk.click(words::self_view(false));
     assert!(desk.shows("Your picture"));
+    desk.click(words::self_view(true));
+    assert!(!desk.shows("Your picture"));
     // And the details say how large it is.
     desk.click("Details");
     assert!(

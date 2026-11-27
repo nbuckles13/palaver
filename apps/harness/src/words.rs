@@ -261,6 +261,16 @@ pub fn coding_line(bitrate: u64, encode: Duration, decode: Duration, let_go: u32
     }
 }
 
+/// What the button says that shows this machine's own picture, or hides it.
+#[must_use]
+pub const fn self_view(shown: bool) -> &'static str {
+    if shown {
+        "Hide my picture"
+    } else {
+        "My picture"
+    }
+}
+
 /// What someone else's picture is called.
 #[must_use]
 pub fn far_name(name: &str) -> String {

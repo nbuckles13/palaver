@@ -145,6 +145,13 @@ const FAR_TALL: f32 = 180.0;
 /// The rate this machine's picture is coded at for the meeting, unless told otherwise.
 const BITRATE: u32 = 500_000;
 
+/// Whether this machine's own picture is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfView {
+    Hidden,
+    Shown,
+}
+
 /// The window's own state: what has been typed, and what is being listened to.
 pub struct Window {
     session: Session,
@@ -166,6 +173,8 @@ pub struct Window {
     feed: Option<Feed>,
     /// The same picture after encoding and decoding, and what that costs.
     sent: Option<(Tile, Arc<Coding>)>,
+    /// Whether this machine's own picture is drawn: only when asked for.
+    self_view: SelfView,
     /// The picture of someone else in the meeting.
     far: Option<Tile>,
     /// Whether the details stand beside the meeting.
@@ -277,6 +286,12 @@ impl Window {
             meter: 0.0,
             copied: None,
             own: None,
+            // Hidden until asked for; shown in a picture, which is taken to look at it.
+            self_view: if setup.shot.is_some() {
+                SelfView::Shown
+            } else {
+                SelfView::Hidden
+            },
             far: None,
             feed: None,
             sent: None,
@@ -534,14 +549,16 @@ impl Window {
         if let (Some(far), Some(name)) = (&mut self.far, &view.far) {
             far.draw(ui, &words::far_name(name), FAR_TALL);
         }
-        ui.horizontal(|ui| {
-            if let Some(own) = &mut self.own {
-                own.draw(ui, "Your picture", OWN_TALL);
-            }
-            if let Some((sent, _)) = &mut self.sent {
-                sent.draw(ui, "Your picture, as sent", OWN_TALL);
-            }
-        });
+        if self.self_view == SelfView::Shown {
+            ui.horizontal(|ui| {
+                if let Some(own) = &mut self.own {
+                    own.draw(ui, "Your picture", OWN_TALL);
+                }
+                if let Some((sent, _)) = &mut self.sent {
+                    sent.draw(ui, "Your picture, as sent", OWN_TALL);
+                }
+            });
+        }
 
         let line = words::links_line(view.links, view.network);
         ui.label(RichText::new(line).small().monospace().color(ember::DIM));
@@ -554,7 +571,7 @@ impl Window {
             settings_link(ui, view.sound.microphone, &view.microphone);
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let label = if view.muted { "Unmute" } else { "Mute" };
             if ui.button(label).clicked() {
                 self.session.order(Order::Mute(!view.muted));
@@ -567,6 +584,14 @@ impl Window {
                     ui.ctx().copy_text(ticket.clone());
                     self.copied = Some("The ticket is on the clipboard. Send it to them.");
                 }
+            }
+            let shown = self.self_view == SelfView::Shown;
+            if self.own.is_some() && ui.button(words::self_view(shown)).clicked() {
+                self.self_view = if shown {
+                    SelfView::Hidden
+                } else {
+                    SelfView::Shown
+                };
             }
             if ui.button("Details").clicked() {
                 self.toggle_details(ui.ctx());
