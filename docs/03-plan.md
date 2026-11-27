@@ -83,10 +83,11 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
      b. The khef: who is asked for a track (to begin with, the neighbour on the audio
         tree's path to its publisher), a subscription carried hop by hop, groups
         forwarded, requests for a new group passed up once for many askers, and a track
-        produced only while someone wants it.
+        produced only while someone wants it. Done.
      c. The node and the SDK: video tracks in the plan, a sender that makes groups from
-        coded frames and a receiver that turns them back into pictures.
+        coded frames and a receiver that turns them back into pictures. Done.
      d. The app and the bot: the pattern sent, and a tile for someone else's picture.
+        Done; to be tried between machines.
   4. Tiles for everyone, then simulcast and choosing a size for each tile.
   5. Hardware encoding on Windows.
 - Default routes, hop-by-hop resolution, dedupe; every edge khef peered with ≥2 khefs.

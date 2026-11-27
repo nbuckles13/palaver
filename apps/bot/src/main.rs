@@ -16,6 +16,7 @@
 //!                           (default: the address it is bound to)
 //!   --speaker <n>           which made-up voice it has (default 1)
 //!   --silent                only listen
+//!   --pattern               offer a camera: a moving pattern, coded while watched
 //!   --seconds <n>           how long to stay (default: until stopped)
 //!   --stun <address>        a STUN server to ask for this node's public address; may be
 //!                           repeated (default: two public servers). A node asks only
@@ -69,6 +70,7 @@ async fn room(count: u32, seconds: u64) -> Result<(), BotError> {
                     pause: Duration::from_secs(5),
                     offset: Duration::from_secs(u64::from(8 - n % 8)),
                 },
+                camera: false,
             }
         };
         let bot = Bot::on_memory(&network, &secret, &format!("bot {n}"), script)?;
@@ -119,6 +121,7 @@ struct Options {
     advertise: Vec<SocketAddr>,
     speaker: Option<u32>,
     silent: bool,
+    pattern: bool,
     seconds: Option<u64>,
     stun: Vec<String>,
     no_stun: bool,
@@ -153,6 +156,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
                 options.seconds = Some(text.parse().map_err(|_| format!("not a number: {text}"))?);
             }
             "--silent" => options.silent = true,
+            "--pattern" => options.pattern = true,
             "--stun" => options.stun.push(value("an address")?),
             "--no-stun" => options.no_stun = true,
             "--dial-seconds" => {
@@ -173,6 +177,11 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
         Script::silent(speaker)
     } else {
         Script::talking(speaker, 0.4)
+    };
+    let (script, camera) = if options.pattern {
+        (script.filmed(), true)
+    } else {
+        (script, false)
     };
     let secret = match &ticket {
         Some(ticket) => Secret::new(*ticket.secret.expose()),
@@ -252,21 +261,33 @@ async fn networked(ticket: Option<Ticket>, options: Options) -> Result<(), BotEr
             );
         }
         if frame % 50 == 49 {
-            let (roster, links) = {
-                let status = bot.participant().control().status();
-                let status = status.borrow();
-                (status.roster.len(), status.links.len())
-            };
-            println!(
-                "second {}: roster {roster}, links {links}, hears {:?}",
-                frame / 50 + 1,
-                bot.hears_among(0..PITCHES)
-            );
+            say_second(&bot, frame / 50 + 1, camera);
         }
         frame = frame.saturating_add(1);
     }
     bot.stop().await;
     Ok(())
+}
+
+/// What a bot on the network says each second.
+fn say_second(bot: &Bot, second: u64, camera: bool) {
+    let (roster, links) = {
+        let status = bot.participant().control().status();
+        let status = status.borrow();
+        (status.roster.len(), status.links.len())
+    };
+    let filmed = if camera {
+        format!(", pictures sent {}", bot.filmed())
+    } else {
+        String::new()
+    };
+    println!(
+        "second {second}: roster {roster}, links {links}, hears {:?}{filmed}",
+        bot.hears_among(0..PITCHES)
+    );
+    if let Some(why) = bot.camera_trouble() {
+        eprintln!("camera: {why}");
+    }
 }
 
 fn say_network(network: Network) {

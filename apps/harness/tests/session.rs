@@ -8,7 +8,9 @@
 )]
 
 use palaver_harness::live::Reading;
+use palaver_harness::picture::Slot;
 use palaver_harness::session::{NoSound, Order, Sound, Stage, View, World, Worst, run};
+use palaver_harness::show::Screen;
 use palaver_media::Channels;
 use palaver_net::memory::MemoryNetwork;
 use palaver_proto::{SECRET_BYTES, Secret};
@@ -106,6 +108,22 @@ impl Seat {
     }
 
     fn with(network: &MemoryNetwork, no_sound: bool, behind_nat: bool) -> Self {
+        Self::seated(network, no_sound, behind_nat, None)
+    }
+
+    /// A seat that shows pictures, and has a camera or not.
+    fn with_screen(network: &MemoryNetwork, camera: bool) -> Self {
+        let camera = camera.then(|| Arc::new(Slot::default()));
+        let screen = Screen::new(camera, 180, 300_000);
+        Self::seated(network, false, false, Some(screen))
+    }
+
+    fn seated(
+        network: &MemoryNetwork,
+        no_sound: bool,
+        behind_nat: bool,
+        screen: Option<Screen>,
+    ) -> Self {
         let (orders, taken) = unbounded_channel();
         let view = Arc::new(Mutex::new(View::default()));
         let switches = Switches::default();
@@ -116,7 +134,7 @@ impl Seat {
             behind_nat,
         };
         let shown = Arc::clone(&view);
-        tokio::spawn(async move { run(taken, &shown, world).await });
+        tokio::spawn(async move { run(taken, &shown, world, screen).await });
         Self {
             orders,
             view,
@@ -320,4 +338,27 @@ fn a_gauge_is_read_for_its_worst_over_the_last_few() {
     assert_eq!(worst.after(1), 2);
     assert_eq!(worst.after(0), 1);
     assert_eq!(worst.after(9), 9);
+}
+
+#[tokio::test(start_paused = true)]
+async fn whoever_has_a_camera_is_named_to_the_others_as_the_picture_to_show() {
+    let network = MemoryNetwork::new();
+    let (ana, bo) = (
+        Seat::with_screen(&network, true),
+        Seat::with_screen(&network, false),
+    );
+    ana.start("Ana", None);
+    let alone = ana
+        .until(5, "in a meeting of one", |view| view.people.len() == 1)
+        .await;
+    bo.start("Bo", alone.ticket);
+    // Bo is shown Ana's picture; Ana has nobody's to show, as Bo offered no camera.
+    bo.until(10, "shown Ana's picture", |view| {
+        view.far.as_deref() == Some("Ana")
+    })
+    .await;
+    let both = ana
+        .until(5, "two people", |view| view.people.len() == 2)
+        .await;
+    assert_eq!(both.far, None);
 }

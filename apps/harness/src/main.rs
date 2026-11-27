@@ -13,10 +13,11 @@
 //!                                           machine's own picture, in place of a camera;
 //!                                           --coded shows it also as it would be sent,
 //!                                           encoded at that rate and decoded again
-//! palaver-harness shot <file.png> [name [pattern|coded]]
+//! palaver-harness shot <file.png> [name [pattern|coded|plain [ticket-file]]]
 //!                                           a picture of the window, taken by itself:
 //!                                           of the first screen, or with a name, of a
-//!                                           meeting started under it
+//!                                           meeting started under it, or joined by
+//!                                           the ticket in the file
 //! palaver-harness create [options]          start a meeting; prints a ticket to hand on
 //! palaver-harness join <ticket> [options]   join one
 //!
@@ -317,6 +318,7 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
             }
             _ => {}
         }
+        setup.ticket_file = args.next();
         return Ok(setup);
     }
     while let Some(arg) = args.next() {

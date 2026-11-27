@@ -542,11 +542,24 @@ subscriber and the smaller size; the paused tile; the conductor's part; going ba
 - **The two ends** (`sdk::video`). The sender codes nothing while nobody watches. A key
   frame begins a group and ends the one before; one that is asked for is made at once
   if enough frames have passed since the last, and otherwise when they have (the
-  encoder's own limit; the khefs have none). Groups are numbered from the clock, so
-  that a node that starts again does not reuse numbers the khefs remember. The
+  encoder's own limit; the khefs have none). Groups are numbered from nought, and go
+  on from where they were when an encoder is replaced: a track's name holds its
+  participant's id, which is made from a key that is new each time a node starts, so
+  a node that starts again has new tracks and no khef remembers numbers for them.
+  (Should a node ever keep its key from one run to the next, the track's name would
+  need a number of its own for each run.) The
   receiver shows each frame as soon as it is whole; a group that begins takes the place
   of an older one still arriving; when a frame cannot be decoded or a group is given up
   it asks once for a group after the one it lost, and waits for one to begin.
+- **One node's pictures** (`sdk::pictures`): the sender and the receivers behind the
+  engine's door for video, for one thread to turn. A participant offers a camera by
+  naming it in its options; nothing is coded until somebody watches.
+- **The app and the bot**. The app's pattern (`--pattern`) is offered as its camera
+  and coded at 500 kbit/s, with a key frame by itself every ten seconds. It watches
+  the first video track in the plan that is not its own and shows it under its
+  owner's name; the details give, each way, the rate, the frames a second and the
+  time to code one. Coding runs on a thread of its own, which looks for work every
+  5 ms. The bot does the same with `--pattern`, in its speaker's colour.
 - **Not yet**: keeping the group in hand for whoever joins part way; the new way taken
   up before the old is dropped; anything for a link that cannot keep up.
 

@@ -13,6 +13,7 @@
 use crate::history::{Heard, History, Linked, Past};
 pub use crate::history::{LinkLine, VoiceLine};
 use crate::live::{Live, Reading, Tuning};
+use crate::show::{Flow, Flowing, Meter, Screen, Show, far_of};
 use palaver_media::Channels;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
@@ -109,6 +110,12 @@ pub struct Details {
     pub voices: Vec<VoiceLine>,
     /// The connections this node has, as they are now.
     pub links: Vec<LinkLine>,
+    /// This machine's picture as it is sent, and someone else's as it is shown, over
+    /// the last second.
+    pub picture_sent: Flow,
+    pub picture_shown: Flow,
+    /// Why the pictures stopped, if they did.
+    pub picture_trouble: Option<String>,
 }
 
 /// The gauges as they are remembered between refreshes.
@@ -122,11 +129,18 @@ struct Gauges {
     history: History,
     /// When the meeting's sound began, by the session's clock.
     began: tokio::time::Instant,
+    /// What the meeting's pictures cost, if it has any.
+    meter: Option<Arc<Meter>>,
+    picture_sent: Flowing,
+    picture_shown: Flowing,
 }
 
 impl Gauges {
-    fn new() -> Self {
+    fn new(meter: Option<Arc<Meter>>) -> Self {
         Self {
+            meter,
+            picture_sent: Flowing::over(REMEMBERED / 5),
+            picture_shown: Flowing::over(REMEMBERED / 5),
             sound_gap: Worst::of_last(REMEMBERED),
             sound_burst: Worst::of_last(REMEMBERED),
             network_late: Worst::of_last(REMEMBERED),
@@ -157,6 +171,8 @@ pub struct View {
     pub microphone: String,
     pub speaker: String,
     pub muted: bool,
+    /// Whose picture is shown, if anyone's.
+    pub far: Option<String>,
     /// When this node got in.
     pub since: Option<Instant>,
     pub details: Details,
@@ -278,7 +294,7 @@ const fn name_of(network: Network) -> &'static str {
 impl Session {
     /// Start the thread. It ends when the session is dropped.
     #[must_use]
-    pub fn start(tuning: Tuning) -> Self {
+    pub fn start(tuning: Tuning, screen: Option<Screen>) -> Self {
         let (orders, taken) = unbounded_channel();
         let view = Arc::new(Mutex::new(View::default()));
         let shown = Arc::clone(&view);
@@ -292,7 +308,7 @@ impl Session {
                 });
                 return;
             };
-            runtime.block_on(run(taken, &shown, Real { tuning }));
+            runtime.block_on(run(taken, &shown, Real { tuning }, screen));
         });
         Self { orders, view }
     }
@@ -324,8 +340,14 @@ fn set(view: &Mutex<View>, change: impl FnOnce(&mut View)) {
     }
 }
 
-/// Take orders until there is nobody left to give them, keeping `view` up to date.
-pub async fn run<W: World>(mut orders: UnboundedReceiver<Order>, view: &Mutex<View>, mut world: W) {
+/// Take orders until there is nobody left to give them, keeping `view` up to date. With
+/// a `screen`, each meeting's pictures go to it and come from it.
+pub async fn run<W: World>(
+    mut orders: UnboundedReceiver<Order>,
+    view: &Mutex<View>,
+    mut world: W,
+    screen: Option<Screen>,
+) {
     while let Some(order) = orders.recv().await {
         if let Order::Start {
             name,
@@ -343,6 +365,7 @@ pub async fn run<W: World>(mut orders: UnboundedReceiver<Order>, view: &Mutex<Vi
                 name: &name,
                 ticket: ticket.as_deref(),
                 ask_outside,
+                screen: screen.as_ref(),
             };
             let ended = meeting(asked, &mut orders, view, &mut world).await;
             set(view, |view| {
@@ -399,13 +422,16 @@ fn refresh(
         })
         .collect();
     let speaker_lead = gauges.speaker_lead.after(sound.lead);
-    gauges.history.note(
-        gauges.began.elapsed(),
-        sound.longest_gap,
-        speaker_lead,
-        heard,
-        linked,
-    );
+    let at = gauges.began.elapsed();
+    let counted = gauges
+        .meter
+        .as_ref()
+        .map_or_else(Default::default, |meter| {
+            (meter.sent.read(), meter.shown.read())
+        });
+    gauges
+        .history
+        .note(at, sound.longest_gap, speaker_lead, heard, linked);
     let details = Details {
         sound_gap: gauges.sound_gap.after(sound.longest_gap),
         sound_burst: gauges.sound_burst.after(sound.largest_burst),
@@ -416,7 +442,16 @@ fn refresh(
         sound_gap_past: gauges.history.sound_gap(),
         voices: gauges.history.voices(),
         links: gauges.history.links(),
+        picture_sent: gauges.picture_sent.after(at, counted.0),
+        picture_shown: gauges.picture_shown.after(at, counted.1),
+        picture_trouble: gauges.meter.as_ref().and_then(|meter| meter.failed()),
     };
+    // Whose picture there is to show, on a machine that shows pictures.
+    let far = gauges
+        .meter
+        .as_ref()
+        .and_then(|_| far_of(&status.videos))
+        .map(|track| name_of(&track.participant));
     let me = participant.control().me().clone();
     let people: Vec<Person> = status
         .roster
@@ -443,6 +478,7 @@ fn refresh(
             view.ticket = handing_on;
         }
         view.people = people;
+        view.far = far;
         view.links = status.links.len();
         // The loudest level starts again at each reading; keep the last one heard.
         view.sound = sound;
@@ -477,6 +513,28 @@ struct Asked<'a> {
     name: &'a str,
     ticket: Option<&'a str>,
     ask_outside: bool,
+    screen: Option<&'a Screen>,
+}
+
+impl Asked<'_> {
+    /// How the node shows itself to the meeting.
+    fn options(&self, playout: Channels) -> Options {
+        Options {
+            playout,
+            // A camera is offered only by a machine that has pictures to send.
+            camera: self
+                .screen
+                .filter(|screen| screen.camera.is_some())
+                .map(|screen| screen.rendition.clone()),
+            ..Options::named(self.name)
+        }
+    }
+
+    /// Start the meeting's pictures, on a machine that shows any.
+    fn show(&self, participant: &mut Participant) -> Option<Show> {
+        let (port, status) = participant.video()?;
+        Some(Show::start(port, status, self.screen?.clone()))
+    }
 }
 
 /// One meeting, from starting the node to leaving. `Err` says why it ended, if it was
@@ -496,11 +554,9 @@ async fn meeting<W: World>(
     };
     let secret = secret_for(invitation.as_ref())?;
     let playout = Channels::Stereo;
-    let options = Options {
-        playout,
-        ..Options::named(asked.name)
-    };
-    let (mut participant, call) = world.node(&secret, options)?;
+    let (mut participant, call) = world.node(&secret, asked.options(playout))?;
+    // Dropped when the meeting ends, which stops its thread.
+    let _show = asked.show(&mut participant);
     let live = match world.sound(call, playout) {
         Ok(live) => live,
         Err(failed) => {
@@ -537,7 +593,7 @@ async fn meeting<W: World>(
     let mut beat = tokio::time::interval(REFRESH);
     let mut pulse = tokio::time::interval(PULSE);
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut gauges = Gauges::new();
+    let mut gauges = Gauges::new(asked.screen.map(|screen| Arc::clone(&screen.meter)));
     let mut replied = false;
     let ended = loop {
         tokio::select! {

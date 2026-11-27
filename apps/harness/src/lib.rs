@@ -10,6 +10,7 @@ pub mod live;
 pub mod picture;
 pub mod png;
 pub mod session;
+pub mod show;
 pub mod ui;
 pub mod voice;
 pub mod words;
