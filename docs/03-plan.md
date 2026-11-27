@@ -88,7 +88,8 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
         coded frames and a receiver that turns them back into pictures. Done.
      d. The app and the bot: the pattern sent, and a tile for someone else's picture.
         Done; to be tried between machines.
-  4. Tiles for everyone, then simulcast and choosing a size for each tile.
+  4. Tiles for everyone (done: everyone's one size, each decoded), then simulcast and
+     choosing a size for each tile.
   5. Hardware encoding on Windows.
 - Default routes, hop-by-hop resolution, dedupe; every edge khef peered with ≥2 khefs.
 - Roster, self mute, host role, catalog track.

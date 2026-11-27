@@ -7,13 +7,15 @@
 use crate::check::{Finding, Found, MicCheck};
 use crate::picture::{Coding, Feed, Slot};
 use crate::session::{Order, Person, Session, Stage, View};
-use crate::show::Screen;
+use crate::show::{Screen, Wall};
 use crate::words;
 use eframe::egui::{
     self, Align2, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
 use palaver_media::picture::Size;
 use palaver_media::video::Settings;
+use palaver_proto::ParticipantId;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -123,6 +125,25 @@ impl Tile {
         self.shown = Some((size.width(), size.height(), began.elapsed()));
     }
 
+    /// Draw the picture within `room` under the name `name`, or a place kept for it if
+    /// there is none yet.
+    fn draw_within(&mut self, ui: &mut Ui, name: &str, room: Vec2) {
+        self.refresh(ui.ctx());
+        if let (Some(texture), Some((width, height, _))) = (&self.texture, self.shown) {
+            let wide = words::tile_width(width, height, room.y).min(room.x);
+            ui.add(
+                egui::Image::new((texture.id(), Vec2::new(wide, room.y)))
+                    .corner_radius(CornerRadius::same(4))
+                    .alt_text(name),
+            );
+        } else {
+            let (area, _) = ui.allocate_exact_size(room, Sense::hover());
+            let edge = Stroke::new(1.0, ember::LINE);
+            ui.painter()
+                .rect(area, 4.0, ember::PANEL, edge, egui::StrokeKind::Inside);
+        }
+    }
+
     /// Draw the picture `tall` high under the name `name`, if there is one yet.
     fn draw(&mut self, ui: &mut Ui, name: &str, tall: f32) {
         self.refresh(ui.ctx());
@@ -140,8 +161,6 @@ impl Tile {
 /// How large this machine's own pattern is, and how high its picture is drawn.
 const PATTERN: (u32, u32) = (640, 360);
 const OWN_TALL: f32 = 90.0;
-/// How high someone else's picture is drawn.
-const FAR_TALL: f32 = 180.0;
 /// The rate this machine's picture is coded at for the meeting, unless told otherwise.
 const BITRATE: u32 = 500_000;
 
@@ -175,8 +194,10 @@ pub struct Window {
     sent: Option<(Tile, Arc<Coding>)>,
     /// Whether this machine's own picture is drawn: only when asked for.
     self_view: SelfView,
-    /// The picture of someone else in the meeting.
-    far: Option<Tile>,
+    /// The pictures of the others in the meeting: where they arrive, and each as the
+    /// screen holds it.
+    wall: Option<Arc<Wall>>,
+    tiles: BTreeMap<ParticipantId, Tile>,
     /// Whether the details stand beside the meeting.
     details: Drawer,
     ticket_file: Option<String>,
@@ -228,11 +249,12 @@ impl Window {
         };
         let camera = pattern.then(|| Arc::new(Slot::default()));
         let screen = Screen::new(camera.clone(), PATTERN.1, coded.unwrap_or(BITRATE));
-        waking(&screen.far);
-        let far = Arc::clone(&screen.far);
+        let redraw = context.clone();
+        screen.wall.on_new(move || redraw.request_repaint());
+        let wall = Arc::clone(&screen.wall);
         let session = Session::start(setup.tuning, Some(screen));
         let mut window = Self::over(session, Some(MicCheck::start()), setup);
-        window.watch_far(far);
+        window.watch_wall(wall);
         if let (Some(slot), Some(size)) = (camera, Size::new(PATTERN.0, PATTERN.1)) {
             waking(&slot);
             window.feed = Some(match coded {
@@ -254,10 +276,10 @@ impl Window {
         self.own = Some(Tile::new(slot));
     }
 
-    /// Show what is put into `slot` as the picture of someone else, while the session
-    /// says whose it is.
-    pub fn watch_far(&mut self, slot: Arc<Slot>) {
-        self.far = Some(Tile::new(slot));
+    /// Show what is put on `wall` as the pictures of the others, each while the session
+    /// says there is one of them.
+    pub fn watch_wall(&mut self, wall: Arc<Wall>) {
+        self.wall = Some(wall);
     }
 
     /// Show what is put into `slot` beside it, as the picture after encoding and
@@ -292,7 +314,8 @@ impl Window {
             } else {
                 SelfView::Hidden
             },
-            far: None,
+            wall: None,
+            tiles: BTreeMap::new(),
             feed: None,
             sent: None,
             // Closed until asked for; open in a picture, so that the picture shows them.
@@ -537,18 +560,18 @@ impl Window {
         ui.separator();
 
         // The circle leaves room for what is drawn under it.
-        let below = if view.far.is_some() && self.far.is_some() {
-            220.0 + FAR_TALL
+        let shown = if self.wall.is_some() {
+            view.pictures.len()
         } else {
-            210.0
+            0
         };
+        let (across, wide, tall) = words::tiles(shown, ui.available_width());
+        let below = 210.0 + words::tiles_tall(shown, across, tall);
         let side = ui
             .available_width()
             .min((ui.available_height() - below).max(160.0));
         circle(ui, side, &view.people, view.sound.voices);
-        if let (Some(far), Some(name)) = (&mut self.far, &view.far) {
-            far.draw(ui, &words::far_name(name), FAR_TALL);
-        }
+        self.others(ui, view, across, Vec2::new(wide, tall));
         if self.self_view == SelfView::Shown {
             ui.horizontal(|ui| {
                 if let Some(own) = &mut self.own {
@@ -646,6 +669,35 @@ impl Window {
                 width,
                 inner.height(),
             )));
+        }
+    }
+
+    /// The pictures of the others, `across` to a row, each in `room` over its name.
+    fn others(&mut self, ui: &mut Ui, view: &View, across: usize, room: Vec2) {
+        let Some(wall) = self.wall.clone() else {
+            return;
+        };
+        self.tiles
+            .retain(|id, _| view.pictures.iter().any(|pictured| pictured.id == *id));
+        for row in view.pictures.chunks(across) {
+            ui.horizontal(|ui| {
+                for pictured in row {
+                    let slot = Arc::clone(&wall.of(&pictured.id).slot);
+                    let tile = self
+                        .tiles
+                        .entry(pictured.id.clone())
+                        .or_insert_with(|| Tile::new(Arc::clone(&slot)));
+                    // A seat made again is another slot: the old one gets nothing more.
+                    if !Arc::ptr_eq(&tile.slot, &slot) {
+                        *tile = Tile::new(slot);
+                    }
+                    ui.vertical(|ui| {
+                        tile.draw_within(ui, &words::far_name(&pictured.name), room);
+                        let name = RichText::new(&pictured.name).small().color(ember::QUIET);
+                        ui.label(name);
+                    });
+                }
+            });
         }
     }
 
@@ -861,8 +913,9 @@ fn circle(ui: &mut Ui, side: f32, people: &[Person], voices: usize) {
     let (area, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), side), Sense::hover());
     let painter = ui.painter();
     let centre = area.center();
-    let ring = side * 0.36;
     let disc = (side * 0.085).clamp(18.0, 34.0);
+    // In a small circle the ring draws in, so that the names stay inside it.
+    let ring = (side * 0.36).min(side / 2.0 - disc - 22.0);
 
     // The fire.
     let fire = 6.0 + 5.0 * voices.min(4) as f32;
@@ -945,8 +998,8 @@ impl Window {
         if self.own.is_some() {
             pictures.push(words::picture_sent_line(view.details.picture_sent));
         }
-        if let Some(name) = &view.far {
-            pictures.push(words::picture_shown_line(name, view.details.picture_shown));
+        for pictured in &view.pictures {
+            pictures.push(words::picture_shown_line(&pictured.name, pictured.flow));
         }
         if let Some(why) = &view.details.picture_trouble {
             pictures.push(format!("pictures: {why}"));

@@ -556,9 +556,11 @@ subscriber and the smaller size; the paused tile; the conductor's part; going ba
   naming it in its options; nothing is coded until somebody watches.
 - **The app and the bot**. The app's pattern (`--pattern`) is offered as its camera
   and coded at 500 kbit/s, with a key frame by itself every ten seconds. It watches
-  the first video track in the plan that is not its own and shows it under its
-  owner's name; the details give, each way, the rate, the frames a second and the
-  time to code one. Coding runs on a thread of its own, which looks for work every
+  the first video track of everyone else in the plan and shows each under its
+  owner's name: one large, up to four at two to a row, more at three. Each has a
+  decoder of its own. The details give, for what is sent and for each picture
+  shown, the rate, the frames a second and the time to code one. Its own picture
+  is hidden until asked for. Coding runs on a thread of its own, which looks for work every
   5 ms. The bot does the same with `--pattern`, in its speaker's colour.
 - **Not yet**: keeping the group in hand for whoever joins part way; the new way taken
   up before the old is dropped; anything for a link that cannot keep up.

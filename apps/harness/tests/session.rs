@@ -354,11 +354,11 @@ async fn whoever_has_a_camera_is_named_to_the_others_as_the_picture_to_show() {
     bo.start("Bo", alone.ticket);
     // Bo is shown Ana's picture; Ana has nobody's to show, as Bo offered no camera.
     bo.until(10, "shown Ana's picture", |view| {
-        view.far.as_deref() == Some("Ana")
+        view.pictures.iter().map(|p| p.name.as_str()).eq(["Ana"])
     })
     .await;
     let both = ana
         .until(5, "two people", |view| view.people.len() == 2)
         .await;
-    assert_eq!(both.far, None);
+    assert!(both.pictures.is_empty());
 }

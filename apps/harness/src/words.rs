@@ -271,6 +271,34 @@ pub const fn self_view(shown: bool) -> &'static str {
     }
 }
 
+/// How the others' pictures are laid out in `width`: how many to a row, and how wide
+/// and high each is. One is large, up to four are two to a row, more are three.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a count of at most three, as a size on the screen"
+)]
+pub fn tiles(count: usize, width: f32) -> (usize, f32, f32) {
+    let across: usize = match count {
+        0 | 1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    };
+    let gaps = 10.0 * (across - 1) as f32;
+    let wide = ((width - gaps) / across as f32).clamp(80.0, 320.0);
+    (across, wide, wide * 9.0 / 16.0)
+}
+
+/// How high `count` pictures stand, `across` to a row and each `tall` over its name.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a count of rows, as a size on the screen"
+)]
+pub fn tiles_tall(count: usize, across: usize, tall: f32) -> f32 {
+    count.div_ceil(across.max(1)) as f32 * (tall + 36.0)
+}
+
 /// What someone else's picture is called.
 #[must_use]
 pub fn far_name(name: &str) -> String {
@@ -811,6 +839,22 @@ mod tests {
             "picture of Bo: nothing yet"
         );
         assert_eq!(far_name("Bo"), "Bo's picture");
+    }
+
+    #[test]
+    fn the_others_pictures_are_smaller_the_more_there_are() {
+        // One is as large as it may be; a narrow window makes it smaller.
+        assert_eq!(tiles(1, 464.0), (1, 320.0, 180.0));
+        assert_eq!(tiles(1, 160.0), (1, 160.0, 90.0));
+        // Two to a row up to four, then three.
+        assert_eq!(tiles(2, 330.0), (2, 160.0, 90.0));
+        assert_eq!(tiles(4, 330.0).0, 2);
+        assert_eq!(tiles(5, 500.0), (3, 160.0, 90.0));
+        // Nobody's is no division by nothing.
+        assert_eq!(tiles(0, 464.0).0, 1);
+        // Five at three to a row are two rows, each with its name under it.
+        assert!((tiles_tall(5, 3, 90.0) - 252.0).abs() < 0.001);
+        assert!(tiles_tall(0, 1, 180.0).abs() < 0.001);
     }
 
     #[test]

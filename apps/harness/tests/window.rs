@@ -7,11 +7,15 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use palaver_harness::check::Finding;
 use palaver_harness::picture::Slot;
-use palaver_harness::session::{Details, LinkLine, Order, Person, Session, Stage, View, VoiceLine};
+use palaver_harness::session::{
+    Details, LinkLine, Order, Person, Pictured, Session, Stage, View, VoiceLine,
+};
+use palaver_harness::show::{Flow, Wall};
 use palaver_harness::ui::{Setup, Window};
 use palaver_harness::words;
 use palaver_media::jitter::Stats;
 use palaver_media::picture::{Pattern, Size};
+use palaver_proto::ParticipantId;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -230,24 +234,40 @@ fn this_machines_own_picture_is_shown_in_a_meeting_only_when_asked_for() {
 }
 
 #[test]
-fn someone_elses_picture_is_shown_under_their_name_while_the_meeting_has_one() {
+fn the_others_pictures_are_shown_under_their_names_while_the_meeting_has_them() {
     let mut desk = Desk::named("Ana");
-    let (own, far) = (Arc::new(Slot::default()), Arc::new(Slot::default()));
+    let (own, wall) = (Arc::new(Slot::default()), Arc::new(Wall::default()));
     desk.harness.state_mut().watch(Arc::clone(&own));
-    desk.harness.state_mut().watch_far(Arc::clone(&far));
+    desk.harness.state_mut().watch_wall(Arc::clone(&wall));
     let size = Size::new(64, 36).unwrap();
     own.put(Pattern::new(size, 1).next_picture());
-    far.put(Pattern::new(size, 2).next_picture());
-    // A picture left from before is not shown when nobody in the meeting has one.
+    let pictured = |seed: u8, name: &str| Pictured {
+        id: ParticipantId::from_key_hash([seed; 16]),
+        name: name.into(),
+        flow: Flow::default(),
+    };
+    let (bo, cy) = (pictured(2, "Bo"), pictured(3, "Cy"));
+    wall.of(&bo.id)
+        .slot
+        .put(Pattern::new(size, 2).next_picture());
+    // A picture left from before is not shown when the meeting has none of them.
     desk.show(in_a_meeting);
     desk.click("Details");
     assert!(!desk.shows("Bo's picture"));
-    desk.show(|view| view.far = Some(String::from("Bo")));
+    desk.show(|view| view.pictures = vec![bo.clone(), cy.clone()]);
     assert!(desk.shows("Bo's picture"));
+    // Cy's has not come yet: a place is kept for it, under the name.
+    assert!(!desk.shows("Cy's picture"));
+    wall.of(&cy.id)
+        .slot
+        .put(Pattern::new(size, 3).next_picture());
+    desk.show(|_| {});
+    assert!(desk.shows("Cy's picture"));
     // The details say how each way is going.
     for line in [
         "picture sent: nobody is watching",
         "picture of Bo: nothing yet",
+        "picture of Cy: nothing yet",
     ] {
         assert!(
             desk.harness.query_by_label_contains(line).is_some(),
@@ -256,6 +276,9 @@ fn someone_elses_picture_is_shown_under_their_name_while_the_meeting_has_one() {
     }
     desk.show(|view| view.details.picture_trouble = Some(String::from("no codec")));
     assert!(desk.shows("pictures: no codec"));
+    // Someone who leaves takes their picture along.
+    desk.show(|view| view.pictures.truncate(1));
+    assert!(desk.shows("Bo's picture") && !desk.shows("Cy's picture"));
 }
 
 #[test]

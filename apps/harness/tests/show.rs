@@ -8,9 +8,10 @@ use palaver_harness::show::{Projector, Screen};
 use palaver_media::picture::{Pattern, Size};
 use palaver_net::memory::MemoryNetwork;
 use palaver_proto::Secret;
-use palaver_sdk::{Call, Options, Participant};
+use palaver_sdk::{Call, Options, Participant, Status};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::time::timeout;
 
 /// One machine: its node, what turns its pictures, and the screen they go to.
@@ -38,38 +39,56 @@ fn machine(network: &MemoryNetwork, name: &str, camera: bool) -> Machine {
     }
 }
 
+/// Wait until the plan `status` shows lists `count` video tracks.
+async fn until_tracks(mut status: watch::Receiver<Status>, count: usize) {
+    let listed = status.wait_for(|status| status.videos.len() == count);
+    assert!(timeout(Duration::from_secs(30), listed).await.is_ok());
+}
+
 #[tokio::test(start_paused = true)]
-async fn what_one_machine_films_is_shown_on_the_other() {
+async fn everyone_with_a_camera_is_shown_to_everyone_else() {
     let network = MemoryNetwork::new();
     let mut ana = machine(&network, "Ana", true);
     let mut bo = machine(&network, "Bo", false);
+    let mut cy = machine(&network, "Cy", true);
     ana.participant.create_meeting().await;
-    bo.participant
-        .join(vec![ana.participant.address().clone()])
-        .await;
-    let mut status = bo.participant.control().status();
-    let listed = status.wait_for(|status| status.videos.len() == 1);
-    assert!(timeout(Duration::from_secs(30), listed).await.is_ok());
+    for joiner in [&bo, &cy] {
+        joiner
+            .participant
+            .join(vec![ana.participant.address().clone()])
+            .await;
+    }
+    for each in [&ana, &bo, &cy] {
+        until_tracks(each.participant.control().status(), 2).await;
+    }
 
     let size = Size::new(320, 180).unwrap();
     let mut pattern = Pattern::new(size, 1);
-    let camera = ana.screen.camera.clone().unwrap();
     for _ in 0..30 {
-        camera.put(pattern.next_picture());
-        ana.projector.turn();
+        for filmed in [&mut ana, &mut cy] {
+            let camera = filmed.screen.camera.clone().unwrap();
+            camera.put(pattern.next_picture());
+            filmed.projector.turn();
+        }
         tokio::time::sleep(Duration::from_millis(33)).await;
         bo.projector.turn();
     }
-    // Bo is shown Ana's picture, and both count what that cost.
-    let (shown, picture) = bo.screen.far.newer_than(0).unwrap();
-    assert!(shown >= 10, "only {shown} pictures shown");
-    assert_eq!(picture.size(), size);
-    let (sent, decoded) = (ana.screen.meter.sent.read(), bo.screen.meter.shown.read());
-    assert!(sent.frames >= shown && sent.bytes > 0);
-    assert_eq!(decoded.frames, shown);
-    assert_eq!(ana.screen.meter.failed(), None);
+    let id = |machine: &Machine| machine.participant.control().me().clone();
+    // Bo is shown both, each in its own seat, and each is counted apart.
+    for filmed in [&ana, &cy] {
+        let seat = bo.screen.wall.get(&id(filmed)).unwrap();
+        let (shown, picture) = seat.slot.newer_than(0).unwrap();
+        assert!(shown >= 10, "only {shown} pictures shown");
+        assert_eq!(picture.size(), size);
+        assert_eq!(seat.count.read().frames, shown);
+        let coded = filmed.screen.meter.sent.read();
+        assert!(coded.frames >= shown && coded.bytes > 0);
+        assert_eq!(filmed.screen.meter.failed(), None);
+    }
     assert_eq!(bo.screen.meter.failed(), None);
-    // Ana has nobody to watch: Bo offered no camera.
-    assert_eq!(ana.screen.far.count(), 0);
+    // Each of the two with a camera is shown the other, and nobody is shown Bo, who
+    // offered none and sent nothing.
+    assert!(ana.screen.wall.get(&id(&cy)).is_some());
+    assert!(ana.screen.wall.get(&id(&bo)).is_none());
     assert_eq!(bo.screen.meter.sent.read().frames, 0);
 }
