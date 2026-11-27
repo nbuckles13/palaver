@@ -111,6 +111,7 @@ async fn a_voice_that_stops_is_no_longer_heard_and_one_that_starts_is() {
             pause: Duration::from_secs(2),
             offset: Duration::from_secs(offset),
         },
+        camera: false,
     };
     let mut bots = room(&[Script::silent(0), turn(1, 0), turn(2, 2)]).await;
     run(&mut bots, 2).await;

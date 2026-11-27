@@ -225,6 +225,35 @@ fn this_machines_own_picture_is_shown_in_a_meeting_once_there_is_one() {
 }
 
 #[test]
+fn someone_elses_picture_is_shown_under_their_name_while_the_meeting_has_one() {
+    let mut desk = Desk::named("Ana");
+    let (own, far) = (Arc::new(Slot::default()), Arc::new(Slot::default()));
+    desk.harness.state_mut().watch(Arc::clone(&own));
+    desk.harness.state_mut().watch_far(Arc::clone(&far));
+    let size = Size::new(64, 36).unwrap();
+    own.put(Pattern::new(size, 1).next_picture());
+    far.put(Pattern::new(size, 2).next_picture());
+    // A picture left from before is not shown when nobody in the meeting has one.
+    desk.show(in_a_meeting);
+    desk.click("Details");
+    assert!(!desk.shows("Bo's picture"));
+    desk.show(|view| view.far = Some(String::from("Bo")));
+    assert!(desk.shows("Bo's picture"));
+    // The details say how each way is going.
+    for line in [
+        "picture sent: nobody is watching",
+        "picture of Bo: nothing yet",
+    ] {
+        assert!(
+            desk.harness.query_by_label_contains(line).is_some(),
+            "{line}"
+        );
+    }
+    desk.show(|view| view.details.picture_trouble = Some(String::from("no codec")));
+    assert!(desk.shows("pictures: no codec"));
+}
+
+#[test]
 fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring() {
     let mut desk = Desk::named("Ana");
     desk.show(|view| {
@@ -263,6 +292,7 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
                 rtt_past: vec![Some(7), Some(9)],
                 lost_past: vec![Some(0), Some(1)],
             }],
+            ..Details::default()
         };
     });
     let voice = "Bo: heard 110 ms after arriving (buffer 60 ms) · played 500 · rebuilt 0 · lost 0 · skipped 0 · late 0";

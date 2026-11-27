@@ -8,12 +8,14 @@
 //! So a room of bots checks the product end to end by what a listener would notice: who
 //! is heard, by whom, and who is not.
 
+use palaver_media::picture::{Pattern, Size};
 use palaver_media::synthetic::{Rhythm, Voice, hears, pitch_of, strength};
+use palaver_media::video::{Error as VideoError, Settings, SoftwareDecoder, SoftwareEncoder};
 use palaver_media::{CodecError, FRAME_SAMPLES, SAMPLE_RATE};
 use palaver_net::memory::MemoryNetwork;
 use palaver_net::quic::QuicOptions;
 use palaver_proto::{SECRET_BYTES, Secret};
-use palaver_sdk::{Call, Options, Participant};
+use palaver_sdk::{Call, Options, Participant, Pictures};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -30,6 +32,9 @@ pub struct Script {
     /// How loud its loudest moments are, 0 to 1.
     pub loudness: f32,
     pub rhythm: Rhythm,
+    /// Whether it offers a camera: a moving pattern in its speaker's colour, coded
+    /// while somebody watches.
+    pub camera: bool,
 }
 
 impl Script {
@@ -44,6 +49,7 @@ impl Script {
                 pause: Duration::from_secs(1),
                 offset: Duration::ZERO,
             },
+            camera: false,
         }
     }
 
@@ -54,7 +60,52 @@ impl Script {
             speaker,
             loudness,
             rhythm: Rhythm::ALWAYS,
+            camera: false,
         }
+    }
+
+    /// The same, with a camera.
+    #[must_use]
+    pub const fn filmed(self) -> Self {
+        Self {
+            camera: true,
+            ..self
+        }
+    }
+}
+
+/// How large a bot's picture is, what the meeting calls it, and the rate it is coded
+/// at, in bits a second.
+pub const PICTURE: (u32, u32) = (640, 360);
+const RENDITION: &[u8] = b"360p";
+const PICTURE_BITRATE: u32 = 500_000;
+/// A key frame by itself this often, in pictures: ten seconds.
+const KEY_EVERY: u32 = 300;
+
+/// A bot's camera: a pattern, and the way to the meeting.
+struct Film {
+    pictures: Pictures<SoftwareEncoder, SoftwareDecoder>,
+    pattern: Pattern,
+    size: Size,
+    /// Pictures that were due so far, at thirty a second.
+    due: u64,
+}
+
+impl Film {
+    /// The next picture, if somebody watches. Returns whether it was sent.
+    fn next(&mut self) -> Result<bool, VideoError> {
+        self.pictures.turn(|_, _| {});
+        if !self.pictures.wanted() {
+            return Ok(false);
+        }
+        if !self.pictures.has_camera() {
+            let settings = Settings {
+                key_every: Some(KEY_EVERY),
+                ..Settings::new(self.size, PICTURE_BITRATE)
+            };
+            self.pictures.set_camera(SoftwareEncoder::new(settings)?);
+        }
+        self.pictures.film(&self.pattern.next_picture())
     }
 }
 
@@ -69,6 +120,11 @@ pub struct Bot {
     /// What it has been given to play, most recent last, up to [`Bot::EARS`].
     played: Vec<f32>,
     frame: Vec<f32>,
+    film: Option<Box<Film>>,
+    /// Pictures sent so far.
+    filmed: u64,
+    /// Why its camera stopped, if it did.
+    camera_trouble: Option<String>,
 }
 
 impl Bot {
@@ -88,7 +144,7 @@ impl Bot {
         name: &str,
         script: Script,
     ) -> Result<Self, BotError> {
-        Participant::on_memory(network, secret, Options::named(name))
+        Participant::on_memory(network, secret, Self::options(name, script))
             .map(|(participant, call)| Self::with(participant, call, script))
     }
 
@@ -105,12 +161,33 @@ impl Bot {
         name: &str,
         script: Script,
     ) -> Result<Self, BotError> {
-        Participant::on_quic(options, advertise, secret, Options::named(name))
+        Participant::on_quic(options, advertise, secret, Self::options(name, script))
             .map(|(participant, call)| Self::with(participant, call, script))
     }
 
-    fn with(participant: Participant, call: Call, script: Script) -> Self {
+    fn options(name: &str, script: Script) -> Options {
+        Options {
+            camera: script.camera.then(|| RENDITION.to_vec()),
+            ..Options::named(name)
+        }
+    }
+
+    fn with(mut participant: Participant, call: Call, script: Script) -> Self {
+        let film = Size::new(PICTURE.0, PICTURE.1)
+            .filter(|_| script.camera)
+            .zip(participant.video())
+            .map(|(size, (port, status))| {
+                Box::new(Film {
+                    pictures: Pictures::new(port, status),
+                    pattern: Pattern::new(size, script.speaker),
+                    size,
+                    due: 0,
+                })
+            });
         Self {
+            film,
+            filmed: 0,
+            camera_trouble: None,
             participant,
             call,
             script,
@@ -151,7 +228,35 @@ impl Bot {
         self.played.extend_from_slice(&self.frame);
         let extra = self.played.len().saturating_sub(Self::EARS);
         self.played.drain(..extra);
+        self.film();
         Ok(())
+    }
+
+    /// The pictures that have come due since the last step: three for every five steps.
+    fn film(&mut self) {
+        let due = self.frames.saturating_mul(3) / 5;
+        while let Some(film) = self.film.as_mut().filter(|film| film.due < due) {
+            film.due = film.due.saturating_add(1);
+            match film.next() {
+                Ok(sent) => self.filmed = self.filmed.saturating_add(u64::from(sent)),
+                Err(error) => {
+                    self.camera_trouble = Some(error.to_string());
+                    self.film = None;
+                }
+            }
+        }
+    }
+
+    /// How many pictures it has sent.
+    #[must_use]
+    pub const fn filmed(&self) -> u64 {
+        self.filmed
+    }
+
+    /// Why its camera stopped, if it did.
+    #[must_use]
+    pub fn camera_trouble(&self) -> Option<&str> {
+        self.camera_trouble.as_deref()
     }
 
     /// What this bot played over the last second; empty until it has played that much.

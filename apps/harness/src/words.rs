@@ -4,6 +4,7 @@
 //! window. The drawing code in [`crate::ui`] decides nothing but colours and layout.
 
 use crate::check::Finding;
+use crate::show::Flow;
 use palaver_media::jitter::Stats;
 use std::time::Duration;
 
@@ -258,6 +259,41 @@ pub fn coding_line(bitrate: u64, encode: Duration, decode: Duration, let_go: u32
     } else {
         line
     }
+}
+
+/// What someone else's picture is called.
+#[must_use]
+pub fn far_name(name: &str) -> String {
+    format!("{name}'s picture")
+}
+
+fn flow_line(flow: Flow, coding: &str) -> String {
+    let tenths = flow.each.as_micros() / 100;
+    format!(
+        "{} kbit/s · {} a second · {}.{} ms to {coding}",
+        flow.bitrate / 1000,
+        flow.per_second,
+        tenths / 10,
+        tenths % 10
+    )
+}
+
+/// What the details say of this machine's picture as the meeting is sent it.
+#[must_use]
+pub fn picture_sent_line(flow: Flow) -> String {
+    if flow.per_second == 0 {
+        return String::from("picture sent: nobody is watching");
+    }
+    format!("picture sent: {}", flow_line(flow, "encode"))
+}
+
+/// What the details say of someone else's picture as it arrives.
+#[must_use]
+pub fn picture_shown_line(name: &str, flow: Flow) -> String {
+    if flow.per_second == 0 {
+        return format!("picture of {name}: nothing yet");
+    }
+    format!("picture of {name}: {}", flow_line(flow, "decode"))
 }
 
 /// How large a picture is drawn in a tile `tall` high: as wide as keeps its shape.
@@ -739,6 +775,32 @@ mod tests {
             ),
             "as sent: 90 kbit/s · 40.0 ms to encode · 2.0 ms to decode · 4 let go of late"
         );
+    }
+
+    #[test]
+    fn the_lines_for_pictures_in_a_meeting_give_rate_pace_and_cost() {
+        let flow = Flow {
+            bitrate: 487_300,
+            per_second: 30,
+            each: Duration::from_micros(3140),
+        };
+        assert_eq!(
+            picture_sent_line(flow),
+            "picture sent: 487 kbit/s · 30 a second · 3.1 ms to encode"
+        );
+        assert_eq!(
+            picture_shown_line("Bo", flow),
+            "picture of Bo: 487 kbit/s · 30 a second · 3.1 ms to decode"
+        );
+        assert_eq!(
+            picture_sent_line(Flow::default()),
+            "picture sent: nobody is watching"
+        );
+        assert_eq!(
+            picture_shown_line("Bo", Flow::default()),
+            "picture of Bo: nothing yet"
+        );
+        assert_eq!(far_name("Bo"), "Bo's picture");
     }
 
     #[test]

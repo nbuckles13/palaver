@@ -7,6 +7,7 @@
 use crate::check::{Finding, Found, MicCheck};
 use crate::picture::{Coding, Feed, Slot};
 use crate::session::{Order, Person, Session, Stage, View};
+use crate::show::Screen;
 use crate::words;
 use eframe::egui::{
     self, Align2, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
@@ -139,6 +140,10 @@ impl Tile {
 /// How large this machine's own pattern is, and how high its picture is drawn.
 const PATTERN: (u32, u32) = (640, 360);
 const OWN_TALL: f32 = 90.0;
+/// How high someone else's picture is drawn.
+const FAR_TALL: f32 = 180.0;
+/// The rate this machine's picture is coded at for the meeting, unless told otherwise.
+const BITRATE: u32 = 500_000;
 
 /// The window's own state: what has been typed, and what is being listened to.
 pub struct Window {
@@ -161,6 +166,8 @@ pub struct Window {
     feed: Option<Feed>,
     /// The same picture after encoding and decoding, and what that costs.
     sent: Option<(Tile, Arc<Coding>)>,
+    /// The picture of someone else in the meeting.
+    far: Option<Tile>,
     /// Whether the details stand beside the meeting.
     details: Drawer,
     ticket_file: Option<String>,
@@ -205,12 +212,20 @@ impl Window {
     fn new(context: &egui::Context, setup: Setup) -> Self {
         Self::dress(context);
         let (pattern, coded) = (setup.pattern, setup.coded);
-        let mut window = Self::over(Session::start(setup.tuning), Some(MicCheck::start()), setup);
-        if let (true, Some(size)) = (pattern, Size::new(PATTERN.0, PATTERN.1)) {
-            let slot = Arc::new(Slot::default());
-            // A new picture is a reason to draw again, at once.
-            let waking = context.clone();
-            slot.on_new(move || waking.request_repaint());
+        // A new picture is a reason to draw again, at once.
+        let waking = |slot: &Slot| {
+            let context = context.clone();
+            slot.on_new(move || context.request_repaint());
+        };
+        let camera = pattern.then(|| Arc::new(Slot::default()));
+        let screen = Screen::new(camera.clone(), PATTERN.1, coded.unwrap_or(BITRATE));
+        waking(&screen.far);
+        let far = Arc::clone(&screen.far);
+        let session = Session::start(setup.tuning, Some(screen));
+        let mut window = Self::over(session, Some(MicCheck::start()), setup);
+        window.watch_far(far);
+        if let (Some(slot), Some(size)) = (camera, Size::new(PATTERN.0, PATTERN.1)) {
+            waking(&slot);
             window.feed = Some(match coded {
                 Some(bitrate) => {
                     let (back, coding) = (Arc::new(Slot::default()), Arc::new(Coding::default()));
@@ -228,6 +243,12 @@ impl Window {
     /// Show what is put into `slot` as this machine's own picture.
     pub fn watch(&mut self, slot: Arc<Slot>) {
         self.own = Some(Tile::new(slot));
+    }
+
+    /// Show what is put into `slot` as the picture of someone else, while the session
+    /// says whose it is.
+    pub fn watch_far(&mut self, slot: Arc<Slot>) {
+        self.far = Some(Tile::new(slot));
     }
 
     /// Show what is put into `slot` beside it, as the picture after encoding and
@@ -256,6 +277,7 @@ impl Window {
             meter: 0.0,
             copied: None,
             own: None,
+            far: None,
             feed: None,
             sent: None,
             // Closed until asked for; open in a picture, so that the picture shows them.
@@ -295,7 +317,9 @@ impl Window {
         if let Some(name) = shot.name.filter(|_| self.name.is_empty()) {
             self.name = name;
             self.ask_outside = false;
-            self.start(None);
+            // With a ticket left in the file, the picture is of that meeting.
+            let ticket = Some(self.ticket.trim().to_owned()).filter(|ticket| !ticket.is_empty());
+            self.start(ticket);
         }
         if self.shot_done.load(Ordering::Relaxed) {
             context.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -497,10 +521,19 @@ impl Window {
         });
         ui.separator();
 
+        // The circle leaves room for what is drawn under it.
+        let below = if view.far.is_some() && self.far.is_some() {
+            220.0 + FAR_TALL
+        } else {
+            210.0
+        };
         let side = ui
             .available_width()
-            .min((ui.available_height() - 210.0).max(160.0));
+            .min((ui.available_height() - below).max(160.0));
         circle(ui, side, &view.people, view.sound.voices);
+        if let (Some(far), Some(name)) = (&mut self.far, &view.far) {
+            far.draw(ui, &words::far_name(name), FAR_TALL);
+        }
         ui.horizontal(|ui| {
             if let Some(own) = &mut self.own {
                 own.draw(ui, "Your picture", OWN_TALL);
@@ -593,7 +626,7 @@ impl Window {
 
     /// The details: this machine, each link and each voice, as they are now and as they
     /// have been over the last two minutes.
-    fn details(ui: &mut Ui, view: &View, pictures: [Option<String>; 2]) {
+    fn details(ui: &mut Ui, view: &View, pictures: Vec<String>) {
         let small = |text: String| RichText::new(text).small().monospace().color(ember::QUIET);
         let heading = |ui: &mut Ui, text: &str| {
             ui.add_space(6.0);
@@ -618,7 +651,7 @@ impl Window {
         if let Some(line) = words::noise_line(view.sound.noise_high) {
             ui.label(small(String::from(line)));
         }
-        for line in pictures.into_iter().flatten() {
+        for line in pictures {
             ui.label(small(line));
         }
         plot(
@@ -883,6 +916,16 @@ impl Window {
                 |why| format!("as sent: {why}"),
             )
         });
+        let mut pictures: Vec<String> = own.into_iter().chain(sent).collect();
+        if self.own.is_some() {
+            pictures.push(words::picture_sent_line(view.details.picture_sent));
+        }
+        if let Some(name) = &view.far {
+            pictures.push(words::picture_shown_line(name, view.details.picture_shown));
+        }
+        if let Some(why) = &view.details.picture_trouble {
+            pictures.push(format!("pictures: {why}"));
+        }
         if self.details != Drawer::Shut && view.stage == Stage::In {
             let beside = egui::Frame::new()
                 .fill(ember::PANEL)
@@ -896,7 +939,7 @@ impl Window {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("details")
-                        .show(ui, |ui| Self::details(ui, &view, [own, sent]));
+                        .show(ui, |ui| Self::details(ui, &view, pictures));
                 });
         }
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
