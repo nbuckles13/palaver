@@ -50,9 +50,11 @@ impl<E: Encode> VideoSender<E> {
     /// A sender for the track the plan calls `alias`.
     ///
     /// Groups are numbered from `first_group`, which must be more than any number this
-    /// track has used before, in an earlier run too: the time by the clock, in
-    /// milliseconds, will do. A key frame that is asked for is made at once if `key_gap`
-    /// frames have been coded since the last, and otherwise when they have.
+    /// track has used before: nought for a new track, and [`next_group`](Self::next_group)
+    /// of the sender before when one takes another's place. (A node that starts again
+    /// has a new key, so its tracks are new ones.) A key frame that is asked for is made
+    /// at once if `key_gap` frames have been coded since the last, and otherwise when
+    /// they have.
     pub const fn new(encoder: E, alias: u64, first_group: u64, key_gap: u32) -> Self {
         Self {
             encoder,
@@ -64,6 +66,22 @@ impl<E: Encode> VideoSender<E> {
             open: None,
             next_group: first_group,
             coded: Vec::new(),
+        }
+    }
+
+    /// The number the next group to begin will have.
+    #[must_use]
+    pub const fn next_group(&self) -> u64 {
+        self.next_group
+    }
+
+    /// The plan now calls the track `alias`. If that is a change, the group under way
+    /// is left and the next picture begins another.
+    pub const fn set_alias(&mut self, alias: u64) {
+        if alias != self.alias {
+            self.alias = alias;
+            self.open = None;
+            self.key_owed = self.wanted;
         }
     }
 
