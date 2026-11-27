@@ -15,8 +15,9 @@ use palaver_media::picture::Picture;
 use palaver_media::video::{
     Decode, Encode, Error, Kind, Settings, SoftwareDecoder, SoftwareEncoder,
 };
+use palaver_proto::ParticipantId;
 use palaver_sdk::{Pictures, Status, VideoPort, VideoTrack};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -68,9 +69,7 @@ impl Count {
 #[derive(Debug, Default)]
 pub struct Meter {
     /// Frames coded to send.
-    pub sent: Count,
-    /// Frames decoded to show.
-    pub shown: Count,
+    pub sent: Arc<Count>,
     failed: Mutex<Option<String>>,
 }
 
@@ -143,7 +142,7 @@ impl Flowing {
 /// A codec that counts what it does.
 pub struct Timed<C> {
     codec: C,
-    meter: Arc<Meter>,
+    count: Arc<Count>,
 }
 
 impl<E: Encode> Encode for Timed<E> {
@@ -151,7 +150,7 @@ impl<E: Encode> Encode for Timed<E> {
         let began = std::time::Instant::now();
         let kind = self.codec.encode(picture, out)?;
         if kind.is_some() {
-            self.meter.sent.add(out.len(), began.elapsed());
+            self.count.add(out.len(), began.elapsed());
         }
         Ok(kind)
     }
@@ -165,8 +164,71 @@ impl<D: Decode> Decode for Timed<D> {
     fn decode(&mut self, coded: &[u8]) -> Result<Option<Picture>, Error> {
         let began = std::time::Instant::now();
         let picture = self.codec.decode(coded)?;
-        self.meter.shown.add(coded.len(), began.elapsed());
+        self.count.add(coded.len(), began.elapsed());
         Ok(picture)
+    }
+}
+
+/// One of the others' pictures: where it is put, and what decoding it has come to.
+#[derive(Debug, Default)]
+pub struct Seat {
+    pub slot: Arc<Slot>,
+    pub count: Arc<Count>,
+}
+
+type Wake = Arc<dyn Fn() + Send + Sync>;
+
+/// The pictures of the others in a meeting, each under whose it is. Whoever decodes
+/// them and whoever draws them hold the same wall.
+#[derive(Default)]
+pub struct Wall {
+    seats: Mutex<BTreeMap<ParticipantId, Arc<Seat>>>,
+    wake: Mutex<Option<Wake>>,
+}
+
+impl std::fmt::Debug for Wall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wall").finish_non_exhaustive()
+    }
+}
+
+impl Wall {
+    /// Have `wake` called each time a picture is put in any seat.
+    pub fn on_new(&self, wake: impl Fn() + Send + Sync + 'static) {
+        if let Ok(mut held) = self.wake.lock() {
+            *held = Some(Arc::new(wake));
+        }
+    }
+
+    /// The seat for `who`'s picture, if there is one.
+    #[must_use]
+    pub fn get(&self, who: &ParticipantId) -> Option<Arc<Seat>> {
+        self.seats.lock().ok()?.get(who).cloned()
+    }
+
+    /// The seat for `who`'s picture, made now if there was none.
+    #[must_use]
+    pub fn of(&self, who: &ParticipantId) -> Arc<Seat> {
+        if let Some(seat) = self.get(who) {
+            return seat;
+        }
+        let seat = Arc::new(Seat::default());
+        if let Ok(wake) = self.wake.lock()
+            && let Some(wake) = wake.clone()
+        {
+            seat.slot.on_new(move || wake());
+        }
+        if let Ok(mut seats) = self.seats.lock() {
+            seats.insert(who.clone(), Arc::clone(&seat));
+        }
+        seat
+    }
+
+    /// Forget every seat but those of `who`.
+    pub fn keep(&self, who: &[&ParticipantId]) {
+        if let Ok(mut seats) = self.seats.lock() {
+            seats.retain(|id, _| who.contains(&id));
+        }
     }
 }
 
@@ -180,8 +242,8 @@ pub struct Screen {
     /// bits a second.
     pub rendition: Vec<u8>,
     pub bitrate: u32,
-    /// Where the picture of someone else is put.
-    pub far: Arc<Slot>,
+    /// Where the pictures of the others are put.
+    pub wall: Arc<Wall>,
     pub meter: Arc<Meter>,
 }
 
@@ -193,17 +255,25 @@ impl Screen {
             camera,
             rendition: format!("{tall}p").into_bytes(),
             bitrate,
-            far: Arc::new(Slot::default()),
+            wall: Arc::new(Wall::default()),
             meter: Arc::new(Meter::default()),
         }
     }
 }
 
-/// Whose picture is shown, of the video tracks in the plan: the first that is not this
-/// machine's own. (A picture for everyone is to come.)
+/// Whose pictures are shown, of the video tracks in the plan.
+///
+/// The first track of each participant but this machine's own, in the plan's order.
+/// (Choosing among the sizes one participant offers is to come.)
 #[must_use]
-pub fn far_of(tracks: &[VideoTrack]) -> Option<&VideoTrack> {
-    tracks.iter().find(|track| !track.own)
+pub fn others(tracks: &[VideoTrack]) -> Vec<&VideoTrack> {
+    let mut found: Vec<&VideoTrack> = Vec::new();
+    for track in tracks.iter().filter(|track| !track.own) {
+        if found.iter().all(|had| had.participant != track.participant) {
+            found.push(track);
+        }
+    }
+    found
 }
 
 /// The work between the node's pictures and the window's slots, a turn at a time.
@@ -212,8 +282,10 @@ pub struct Projector {
     screen: Screen,
     /// The count of the last of this machine's pictures that was taken.
     seen: u64,
-    /// The track being watched.
-    far: Option<u64>,
+    /// The plan's video tracks as they were last looked at.
+    tracks: Vec<VideoTrack>,
+    /// The tracks being watched, and where the pictures of each go.
+    watching: BTreeMap<u64, Arc<Seat>>,
 }
 
 impl Projector {
@@ -224,32 +296,58 @@ impl Projector {
             // What was made before the meeting is not for it.
             seen: screen.camera.as_ref().map_or(0, |slot| slot.count()),
             screen,
-            far: None,
+            tracks: Vec::new(),
+            watching: BTreeMap::new(),
         }
+    }
+
+    /// Watch everyone the plan now has a picture of, and nobody it no longer has.
+    fn watch_others(&mut self) {
+        let tracks = self.pictures.tracks();
+        if tracks == self.tracks {
+            return;
+        }
+        let wanted = others(&tracks);
+        let gone: Vec<u64> = self
+            .watching
+            .keys()
+            .copied()
+            .filter(|alias| wanted.iter().all(|track| track.alias != *alias))
+            .collect();
+        for alias in gone {
+            self.pictures.unwatch(alias);
+            self.watching.remove(&alias);
+        }
+        for track in &wanted {
+            if self.watching.contains_key(&track.alias) {
+                continue;
+            }
+            let seat = self.screen.wall.of(&track.participant);
+            match SoftwareDecoder::new() {
+                Ok(codec) => {
+                    let count = Arc::clone(&seat.count);
+                    self.pictures.watch(track.alias, Timed { codec, count });
+                }
+                Err(error) => self.screen.meter.fail(&error),
+            }
+            self.watching.insert(track.alias, seat);
+        }
+        let who: Vec<&ParticipantId> = wanted.iter().map(|track| &track.participant).collect();
+        self.screen.wall.keep(&who);
+        self.tracks = tracks;
     }
 
     /// One turn: watch whoever is to be watched, show what has come, and send this
     /// machine's newest picture if there is a new one and somebody watches.
     pub fn turn(&mut self) {
+        self.watch_others();
+        let watching = &self.watching;
+        self.pictures.turn(|alias, picture| {
+            if let Some(seat) = watching.get(&alias) {
+                seat.slot.put(picture);
+            }
+        });
         let meter = &self.screen.meter;
-        let want = far_of(&self.pictures.tracks()).map(|track| track.alias);
-        if want != self.far {
-            if let Some(old) = self.far.take() {
-                self.pictures.unwatch(old);
-            }
-            if let Some(new) = want {
-                match SoftwareDecoder::new() {
-                    Ok(codec) => {
-                        let meter = Arc::clone(meter);
-                        self.pictures.watch(new, Timed { codec, meter });
-                    }
-                    Err(error) => meter.fail(&error),
-                }
-            }
-            self.far = want;
-        }
-        let far = &self.screen.far;
-        self.pictures.turn(|_, picture| far.put(picture));
 
         let Some((seen, picture)) = self
             .screen
@@ -267,8 +365,8 @@ impl Projector {
             };
             match SoftwareEncoder::new(settings) {
                 Ok(codec) => {
-                    let meter = Arc::clone(meter);
-                    self.pictures.set_camera(Timed { codec, meter });
+                    let count = Arc::clone(&meter.sent);
+                    self.pictures.set_camera(Timed { codec, count });
                 }
                 Err(error) => {
                     meter.fail(&error);

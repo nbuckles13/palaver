@@ -13,14 +13,14 @@
 use crate::history::{Heard, History, Linked, Past};
 pub use crate::history::{LinkLine, VoiceLine};
 use crate::live::{Live, Reading, Tuning};
-use crate::show::{Flow, Flowing, Meter, Screen, Show, far_of};
+use crate::show::{Flow, Flowing, Meter, Screen, Show, Wall, others};
 use palaver_media::Channels;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
 use palaver_proto::SECRET_BYTES;
 use palaver_proto::{ParticipantId, Secret, Ticket};
 use palaver_sdk::{Call, LinkGauge, Options, Participant, Status, entry_points};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -110,13 +110,23 @@ pub struct Details {
     pub voices: Vec<VoiceLine>,
     /// The connections this node has, as they are now.
     pub links: Vec<LinkLine>,
-    /// This machine's picture as it is sent, and someone else's as it is shown, over
-    /// the last second.
+    /// This machine's picture as it is sent, over the last second.
     pub picture_sent: Flow,
-    pub picture_shown: Flow,
     /// Why the pictures stopped, if they did.
     pub picture_trouble: Option<String>,
 }
+
+/// Someone else whose picture there is to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pictured {
+    pub id: ParticipantId,
+    pub name: String,
+    /// How their picture has arrived over the last second.
+    pub flow: Flow,
+}
+
+/// How many refreshes a picture's flow is taken over: a second.
+const FLOW_OVER: usize = 5;
 
 /// The gauges as they are remembered between refreshes.
 struct Gauges {
@@ -131,16 +141,53 @@ struct Gauges {
     began: tokio::time::Instant,
     /// What the meeting's pictures cost, if it has any.
     meter: Option<Arc<Meter>>,
+    wall: Option<Arc<Wall>>,
     picture_sent: Flowing,
-    picture_shown: Flowing,
+    /// The same for each of the others' pictures.
+    shown: BTreeMap<ParticipantId, Flowing>,
 }
 
 impl Gauges {
-    fn new(meter: Option<Arc<Meter>>) -> Self {
+    /// Whose pictures there are to show at `at`, on a machine that shows pictures, and
+    /// how each has arrived.
+    fn pictured(
+        &mut self,
+        at: Duration,
+        status: &Status,
+        name_of: impl Fn(&ParticipantId) -> String,
+    ) -> Vec<Pictured> {
+        let Some(wall) = &self.wall else {
+            return Vec::new();
+        };
+        let tracks = others(&status.videos);
+        self.shown
+            .retain(|id, _| tracks.iter().any(|track| track.participant == *id));
+        tracks
+            .into_iter()
+            .map(|track| {
+                let id = track.participant.clone();
+                let counted = wall
+                    .get(&id)
+                    .map_or_else(Default::default, |seat| seat.count.read());
+                let flowing = self
+                    .shown
+                    .entry(id.clone())
+                    .or_insert_with(|| Flowing::over(FLOW_OVER));
+                Pictured {
+                    name: name_of(&id),
+                    flow: flowing.after(at, counted),
+                    id,
+                }
+            })
+            .collect()
+    }
+
+    fn new(screen: Option<&Screen>) -> Self {
         Self {
-            meter,
-            picture_sent: Flowing::over(REMEMBERED / 5),
-            picture_shown: Flowing::over(REMEMBERED / 5),
+            meter: screen.map(|screen| Arc::clone(&screen.meter)),
+            wall: screen.map(|screen| Arc::clone(&screen.wall)),
+            picture_sent: Flowing::over(FLOW_OVER),
+            shown: BTreeMap::new(),
             sound_gap: Worst::of_last(REMEMBERED),
             sound_burst: Worst::of_last(REMEMBERED),
             network_late: Worst::of_last(REMEMBERED),
@@ -171,8 +218,8 @@ pub struct View {
     pub microphone: String,
     pub speaker: String,
     pub muted: bool,
-    /// Whose picture is shown, if anyone's.
-    pub far: Option<String>,
+    /// Everyone else whose picture there is to show, in the plan's order.
+    pub pictures: Vec<Pictured>,
     /// When this node got in.
     pub since: Option<Instant>,
     pub details: Details,
@@ -423,12 +470,10 @@ fn refresh(
         .collect();
     let speaker_lead = gauges.speaker_lead.after(sound.lead);
     let at = gauges.began.elapsed();
-    let counted = gauges
+    let sent = gauges
         .meter
         .as_ref()
-        .map_or_else(Default::default, |meter| {
-            (meter.sent.read(), meter.shown.read())
-        });
+        .map_or_else(Default::default, |meter| meter.sent.read());
     gauges
         .history
         .note(at, sound.longest_gap, speaker_lead, heard, linked);
@@ -442,16 +487,10 @@ fn refresh(
         sound_gap_past: gauges.history.sound_gap(),
         voices: gauges.history.voices(),
         links: gauges.history.links(),
-        picture_sent: gauges.picture_sent.after(at, counted.0),
-        picture_shown: gauges.picture_shown.after(at, counted.1),
+        picture_sent: gauges.picture_sent.after(at, sent),
         picture_trouble: gauges.meter.as_ref().and_then(|meter| meter.failed()),
     };
-    // Whose picture there is to show, on a machine that shows pictures.
-    let far = gauges
-        .meter
-        .as_ref()
-        .and_then(|_| far_of(&status.videos))
-        .map(|track| name_of(&track.participant));
+    let pictures = gauges.pictured(at, status, name_of);
     let me = participant.control().me().clone();
     let people: Vec<Person> = status
         .roster
@@ -478,7 +517,7 @@ fn refresh(
             view.ticket = handing_on;
         }
         view.people = people;
-        view.far = far;
+        view.pictures = pictures;
         view.links = status.links.len();
         // The loudest level starts again at each reading; keep the last one heard.
         view.sound = sound;
@@ -593,7 +632,7 @@ async fn meeting<W: World>(
     let mut beat = tokio::time::interval(REFRESH);
     let mut pulse = tokio::time::interval(PULSE);
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut gauges = Gauges::new(asked.screen.map(|screen| Arc::clone(&screen.meter)));
+    let mut gauges = Gauges::new(asked.screen);
     let mut replied = false;
     let ended = loop {
         tokio::select! {
