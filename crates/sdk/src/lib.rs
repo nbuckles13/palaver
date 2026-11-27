@@ -4,6 +4,7 @@
 //! - [`call::Call`] puts a voice on it: samples in, samples out.
 //! - [`video::VideoSender`] and [`video::VideoReceiver`] put pictures on it, through the
 //!   engine's [`engine::VideoPort`].
+//! - [`pictures::Pictures`] runs both for one node: its camera out, what it watches in.
 //! - [`participant::Participant`] is a node on a network with a key of its own, started
 //!   together with its call: what an application or a bot begins with. It makes
 //!   invitations and joins by them, through an [`engine::Controller`] that can be kept
@@ -14,6 +15,7 @@
 pub mod call;
 pub mod engine;
 pub mod participant;
+pub mod pictures;
 pub mod video;
 
 pub use call::{Call, VoiceGauge};
@@ -22,4 +24,5 @@ pub use engine::{
 };
 pub use palaver_node::VideoTrack;
 pub use participant::{Options, Participant, StartError, entry_points};
+pub use pictures::Pictures;
 pub use video::{Piece, VideoReceiver, VideoSender};

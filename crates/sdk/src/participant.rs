@@ -16,7 +16,7 @@
 //! It does nothing until told to [`create_meeting`](Participant::create_meeting) or to
 //! [`join`](Participant::join).
 
-use crate::engine::Controller;
+use crate::engine::{Controller, Status, VideoPort};
 use crate::{Call, Engine, EngineConfig};
 use palaver_khef_core::LinkWatchConfig;
 use palaver_media::jitter::Config as JitterConfig;
@@ -33,6 +33,7 @@ use palaver_proto::{
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+use tokio::sync::watch;
 
 /// How a participant shows itself and handles sound.
 #[derive(Debug, Clone)]
@@ -44,6 +45,10 @@ pub struct Options {
     pub jitter: JitterConfig,
     /// The channels it plays in.
     pub playout: Channels,
+    /// The camera it offers the meeting, by what its picture is called ("360p"), if it
+    /// has one. Nothing is made of it until somebody watches: see
+    /// [`Participant::video`].
+    pub camera: Option<Vec<u8>>,
 }
 
 impl Options {
@@ -55,6 +60,7 @@ impl Options {
             encoder: EncoderConfig::default(),
             jitter: JitterConfig::default(),
             playout: Channels::Mono,
+            camera: None,
         }
     }
 }
@@ -80,6 +86,8 @@ pub struct Participant {
     address: Peer,
     /// The QUIC endpoint it runs on, if it is on the network.
     quic: Option<Arc<QuicEndpoint>>,
+    /// The engine's door for video, until someone takes it.
+    video: Option<VideoPort>,
 }
 
 impl Participant {
@@ -148,18 +156,25 @@ impl Participant {
             key: identity.public_key(),
             addresses: addresses.iter().copied().map(Redacted::new).collect(),
         };
+        let mut tracks = vec![MediaTrack {
+            audio: true,
+            source: Source::Main,
+            rendition: b"opus".to_vec(),
+        }];
+        tracks.extend(options.camera.map(|rendition| MediaTrack {
+            audio: false,
+            source: Source::Main,
+            rendition,
+        }));
         let config = EngineConfig {
             meeting: meeting_tag(secret).ok_or(StartError::Derivation)?,
             name: options.name,
-            tracks: vec![MediaTrack {
-                audio: true,
-                source: Source::Main,
-                rendition: b"opus".to_vec(),
-            }],
+            tracks,
             addresses,
             link_watch: LinkWatchConfig::default(),
         };
-        let engine = Engine::start(Admitted::new(endpoint, key), identity, config);
+        let mut engine = Engine::start(Admitted::new(endpoint, key), identity, config);
+        let video = engine.video();
         let control = engine.controller();
         let call = Call::new(engine, options.encoder, options.jitter, options.playout)
             .map_err(StartError::Codec)?;
@@ -168,6 +183,7 @@ impl Participant {
                 control,
                 address,
                 quic,
+                video,
             },
             call,
         ))
@@ -261,6 +277,13 @@ impl Participant {
     #[must_use]
     pub const fn control(&self) -> &Controller {
         &self.control
+    }
+
+    /// The engine's door for video, with the node's status: what a
+    /// [`Pictures`](crate::Pictures) is made of. There is one; `None` once it is taken.
+    pub fn video(&mut self) -> Option<(VideoPort, watch::Receiver<Status>)> {
+        let port = self.video.take()?;
+        Some((port, self.control.status()))
     }
 
     /// Stop the node: close its endpoint and every connection.
