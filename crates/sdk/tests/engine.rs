@@ -143,6 +143,16 @@ async fn three_nodes_form_a_meeting_and_agree_on_the_plan() {
             })
             .await;
         assert!(!status.conductor);
+        // Each knows who conducts, and how the meeting is wired.
+        assert_eq!(status.conducts, Some(members[0].id()));
+        assert_eq!(status.peerings.len(), 3, "three nodes, each joined to both");
+        assert_eq!(status.audio_tree.len(), 2, "a tree of three has two links");
+        assert!(
+            status
+                .audio_tree
+                .iter()
+                .all(|link| status.peerings.contains(link))
+        );
     }
     assert!(members[0].engine.status().borrow().conductor);
 }
