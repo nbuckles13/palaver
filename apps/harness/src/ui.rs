@@ -159,10 +159,8 @@ impl Tile {
 }
 
 /// How large this machine's own pattern is, and how high its picture is drawn.
-const PATTERN: (u32, u32) = (640, 360);
+const PATTERN: (u32, u32) = (1280, 720);
 const OWN_TALL: f32 = 90.0;
-/// The rate this machine's picture is coded at for the meeting, unless told otherwise.
-const BITRATE: u32 = 500_000;
 
 /// Whether this machine's own picture is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,7 +246,7 @@ impl Window {
             slot.on_new(move || context.request_repaint());
         };
         let camera = pattern.then(|| Arc::new(Slot::default()));
-        let screen = Screen::new(camera.clone(), PATTERN, coded.unwrap_or(BITRATE));
+        let screen = Screen::new(camera.clone(), PATTERN);
         let redraw = context.clone();
         screen.wall.on_new(move || redraw.request_repaint());
         let wall = Arc::clone(&screen.wall);
@@ -677,6 +675,8 @@ impl Window {
         let Some(wall) = self.wall.clone() else {
             return;
         };
+        // Whoever decodes chooses the size to watch by how large each is drawn.
+        wall.set_tall(words::pixels(room.y, ui.ctx().pixels_per_point()));
         self.tiles
             .retain(|id, _| view.pictures.iter().any(|pictured| pictured.id == *id));
         for row in view.pictures.chunks(across) {
@@ -999,7 +999,13 @@ impl Window {
             pictures.push(words::picture_sent_line(view.details.picture_sent));
         }
         for pictured in &view.pictures {
-            pictures.push(words::picture_shown_line(&pictured.name, pictured.flow));
+            let size = self
+                .tiles
+                .get(&pictured.id)
+                .and_then(|tile| tile.shown)
+                .map(|(width, height, _)| (width, height));
+            let line = words::picture_shown_line(&pictured.name, pictured.flow, size);
+            pictures.push(line);
         }
         if let Some(why) = &view.details.picture_trouble {
             pictures.push(format!("pictures: {why}"));

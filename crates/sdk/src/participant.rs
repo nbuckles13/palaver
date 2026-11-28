@@ -61,6 +61,33 @@ pub struct Offer {
 }
 
 impl Offer {
+    /// The sizes to offer of a camera whose pictures are `width` by `height`: whole,
+    /// halved and quartered, as far as each divides evenly and is at least 90 high.
+    /// Each is called by its height ("360p") and coded at a rate to suit it: 1500
+    /// kbit/s from 720 high, 500 from 360, 150 below.
+    #[must_use]
+    pub fn sizes_of(width: u32, height: u32, per_second: u32) -> Vec<Self> {
+        [1u32, 2, 4]
+            .into_iter()
+            .filter(|by| width.is_multiple_of(by * 2) && height.is_multiple_of(by * 2))
+            .map(|by| (width / by, height / by))
+            .filter(|(_, tall)| *tall >= 90)
+            .map(|(across, tall)| Self {
+                name: format!("{tall}p").into_bytes(),
+                shape: Shape {
+                    width: across,
+                    height: tall,
+                    per_second,
+                    bitrate: match tall {
+                        720.. => 1_500_000,
+                        360.. => 500_000,
+                        _ => 150_000,
+                    },
+                },
+            })
+            .collect()
+    }
+
     fn track(self) -> MediaTrack {
         MediaTrack {
             audio: false,
@@ -347,4 +374,39 @@ pub fn entry_points(ticket: &Ticket) -> Vec<Peer> {
             addresses: entry.addresses.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_camera_is_offered_whole_halved_and_quartered_as_far_as_it_divides() {
+        let said = |width, height| -> Vec<(String, u32, u32, u32)> {
+            Offer::sizes_of(width, height, 30)
+                .into_iter()
+                .map(|offer| {
+                    let name = String::from_utf8(offer.name).unwrap_or_default();
+                    (
+                        name,
+                        offer.shape.width,
+                        offer.shape.height,
+                        offer.shape.bitrate,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            said(1280, 720),
+            [
+                (String::from("720p"), 1280, 720, 1_500_000),
+                (String::from("360p"), 640, 360, 500_000),
+                (String::from("180p"), 320, 180, 150_000),
+            ]
+        );
+        // Nothing under 90 high, and nothing that would not come out even.
+        assert_eq!(said(320, 180).len(), 2);
+        assert_eq!(said(642, 362).len(), 1);
+        assert_eq!(said(641, 361), []);
+    }
 }

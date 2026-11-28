@@ -327,11 +327,25 @@ pub fn picture_sent_line(flow: Flow) -> String {
 
 /// What the details say of someone else's picture as it arrives.
 #[must_use]
-pub fn picture_shown_line(name: &str, flow: Flow) -> String {
+pub fn picture_shown_line(name: &str, flow: Flow, size: Option<(u32, u32)>) -> String {
     if flow.per_second == 0 {
         return format!("picture of {name}: nothing yet");
     }
-    format!("picture of {name}: {}", flow_line(flow, "decode"))
+    let size = size.map_or_else(String::new, |(width, height)| {
+        format!("{width} × {height} · ")
+    });
+    format!("picture of {name}: {size}{}", flow_line(flow, "decode"))
+}
+
+/// A length on the screen in its pixels, for a screen with `scale` of them to a point.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a length on a screen, which is neither negative nor large"
+)]
+pub fn pixels(points: f32, scale: f32) -> u32 {
+    (points * scale).round().max(0.0) as u32
 }
 
 /// How large a picture is drawn in a tile `tall` high: as wide as keeps its shape.
@@ -827,15 +841,22 @@ mod tests {
             "picture sent: 487 kbit/s · 30 a second · 3.1 ms to encode"
         );
         assert_eq!(
-            picture_shown_line("Bo", flow),
+            picture_shown_line("Bo", flow, None),
             "picture of Bo: 487 kbit/s · 30 a second · 3.1 ms to decode"
         );
+        assert_eq!(
+            picture_shown_line("Bo", flow, Some((640, 360))),
+            "picture of Bo: 640 × 360 · 487 kbit/s · 30 a second · 3.1 ms to decode"
+        );
+        // A picture 90 points high on a screen with two pixels to the point.
+        assert_eq!(pixels(90.0, 2.0), 180);
+        assert_eq!(pixels(101.25, 1.0), 101);
         assert_eq!(
             picture_sent_line(Flow::default()),
             "picture sent: nobody is watching"
         );
         assert_eq!(
-            picture_shown_line("Bo", Flow::default()),
+            picture_shown_line("Bo", Flow::default(), Some((640, 360))),
             "picture of Bo: nothing yet"
         );
         assert_eq!(far_name("Bo"), "Bo's picture");
