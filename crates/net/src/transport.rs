@@ -62,6 +62,10 @@ pub struct Path {
     /// given up as lost. Nought where the transport does not count.
     pub sent: u64,
     pub lost: u64,
+    /// Bytes sent on the connection so far, and received, as they are on the wire.
+    /// Nought where the transport does not count.
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
     /// The address the peer's packets come from, where the transport has addresses.
     pub remote: Option<SocketAddr>,
 }

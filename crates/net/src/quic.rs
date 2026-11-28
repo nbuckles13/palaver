@@ -581,11 +581,14 @@ impl Connection for QuicConnection {
     }
 
     fn path(&self) -> Path {
-        let counted = self.connection.stats().path;
+        let stats = self.connection.stats();
+        let counted = stats.path;
         Path {
             rtt: self.connection.rtt(),
             sent: counted.sent_packets,
             lost: counted.lost_packets,
+            bytes_sent: stats.udp_tx.bytes,
+            bytes_received: stats.udp_rx.bytes,
             remote: Some(self.connection.remote_address()),
         }
     }

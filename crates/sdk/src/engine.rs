@@ -32,7 +32,7 @@ use palaver_net::transport::{
     Connection, DialError, Endpoint, Peer, RecvStream, SendStream, Side, StreamError,
 };
 use palaver_node::{Config as NodeConfig, Node, Output, VideoTrack};
-use palaver_proto::{MediaTrack, MeetingTag, ParticipantId, PlanStamp, Redacted, Timestamp};
+use palaver_proto::{Edge, MediaTrack, MeetingTag, ParticipantId, PlanStamp, Redacted, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -95,6 +95,12 @@ pub struct Status {
     pub plan: Option<PlanStamp>,
     /// Whether this node is the conductor.
     pub conductor: bool,
+    /// Who issued the plan in force.
+    pub conducts: Option<ParticipantId>,
+    /// The connections the plan asks for, each a pair of nodes; and those of them
+    /// sound is forwarded along, which make a tree.
+    pub peerings: Vec<(ParticipantId, ParticipantId)>,
+    pub audio_tree: Vec<(ParticipantId, ParticipantId)>,
     /// Everyone in the plan's roster, this node included.
     pub roster: Vec<ParticipantId>,
     /// The name each of the roster chose, in the same order. Redacted in debug output.
@@ -121,6 +127,15 @@ pub struct LinkGauge {
     /// given up as lost.
     pub sent: u64,
     pub lost: u64,
+    /// Bytes sent to the peer since the connection came up, and received from it, as
+    /// they are on the wire.
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+}
+
+/// The two ends of a connection the plan names.
+fn pair(edge: &Edge) -> (ParticipantId, ParticipantId) {
+    (edge.0.clone(), edge.1.clone())
 }
 
 enum Command {
@@ -653,6 +668,8 @@ impl<E: Endpoint> Run<E> {
                             rtt: path.rtt,
                             sent: path.sent,
                             lost: path.lost,
+                            bytes_sent: path.bytes_sent,
+                            bytes_received: path.bytes_received,
                         }
                     })
                     .collect();
@@ -915,6 +932,14 @@ impl<E: Endpoint> Run<E> {
             nobody_answers: self.nobody_answers,
             plan: self.node.plan().map(|plan| plan.stamp),
             conductor: self.node.is_conductor(),
+            conducts: self.node.plan().map(|plan| plan.conductor.clone()),
+            peerings: self
+                .node
+                .plan()
+                .map_or_else(Vec::new, |plan| plan.peerings.iter().map(pair).collect()),
+            audio_tree: self.node.plan().map_or_else(Vec::new, |plan| {
+                plan.audio_overlay.iter().map(pair).collect()
+            }),
             roster: self.node.plan().map_or_else(Vec::new, |plan| {
                 plan.roster
                     .iter()

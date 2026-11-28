@@ -45,6 +45,12 @@ async fn a_bot_given_only_a_ticket_joins_and_hears_the_one_who_talks() {
     assert!(bots[0].hears(1), "strength {}", bots[0].strength_of(1));
     assert!(!bots[0].hears(2));
     assert!(!bots[1].hears(1), "a bot does not hear itself");
+    // Each counts what its one link has carried, each way.
+    for bot in &bots {
+        let links = bot.participant().control().links().await;
+        assert_eq!(links.len(), 1);
+        assert!(links[0].bytes_sent > 0 && links[0].bytes_received > 0);
+    }
 }
 
 /// A STUN server on the loopback interface that says a question came from `shift` ports

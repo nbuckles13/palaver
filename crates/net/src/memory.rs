@@ -341,6 +341,8 @@ impl Connection for MemoryConnection {
             rtt: Duration::ZERO,
             sent: 0,
             lost: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
             remote: None,
         }
     }
