@@ -248,7 +248,7 @@ impl Window {
             slot.on_new(move || context.request_repaint());
         };
         let camera = pattern.then(|| Arc::new(Slot::default()));
-        let screen = Screen::new(camera.clone(), PATTERN.1, coded.unwrap_or(BITRATE));
+        let screen = Screen::new(camera.clone(), PATTERN, coded.unwrap_or(BITRATE));
         let redraw = context.clone();
         screen.wall.on_new(move || redraw.request_repaint());
         let wall = Arc::clone(&screen.wall);

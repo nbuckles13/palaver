@@ -23,6 +23,7 @@ pub use engine::{
     AudioIn, Controller, Engine, EngineConfig, LinkGauge, Status, VideoIn, VideoPort,
 };
 pub use palaver_node::VideoTrack;
-pub use participant::{Options, Participant, StartError, entry_points};
+pub use palaver_proto::Shape;
+pub use participant::{Offer, Options, Participant, StartError, entry_points};
 pub use pictures::Pictures;
 pub use video::{Piece, VideoReceiver, VideoSender};

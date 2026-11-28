@@ -273,6 +273,7 @@ impl Meeting {
             audio: true,
             source: Source::Main,
             rendition: b"opus".to_vec(),
+            shape: None,
         }
     }
 
@@ -283,6 +284,7 @@ impl Meeting {
             audio: false,
             source: Source::Main,
             rendition: b"360p".to_vec(),
+            shape: None,
         }
     }
 

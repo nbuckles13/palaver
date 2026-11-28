@@ -48,6 +48,7 @@ fn member(name: &str, advertise: bool) -> Member {
             audio: true,
             source: Source::Main,
             rendition: b"opus".to_vec(),
+            shape: None,
         }],
         addresses: if advertise { vec![at] } else { Vec::new() },
         link_watch: LinkWatchConfig::default(),

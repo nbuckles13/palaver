@@ -15,7 +15,7 @@ use palaver_media::{CodecError, FRAME_SAMPLES, SAMPLE_RATE};
 use palaver_net::memory::MemoryNetwork;
 use palaver_net::quic::QuicOptions;
 use palaver_proto::{SECRET_BYTES, Secret};
-use palaver_sdk::{Call, Options, Participant, Pictures};
+use palaver_sdk::{Call, Offer, Options, Participant, Pictures, Shape};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -81,6 +81,19 @@ const RENDITION: &[u8] = b"360p";
 const PICTURE_BITRATE: u32 = 500_000;
 /// A key frame by itself this often, in pictures: ten seconds.
 const KEY_EVERY: u32 = 300;
+
+/// What a bot with a camera offers the meeting.
+fn offer() -> Offer {
+    Offer {
+        name: RENDITION.to_vec(),
+        shape: Shape {
+            width: PICTURE.0,
+            height: PICTURE.1,
+            per_second: 30,
+            bitrate: PICTURE_BITRATE,
+        },
+    }
+}
 
 /// A bot's camera: a pattern, and the way to the meeting.
 struct Film {
@@ -167,7 +180,7 @@ impl Bot {
 
     fn options(name: &str, script: Script) -> Options {
         Options {
-            camera: script.camera.then(|| RENDITION.to_vec()),
+            cameras: script.camera.then(offer).into_iter().collect(),
             ..Options::named(name)
         }
     }

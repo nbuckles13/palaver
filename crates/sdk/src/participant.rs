@@ -28,8 +28,8 @@ use palaver_net::quic::{BindError, QuicEndpoint, QuicOptions};
 use palaver_net::reach::{self, Network, STUN_PATIENCE, StunConfig, StunMode, is_public, resolve};
 use palaver_net::transport::{Endpoint, Peer};
 use palaver_proto::{
-    EntryPoint, MAX_ENTRY_POINTS, MediaTrack, Redacted, SECRET_BYTES, Secret, Signer, Source,
-    Ticket,
+    EntryPoint, MAX_ENTRY_POINTS, MediaTrack, Redacted, SECRET_BYTES, Secret, Shape, Signer,
+    Source, Ticket,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -45,10 +45,40 @@ pub struct Options {
     pub jitter: JitterConfig,
     /// The channels it plays in.
     pub playout: Channels,
-    /// The camera it offers the meeting, by what its picture is called ("360p"), if it
-    /// has one. Nothing is made of it until somebody watches: see
-    /// [`Participant::video`].
-    pub camera: Option<Vec<u8>>,
+    /// The sizes of its camera it offers the meeting, if it has one. Nothing is made
+    /// of any until somebody watches it: see [`Participant::video`]. They can be
+    /// changed later ([`Participant::offer_cameras`]).
+    pub cameras: Vec<Offer>,
+}
+
+/// One size of a participant's camera on offer: a video track of the meeting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    /// What the track is called among this participant's. A label: whoever watches
+    /// chooses by the shape.
+    pub name: Vec<u8>,
+    pub shape: Shape,
+}
+
+impl Offer {
+    fn track(self) -> MediaTrack {
+        MediaTrack {
+            audio: false,
+            source: Source::Main,
+            rendition: self.name,
+            shape: Some(self.shape),
+        }
+    }
+}
+
+/// The track of a participant's microphone.
+fn microphone() -> MediaTrack {
+    MediaTrack {
+        audio: true,
+        source: Source::Main,
+        rendition: b"opus".to_vec(),
+        shape: None,
+    }
 }
 
 impl Options {
@@ -60,7 +90,7 @@ impl Options {
             encoder: EncoderConfig::default(),
             jitter: JitterConfig::default(),
             playout: Channels::Mono,
-            camera: None,
+            cameras: Vec::new(),
         }
     }
 }
@@ -156,16 +186,8 @@ impl Participant {
             key: identity.public_key(),
             addresses: addresses.iter().copied().map(Redacted::new).collect(),
         };
-        let mut tracks = vec![MediaTrack {
-            audio: true,
-            source: Source::Main,
-            rendition: b"opus".to_vec(),
-        }];
-        tracks.extend(options.camera.map(|rendition| MediaTrack {
-            audio: false,
-            source: Source::Main,
-            rendition,
-        }));
+        let mut tracks = vec![microphone()];
+        tracks.extend(options.cameras.into_iter().map(Offer::track));
         let config = EngineConfig {
             meeting: meeting_tag(secret).ok_or(StartError::Derivation)?,
             name: options.name,
@@ -284,6 +306,15 @@ impl Participant {
     pub fn video(&mut self) -> Option<(VideoPort, watch::Receiver<Status>)> {
         let port = self.video.take()?;
         Some((port, self.control.status()))
+    }
+
+    /// Offer these sizes of the camera from now on, in place of those offered before:
+    /// none, to offer no camera. The plan that follows lists them; a size that is
+    /// offered still keeps what the plan calls it.
+    pub async fn offer_cameras(&self, cameras: Vec<Offer>) {
+        let mut tracks = vec![microphone()];
+        tracks.extend(cameras.into_iter().map(Offer::track));
+        self.control.set_tracks(tracks).await;
     }
 
     /// Stop the node: close its endpoint and every connection.

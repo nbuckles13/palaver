@@ -561,10 +561,12 @@ impl Asked<'_> {
         Options {
             playout,
             // A camera is offered only by a machine that has pictures to send.
-            camera: self
+            cameras: self
                 .screen
                 .filter(|screen| screen.camera.is_some())
-                .map(|screen| screen.rendition.clone()),
+                .map(|screen| screen.offer.clone())
+                .into_iter()
+                .collect(),
             ..Options::named(self.name)
         }
     }

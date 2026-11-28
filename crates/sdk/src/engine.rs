@@ -127,6 +127,7 @@ enum Command {
     Create,
     Join(Vec<Peer>),
     Addresses(Vec<SocketAddr>),
+    Tracks(Vec<MediaTrack>),
     Reach(Vec<Peer>),
     Stop,
     Links(oneshot::Sender<Vec<LinkGauge>>),
@@ -382,6 +383,12 @@ impl Engine {
         let _ = self.commands.send(Command::Addresses(addresses)).await;
     }
 
+    /// The tracks this node can send have changed: all of them, as they now are. The
+    /// meeting is told in its next report, and the plan that follows lists them.
+    pub async fn set_tracks(&self, tracks: Vec<MediaTrack>) {
+        let _ = self.commands.send(Command::Tracks(tracks)).await;
+    }
+
     /// Send one frame of this node's microphone. `false` if it was dropped because the
     /// engine is behind (or stopped).
     pub fn send_audio(&self, group: u64, level: u8, payload: Bytes) -> bool {
@@ -456,6 +463,12 @@ impl Controller {
     /// say. The meeting is told in its next report.
     pub async fn set_addresses(&self, addresses: Vec<SocketAddr>) {
         let _ = self.commands.send(Command::Addresses(addresses)).await;
+    }
+
+    /// The tracks this node can send have changed: all of them, as they now are. The
+    /// meeting is told in its next report, and the plan that follows lists them.
+    pub async fn set_tracks(&self, tracks: Vec<MediaTrack>) {
+        let _ = self.commands.send(Command::Tracks(tracks)).await;
     }
 
     /// What the node reports: watch it for changes.
@@ -646,6 +659,7 @@ impl<E: Endpoint> Run<E> {
                 // Whoever asked may have gone.
                 let _ = answer.send(gauges);
             }
+            Command::Tracks(tracks) => self.node.set_tracks(tracks, now),
             Command::Addresses(addresses) => self
                 .node
                 .set_addresses(addresses.into_iter().map(Redacted::new).collect(), now),

@@ -306,7 +306,7 @@ impl Plan {
         self.member(track.participant()?, verifier)?
             .tracks
             .iter()
-            .find(|assigned| assigned.track == media)
+            .find(|assigned| assigned.track.same_name(&media))
             .map(|assigned| assigned.alias)
     }
 
@@ -429,6 +429,7 @@ mod tests {
             audio: true,
             source: crate::Source::Main,
             rendition: b"opus".to_vec(),
+            shape: None,
         }
     }
 
@@ -437,6 +438,7 @@ mod tests {
             audio: false,
             source: crate::Source::Main,
             rendition: b"360p".to_vec(),
+            shape: None,
         }
     }
 

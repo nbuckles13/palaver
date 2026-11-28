@@ -23,9 +23,13 @@ struct Machine {
 }
 
 fn machine(network: &MemoryNetwork, name: &str, camera: bool) -> Machine {
-    let screen = Screen::new(camera.then(|| Arc::new(Slot::default())), 180, 300_000);
+    let screen = Screen::new(
+        camera.then(|| Arc::new(Slot::default())),
+        (320, 180),
+        300_000,
+    );
     let options = Options {
-        camera: camera.then(|| screen.rendition.clone()),
+        cameras: camera.then(|| screen.offer.clone()).into_iter().collect(),
         ..Options::named(name)
     };
     let (mut participant, call) =

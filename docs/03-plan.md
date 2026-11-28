@@ -89,7 +89,13 @@ Exit: transport, draft and codec approach chosen; workspace skeleton; CI on Linu
      d. The app and the bot: the pattern sent, and a tile for someone else's picture.
         Done; to be tried between machines.
   4. Tiles for everyone (done: everyone's one size, each decoded), then simulcast and
-     choosing a size for each tile.
+     choosing a size for each tile, in three pieces:
+     a. What a camera offers said in full in the report and the plan, and changed
+        while the meeting lasts.
+     b. Pictures made smaller, and a sender for each size on offer (180p at 150 kbit/s,
+        360p at 500, 720p at 1500, each made only while watched).
+     c. Each tile watches the smallest size that covers it, and changes over without
+        a gap; the bot offers all three.
   5. Hardware encoding on Windows.
 - Default routes, hop-by-hop resolution, dedupe; every edge khef peered with ≥2 khefs.
 - Roster, self mute, host role, catalog track.

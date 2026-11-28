@@ -842,7 +842,13 @@ A **profile** of MoQT, deliberately small:
   - *Khefs do not choose or check*: they look the alias up in the plan when they announce
     a track, and forward. A track that is not in the plan has no alias and cannot be sent,
     so this is also where a cap on what a member may publish will live.
-  - *No fixed list of renditions*: a track is whatever a node offers, by name.
+  - *No fixed list of renditions*: a track is whatever a node offers, by name. The
+    name is a label with no meaning. A video track says what its pictures are in
+    full (width, height, pictures a second, the rate it is coded at), in the report
+    and so in the plan, and whoever watches chooses by that and assumes nothing of
+    what a sender can do. A node may change what it offers at any time: a track
+    added or withdrawn, or the same track with another shape, which keeps its alias.
+    About 12 bytes more in the plan for each video track.
   - *Report and plan tracks* must flow before a node is in any plan, so they do not wait
     for the conductor: a report track's alias is taken from the participant id (already a
     hash of the node's key; contriving a clash takes about 2^60 tries), the plan track's

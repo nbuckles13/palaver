@@ -40,11 +40,13 @@ fn config(name: &str, secret: u8) -> EngineConfig {
                 audio: true,
                 source: Source::Main,
                 rendition: b"opus".to_vec(),
+                shape: None,
             },
             MediaTrack {
                 audio: false,
                 source: Source::Main,
                 rendition: b"180p".to_vec(),
+                shape: None,
             },
         ],
         addresses: Vec::new(),
