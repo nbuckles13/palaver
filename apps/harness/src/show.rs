@@ -16,9 +16,9 @@ use palaver_media::video::{
     Decode, Encode, Error, Kind, Settings, SoftwareDecoder, SoftwareEncoder,
 };
 use palaver_proto::ParticipantId;
-use palaver_sdk::{Offer, Pictures, Shape, Status, VideoPort, VideoTrack};
+use palaver_sdk::{Offer, Pictures, Status, VideoPort, VideoTrack};
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -184,6 +184,8 @@ type Wake = Arc<dyn Fn() + Send + Sync>;
 /// them and whoever draws them hold the same wall.
 #[derive(Default)]
 pub struct Wall {
+    /// How high each picture is drawn, in pixels of the screen.
+    tall: AtomicU32,
     seats: Mutex<BTreeMap<ParticipantId, Arc<Seat>>>,
     wake: Mutex<Option<Wake>>,
 }
@@ -195,6 +197,17 @@ impl std::fmt::Debug for Wall {
 }
 
 impl Wall {
+    /// How high each picture is drawn, in pixels of the screen: what whoever decodes
+    /// chooses a size by. Nought until whoever draws has said.
+    #[must_use]
+    pub fn tall(&self) -> u32 {
+        self.tall.load(Ordering::Relaxed)
+    }
+
+    pub fn set_tall(&self, tall: u32) {
+        self.tall.store(tall, Ordering::Relaxed);
+    }
+
     /// Have `wake` called each time a picture is put in any seat.
     pub fn on_new(&self, wake: impl Fn() + Send + Sync + 'static) {
         if let Ok(mut held) = self.wake.lock() {
@@ -240,48 +253,70 @@ pub struct Screen {
     /// Where this machine's own pictures are put, if it makes any: they are sent to
     /// whoever watches.
     pub camera: Option<Arc<Slot>>,
-    /// What this machine offers the meeting of its camera, if it has one.
-    pub offer: Offer,
+    /// The sizes of its camera this machine offers the meeting, if it has one.
+    pub offers: Vec<Offer>,
     /// Where the pictures of the others are put.
     pub wall: Arc<Wall>,
     pub meter: Arc<Meter>,
 }
 
 impl Screen {
-    /// A screen for a camera whose pictures are `size` large (across and down), coded
-    /// at `bitrate`, or for none.
+    /// A screen for a camera whose pictures are `size` large (across and down), or for
+    /// none. The camera is offered at that size, halved and quartered.
     #[must_use]
-    pub fn new(camera: Option<Arc<Slot>>, size: (u32, u32), bitrate: u32) -> Self {
+    pub fn new(camera: Option<Arc<Slot>>, size: (u32, u32)) -> Self {
         Self {
             camera,
-            offer: Offer {
-                name: format!("{}p", size.1).into_bytes(),
-                shape: Shape {
-                    width: size.0,
-                    height: size.1,
-                    per_second: PER_SECOND,
-                    bitrate,
-                },
-            },
+            offers: Offer::sizes_of(size.0, size.1, PER_SECOND),
             wall: Arc::new(Wall::default()),
             meter: Arc::new(Meter::default()),
         }
     }
 }
 
-/// Whose pictures are shown, of the video tracks in the plan.
-///
-/// The first track of each participant but this machine's own, in the plan's order.
-/// (Choosing among the sizes one participant offers is to come.)
+/// Everyone else with a picture, of the video tracks in the plan, each with the sizes
+/// they offer, in the plan's order.
 #[must_use]
-pub fn others(tracks: &[VideoTrack]) -> Vec<&VideoTrack> {
-    let mut found: Vec<&VideoTrack> = Vec::new();
+pub fn others(tracks: &[VideoTrack]) -> Vec<(&ParticipantId, Vec<&VideoTrack>)> {
+    let mut found: Vec<(&ParticipantId, Vec<&VideoTrack>)> = Vec::new();
     for track in tracks.iter().filter(|track| !track.own) {
-        if found.iter().all(|had| had.participant != track.participant) {
-            found.push(track);
+        match found.iter_mut().find(|(who, _)| *who == &track.participant) {
+            Some((_, sizes)) => sizes.push(track),
+            None => found.push((&track.participant, vec![track])),
         }
     }
     found
+}
+
+/// Which of the sizes someone offers to watch for a picture drawn `tall` pixels high.
+///
+/// The smallest that is at least as high; the largest there is, if none is. A track
+/// that does not say what it is is taken only when none does.
+#[must_use]
+pub fn pick<'a>(sizes: &[&'a VideoTrack], tall: u32) -> Option<&'a VideoTrack> {
+    let high = |track: &VideoTrack| track.shape.map(|shape| shape.height);
+    let said = || sizes.iter().copied().filter(|track| track.shape.is_some());
+    said()
+        .filter(|track| high(track) >= Some(tall))
+        .min_by_key(|track| high(track))
+        .or_else(|| said().max_by_key(|track| high(track)))
+        .or_else(|| sizes.first().copied())
+}
+
+/// How long another size must have been the one to watch before it is changed to:
+/// a window being dragged larger passes through many sizes.
+const HOLD: Duration = Duration::from_millis(500);
+
+/// Someone whose picture is watched.
+struct Watched {
+    seat: Arc<Seat>,
+    /// The track whose pictures are shown.
+    showing: Option<u64>,
+    /// A track asked for in its place, which has shown nothing yet. The one before is
+    /// kept until it does, so that the picture does not stop for the change.
+    coming: Option<u64>,
+    /// The size that would be better, and since when it has been.
+    wish: Option<(u64, Duration)>,
 }
 
 /// The work between the node's pictures and the window's slots, a turn at a time.
@@ -290,10 +325,7 @@ pub struct Projector {
     screen: Screen,
     /// The count of the last of this machine's pictures that was taken.
     seen: u64,
-    /// The plan's video tracks as they were last looked at.
-    tracks: Vec<VideoTrack>,
-    /// The tracks being watched, and where the pictures of each go.
-    watching: BTreeMap<u64, Arc<Seat>>,
+    watching: BTreeMap<ParticipantId, Watched>,
 }
 
 impl Projector {
@@ -304,57 +336,140 @@ impl Projector {
             // What was made before the meeting is not for it.
             seen: screen.camera.as_ref().map_or(0, |slot| slot.count()),
             screen,
-            tracks: Vec::new(),
             watching: BTreeMap::new(),
         }
     }
 
-    /// Watch everyone the plan now has a picture of, and nobody it no longer has.
-    fn watch_others(&mut self) {
-        let tracks = self.pictures.tracks();
-        if tracks == self.tracks {
-            return;
+    /// Begin to watch `alias`, whose pictures go to `seat`.
+    fn watch(&mut self, alias: u64, seat: &Seat) {
+        match SoftwareDecoder::new() {
+            Ok(codec) => {
+                let count = Arc::clone(&seat.count);
+                self.pictures.watch(alias, Timed { codec, count });
+            }
+            Err(error) => self.screen.meter.fail(&error),
         }
-        let wanted = others(&tracks);
-        let gone: Vec<u64> = self
+    }
+
+    /// Watch everyone the plan has a picture of, each at the size that suits how
+    /// large it is drawn at `at`, and nobody the plan no longer has.
+    fn watch_others(&mut self, at: Duration) {
+        let tracks = self.pictures.tracks();
+        let others = others(&tracks);
+        let gone: Vec<ParticipantId> = self
             .watching
             .keys()
-            .copied()
-            .filter(|alias| wanted.iter().all(|track| track.alias != *alias))
+            .filter(|who| others.iter().all(|(other, _)| other != who))
+            .cloned()
             .collect();
-        for alias in gone {
-            self.pictures.unwatch(alias);
-            self.watching.remove(&alias);
-        }
-        for track in &wanted {
-            if self.watching.contains_key(&track.alias) {
-                continue;
-            }
-            let seat = self.screen.wall.of(&track.participant);
-            match SoftwareDecoder::new() {
-                Ok(codec) => {
-                    let count = Arc::clone(&seat.count);
-                    self.pictures.watch(track.alias, Timed { codec, count });
+        for who in gone {
+            if let Some(watched) = self.watching.remove(&who) {
+                for alias in watched.showing.into_iter().chain(watched.coming) {
+                    self.pictures.unwatch(alias);
                 }
-                Err(error) => self.screen.meter.fail(&error),
             }
-            self.watching.insert(track.alias, seat);
         }
-        let who: Vec<&ParticipantId> = wanted.iter().map(|track| &track.participant).collect();
+        let tall = self.screen.wall.tall();
+        for (who, sizes) in &others {
+            let Some(choice) = pick(sizes, tall).map(|track| track.alias) else {
+                continue;
+            };
+            let offered = |alias: &u64| sizes.iter().any(|track| track.alias == *alias);
+            self.settle(who, choice, offered, at);
+        }
+        let who: Vec<&ParticipantId> = others.iter().map(|(who, _)| *who).collect();
         self.screen.wall.keep(&who);
-        self.tracks = tracks;
+    }
+
+    /// Bring what is watched of `who` towards `choice`, the size that suits now.
+    fn settle(
+        &mut self,
+        who: &ParticipantId,
+        choice: u64,
+        offered: impl Fn(&u64) -> bool,
+        at: Duration,
+    ) {
+        let seat = self.screen.wall.of(who);
+        let watched = self.watching.entry(who.clone()).or_insert_with(|| Watched {
+            seat: Arc::clone(&seat),
+            showing: None,
+            coming: None,
+            wish: None,
+        });
+        // A size that was withdrawn is watched no more.
+        let mut dropped: Vec<u64> = Vec::new();
+        for held in [&mut watched.showing, &mut watched.coming] {
+            dropped.extend(held.take_if(|alias| !offered(alias)));
+        }
+        let heading = watched.coming.or(watched.showing);
+        let change = if heading.is_none() {
+            // Nothing is shown: there is nothing to keep steady.
+            true
+        } else if heading == Some(choice) {
+            watched.wish = None;
+            false
+        } else {
+            let since = match watched.wish {
+                Some((wished, since)) if wished == choice => since,
+                _ => at,
+            };
+            watched.wish = Some((choice, since));
+            at.saturating_sub(since) >= HOLD
+        };
+        let mut begun = None;
+        if change {
+            watched.wish = None;
+            dropped.extend(watched.coming.take());
+            if watched.showing != Some(choice) {
+                watched.coming = Some(choice);
+                begun = Some(choice);
+            }
+        }
+        for alias in dropped {
+            self.pictures.unwatch(alias);
+        }
+        if let Some(alias) = begun {
+            self.watch(alias, &seat);
+        }
+    }
+
+    /// Show what has come. The first picture of a size that was asked for in place of
+    /// another takes its place, and the other is watched no more.
+    fn show(&mut self) {
+        let watching = &mut self.watching;
+        let mut replaced: Vec<u64> = Vec::new();
+        self.pictures.turn(|alias, picture| {
+            for watched in watching.values_mut() {
+                if watched.coming == Some(alias) {
+                    replaced.extend(watched.showing.replace(alias));
+                    watched.coming = None;
+                }
+                if watched.showing == Some(alias) {
+                    watched.seat.slot.put(picture);
+                    return;
+                }
+            }
+        });
+        for alias in replaced {
+            self.pictures.unwatch(alias);
+        }
+    }
+
+    /// The track of each participant whose pictures are shown now.
+    #[must_use]
+    pub fn showing(&self) -> BTreeMap<ParticipantId, u64> {
+        self.watching
+            .iter()
+            .filter_map(|(who, watched)| Some((who.clone(), watched.showing?)))
+            .collect()
     }
 
     /// One turn: watch whoever is to be watched, show what has come, and send this
-    /// machine's newest picture if there is a new one and somebody watches.
-    pub fn turn(&mut self) {
-        self.watch_others();
-        let watching = &self.watching;
-        self.pictures.turn(|alias, picture| {
-            if let Some(seat) = watching.get(&alias) {
-                seat.slot.put(picture);
-            }
-        });
+    /// machine's newest picture if there is a new one and somebody watches. `at` is
+    /// the time since some beginning.
+    pub fn turn(&mut self, at: Duration) {
+        self.watch_others(at);
+        self.show();
         let meter = &self.screen.meter;
 
         let Some((seen, picture)) = self
@@ -397,8 +512,9 @@ impl Show {
         let thread = std::thread::spawn(move || {
             // The codecs are made on the thread that uses them.
             let mut projector = Projector::new(port, status, screen);
+            let began = std::time::Instant::now();
             while !stopping.load(Ordering::Relaxed) {
-                projector.turn();
+                projector.turn(began.elapsed());
                 std::thread::park_timeout(REST);
             }
         });
@@ -457,6 +573,62 @@ mod tests {
             flowing.after(Duration::from_secs(7), counted(30, 60_000, 90)),
             Flow::default()
         );
+    }
+
+    fn track(alias: u64, who: u8, tall: Option<u32>, own: bool) -> VideoTrack {
+        VideoTrack {
+            alias,
+            participant: ParticipantId::from_key_hash([who; 16]),
+            source: palaver_proto::Source::Main,
+            rendition: alias.to_string().into_bytes(),
+            shape: tall.map(|height| palaver_sdk::Shape {
+                width: height * 16 / 9,
+                height,
+                per_second: 30,
+                bitrate: 100_000,
+            }),
+            own,
+        }
+    }
+
+    #[test]
+    fn the_size_watched_is_the_smallest_that_covers_the_picture_as_drawn() {
+        let offered = [
+            track(1, 1, Some(720), false),
+            track(2, 1, Some(180), false),
+            track(3, 1, Some(360), false),
+        ];
+        let sizes: Vec<&VideoTrack> = offered.iter().collect();
+        let picked = |tall| pick(&sizes, tall).map(|track| track.alias);
+        assert_eq!(picked(0), Some(2));
+        assert_eq!(picked(180), Some(2));
+        assert_eq!(picked(181), Some(3));
+        assert_eq!(picked(400), Some(1));
+        // Drawn larger than anything on offer: the largest there is.
+        assert_eq!(picked(2000), Some(1));
+        // A track that does not say what it is is taken only when none does.
+        let (unsaid, small) = (track(7, 1, None, false), track(8, 1, Some(90), false));
+        assert_eq!(pick(&[&unsaid, &small], 500).map(|t| t.alias), Some(8));
+        assert_eq!(pick(&[&unsaid], 500).map(|t| t.alias), Some(7));
+        assert_eq!(pick(&[], 500), None);
+    }
+
+    #[test]
+    fn the_others_are_each_listed_once_with_every_size_they_offer() {
+        let tracks = [
+            track(1, 1, Some(720), false),
+            track(2, 9, Some(720), true),
+            track(3, 2, Some(360), false),
+            track(4, 1, Some(180), false),
+        ];
+        let listed: Vec<(u8, Vec<u64>)> = others(&tracks)
+            .into_iter()
+            .map(|(who, sizes)| {
+                let aliases = sizes.iter().map(|track| track.alias).collect();
+                (who.as_bytes()[0], aliases)
+            })
+            .collect();
+        assert_eq!(listed, [(1, vec![1, 4]), (2, vec![3])]);
     }
 
     #[test]

@@ -18,10 +18,14 @@ async fn a_bots_pattern_is_sent_once_somebody_watches_it() {
         Participant::on_memory(&network, &secret, Options::named("viewer")).unwrap();
     viewer.join(vec![bot.participant().address().clone()]).await;
     let (port, mut status) = viewer.video().unwrap();
-    let listed = status.wait_for(|status| status.videos.len() == 1);
+    let listed = status.wait_for(|status| status.videos.len() == 3);
     assert!(timeout(Duration::from_secs(30), listed).await.is_ok());
     let mut pictures: Pictures<SoftwareEncoder, SoftwareDecoder> = Pictures::new(port, status);
-    let alias = pictures.tracks().first().unwrap().alias;
+    // The bot offers its picture whole, halved and quartered; the smallest will do.
+    let tracks = pictures.tracks();
+    let high: Vec<u32> = tracks.iter().map(|t| t.shape.unwrap().height).collect();
+    assert_eq!(high, [PICTURE.1, PICTURE.1 / 2, PICTURE.1 / 4]);
+    let alias = tracks.last().unwrap().alias;
 
     // Half a second with nobody watching: the bot makes nothing.
     for _ in 0..25 {
@@ -43,6 +47,6 @@ async fn a_bots_pattern_is_sent_once_somebody_watches_it() {
     assert!(
         shown
             .iter()
-            .all(|size| (size.width(), size.height()) == PICTURE)
+            .all(|size| (size.width() * 4, size.height() * 4) == PICTURE)
     );
 }

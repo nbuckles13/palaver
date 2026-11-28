@@ -114,7 +114,7 @@ impl Seat {
     /// A seat that shows pictures, and has a camera or not.
     fn with_screen(network: &MemoryNetwork, camera: bool) -> Self {
         let camera = camera.then(|| Arc::new(Slot::default()));
-        let screen = Screen::new(camera, (320, 180), 300_000);
+        let screen = Screen::new(camera, (320, 180));
         Self::seated(network, false, false, Some(screen))
     }
 

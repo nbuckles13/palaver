@@ -161,11 +161,11 @@ impl Gauges {
         };
         let tracks = others(&status.videos);
         self.shown
-            .retain(|id, _| tracks.iter().any(|track| track.participant == *id));
+            .retain(|id, _| tracks.iter().any(|(who, _)| *who == id));
         tracks
             .into_iter()
-            .map(|track| {
-                let id = track.participant.clone();
+            .map(|(who, _)| {
+                let id = who.clone();
                 let counted = wall
                     .get(&id)
                     .map_or_else(Default::default, |seat| seat.count.read());
@@ -564,9 +564,8 @@ impl Asked<'_> {
             cameras: self
                 .screen
                 .filter(|screen| screen.camera.is_some())
-                .map(|screen| screen.offer.clone())
-                .into_iter()
-                .collect(),
+                .map(|screen| screen.offers.clone())
+                .unwrap_or_default(),
             ..Options::named(self.name)
         }
     }
