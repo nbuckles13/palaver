@@ -12,7 +12,7 @@
 
 use crate::engine::{Status, VideoIn, VideoPort};
 use crate::video::{Piece, VideoReceiver, VideoSender};
-use palaver_media::picture::Picture;
+use palaver_media::picture::{Picture, Size};
 use palaver_media::video::{Decode, Encode, Error};
 use palaver_node::VideoTrack;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,7 +26,8 @@ pub const KEY_GAP: u32 = 15;
 pub struct Pictures<E, D> {
     port: VideoPort,
     status: watch::Receiver<Status>,
-    camera: Option<VideoSender<E>>,
+    /// A sender for each size of this node's camera, under what the size is called.
+    cameras: BTreeMap<Vec<u8>, VideoSender<E>>,
     /// Which of this node's own tracks somebody watches.
     wanted: BTreeSet<u64>,
     watched: BTreeMap<u64, VideoReceiver<D>>,
@@ -42,7 +43,7 @@ impl<E: Encode, D: Decode> Pictures<E, D> {
         Self {
             port,
             status,
-            camera: None,
+            cameras: BTreeMap::new(),
             wanted: BTreeSet::new(),
             watched: BTreeMap::new(),
             pieces: Vec::new(),
@@ -56,54 +57,132 @@ impl<E: Encode, D: Decode> Pictures<E, D> {
         self.status.borrow().videos.clone()
     }
 
-    /// What the plan calls this node's camera, if it offered one and the plan has it.
-    fn own(&self) -> Option<u64> {
+    /// This node's own video tracks, as the plan lists them.
+    fn own(&self) -> Vec<VideoTrack> {
         let status = self.status.borrow();
         status
             .videos
             .iter()
-            .find(|track| track.own)
-            .map(|track| track.alias)
+            .filter(|track| track.own)
+            .cloned()
+            .collect()
     }
 
-    /// Whether somebody watches this node's camera: whether to make pictures at all.
+    /// The sizes of this node's camera that somebody watches: what to make pictures
+    /// for.
+    #[must_use]
+    pub fn wanted_sizes(&self) -> Vec<VideoTrack> {
+        let mut own = self.own();
+        own.retain(|track| self.wanted.contains(&track.alias));
+        own
+    }
+
+    /// Whether somebody watches this node's camera at any size: whether to make
+    /// pictures at all.
     #[must_use]
     pub fn wanted(&self) -> bool {
-        self.own().is_some_and(|alias| self.wanted.contains(&alias))
+        !self.wanted_sizes().is_empty()
     }
 
-    /// Whether there is an encoder for the camera.
+    /// Whether there is an encoder for the size of the camera called `name`.
     #[must_use]
-    pub const fn has_camera(&self) -> bool {
-        self.camera.is_some()
+    pub fn has_camera(&self, name: &[u8]) -> bool {
+        self.cameras.contains_key(name)
     }
 
-    /// Code the camera's pictures with `encoder`, in place of the one before if there
-    /// was one. Groups go on being numbered from where they were.
-    pub fn set_camera(&mut self, encoder: E) {
-        let first = self.camera.as_ref().map_or(0, VideoSender::next_group);
-        self.camera = Some(VideoSender::new(encoder, 0, first, KEY_GAP));
+    /// Code the size of the camera called `name` with `encoder`, in place of the one
+    /// before if there was one. Groups go on being numbered from where they were.
+    pub fn set_camera(&mut self, name: &[u8], encoder: E) {
+        let first = self.cameras.get(name).map_or(0, VideoSender::next_group);
+        let sender = VideoSender::new(encoder, 0, first, KEY_GAP);
+        self.cameras.insert(name.to_vec(), sender);
     }
 
-    /// The camera's next picture: coded and sent, if there is an encoder and somebody
-    /// watches. Returns whether anything was sent.
+    /// The next picture of the size of the camera called `name`: coded and sent, if
+    /// there is an encoder for it and somebody watches. Returns whether anything was
+    /// sent.
     ///
     /// # Errors
     ///
     /// What the encoder says: the picture is the wrong size, or the codec refused.
-    pub fn film(&mut self, picture: &Picture) -> Result<bool, Error> {
-        let (Some(alias), Some(sender)) = (self.own(), self.camera.as_mut()) else {
+    pub fn film(&mut self, name: &[u8], picture: &Picture) -> Result<bool, Error> {
+        let Some(track) = self.own().into_iter().find(|t| t.rendition == name) else {
             return Ok(false);
         };
-        sender.set_alias(alias);
-        sender.set_wanted(self.wanted.contains(&alias));
+        self.film_track(&track, picture)
+    }
+
+    fn film_track(&mut self, track: &VideoTrack, picture: &Picture) -> Result<bool, Error> {
+        let Some(sender) = self.cameras.get_mut(&track.rendition) else {
+            return Ok(false);
+        };
+        sender.set_alias(track.alias);
+        sender.set_wanted(self.wanted.contains(&track.alias));
         let coded = sender.picture(picture, &mut self.pieces);
         let sent = !self.pieces.is_empty();
         for piece in self.pieces.drain(..) {
-            self.port
-                .send(alias, piece.group, piece.start, piece.bytes, piece.fin);
+            self.port.send(
+                track.alias,
+                piece.group,
+                piece.start,
+                piece.bytes,
+                piece.fin,
+            );
         }
         coded.map(|()| sent)
+    }
+
+    /// The camera's next picture, at its full size: made as small as each size on offer
+    /// that somebody watches says it is, coded and sent. An encoder that is needed and
+    /// not there is made by `encoder_for`, which is given the track and the size of the
+    /// pictures it will code. Returns how many sizes were sent.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Size`] if a size on offer is not the camera's made a whole number of
+    /// times smaller; and what `encoder_for` or an encoder says.
+    pub fn film_all(
+        &mut self,
+        picture: &Picture,
+        mut encoder_for: impl FnMut(&VideoTrack, Size) -> Result<E, Error>,
+    ) -> Result<usize, Error> {
+        let mut smaller: Vec<Picture> = Vec::new();
+        let mut sent = 0usize;
+        for track in self.own() {
+            if !self.wanted.contains(&track.alias) {
+                // Told now, so that what begins when it is wanted again begins anew.
+                if let Some(sender) = self.cameras.get_mut(&track.rendition) {
+                    sender.set_wanted(false);
+                }
+                continue;
+            }
+            let full = picture.size();
+            let wanted = track
+                .shape
+                .map_or(Some(full), |shape| Size::new(shape.width, shape.height))
+                .ok_or(Error::Size)?;
+            let fitting = if wanted == full {
+                picture
+            } else if let Some(made) = smaller.iter().position(|made| made.size() == wanted) {
+                smaller.get(made).ok_or(Error::Size)?
+            } else {
+                let by = full.width() / wanted.width();
+                let made = picture
+                    .shrunk(by)
+                    .filter(|made| made.size() == wanted)
+                    .ok_or(Error::Size)?;
+                smaller.push(made);
+                smaller.last().ok_or(Error::Size)?
+            };
+            if !self.has_camera(&track.rendition) {
+                let encoder = encoder_for(&track, wanted)?;
+                self.set_camera(&track.rendition, encoder);
+            }
+            if self.film_track(&track, fitting)? {
+                sent = sent.saturating_add(1);
+            }
+        }
+        Ok(sent)
     }
 
     /// Begin to watch the track the plan calls `alias`, decoding it with `decoder`.
@@ -141,8 +220,12 @@ impl<E: Encode, D: Decode> Pictures<E, D> {
                         self.wanted.remove(&alias);
                     }
                 }
-                VideoIn::KeyFrame { .. } => {
-                    if let Some(sender) = self.camera.as_mut() {
+                VideoIn::KeyFrame { alias } => {
+                    let asked = self
+                        .cameras
+                        .values_mut()
+                        .find(|sender| sender.alias() == alias);
+                    if let Some(sender) = asked {
                         sender.ask_for_key();
                     }
                 }

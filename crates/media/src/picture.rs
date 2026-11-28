@@ -59,6 +59,31 @@ pub const BLACK: u8 = 16;
 pub const WHITE: u8 = 235;
 pub const NO_COLOUR: u8 = 128;
 
+/// A plane `width` across made `by` times smaller each way: the mean of each `by` by
+/// `by`, rounded to the nearest.
+fn shrunk_plane(plane: &[u8], width: usize, by: usize) -> Vec<u8> {
+    let across = width / by.max(1);
+    let area = u32::try_from(by.saturating_mul(by))
+        .unwrap_or(u32::MAX)
+        .max(1);
+    let mut out = Vec::with_capacity(plane.len() / area as usize);
+    let mut sums = vec![0u32; across];
+    for band in plane.chunks_exact(width.saturating_mul(by).max(1)) {
+        sums.fill(0);
+        for row in band.chunks_exact(width.max(1)) {
+            for (sum, cell) in sums.iter_mut().zip(row.chunks_exact(by.max(1))) {
+                let cell: u32 = cell.iter().map(|value| u32::from(*value)).sum();
+                *sum = sum.saturating_add(cell);
+            }
+        }
+        out.extend(
+            sums.iter()
+                .map(|sum| u8::try_from(sum.saturating_add(area / 2) / area).unwrap_or(u8::MAX)),
+        );
+    }
+    out
+}
+
 /// One picture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picture {
@@ -114,6 +139,27 @@ impl Picture {
             blue: &mut self.blue,
             red: &mut self.red,
         }
+    }
+
+    /// The picture made `by` times smaller each way, every pixel the mean of the `by`
+    /// by `by` it stands for. `None` unless the width and the height are both whole
+    /// multiples of twice `by`, so that the colour comes out whole too.
+    #[must_use]
+    pub fn shrunk(&self, by: u32) -> Option<Self> {
+        let (width, height) = (self.size.width, self.size.height);
+        let twice = by.checked_mul(2).filter(|twice| *twice > 0)?;
+        if !width.is_multiple_of(twice) || !height.is_multiple_of(twice) {
+            return None;
+        }
+        let size = Size::new(width / by, height / by)?;
+        let (across, _) = self.size.colour();
+        let by = by as usize;
+        Some(Self {
+            size,
+            luma: shrunk_plane(&self.luma, width as usize, by),
+            blue: shrunk_plane(&self.blue, across, by),
+            red: shrunk_plane(&self.red, across, by),
+        })
     }
 
     /// The picture as a screen wants it: red, green, blue and 255, for every pixel, a row
@@ -239,6 +285,35 @@ mod tests {
         assert_eq!((odd.width(), odd.height(), odd.pixels()), (5, 3, 15));
         // Colour for every two by two, with the odd edge counted.
         assert_eq!(odd.colour(), (3, 2));
+    }
+
+    #[test]
+    fn a_picture_made_smaller_is_the_mean_of_what_it_stood_for() {
+        let mut picture = Picture::black(size(8, 4));
+        // The left half white, the right half black; colour towards blue on the left.
+        for row in picture.planes().luma.chunks_exact_mut(8) {
+            row[..4].fill(WHITE);
+        }
+        for row in picture.planes().blue.chunks_exact_mut(4) {
+            row[..2].fill(200);
+        }
+        let half = picture.shrunk(2).unwrap();
+        assert_eq!(half.size(), size(4, 2));
+        assert_eq!(half.luma(), [WHITE, WHITE, BLACK, BLACK].repeat(2));
+        assert_eq!(half.colour().0, [200, NO_COLOUR]);
+        assert_eq!(half.colour().1, [NO_COLOUR, NO_COLOUR]);
+        // An edge that falls inside a pixel is the mean of both sides, rounded.
+        for row in picture.planes().luma.chunks_exact_mut(8) {
+            row[..3].fill(WHITE);
+            row[3..].fill(BLACK);
+        }
+        let mixed = (u32::from(WHITE) + u32::from(BLACK)).div_ceil(2);
+        assert_eq!(u32::from(picture.shrunk(2).unwrap().luma()[1]), mixed);
+        // By one it is itself; and only what divides whole can be made.
+        assert_eq!(picture.shrunk(1).unwrap(), picture);
+        assert_eq!(picture.shrunk(0), None);
+        assert_eq!(picture.shrunk(4), None, "four rows are not twice four");
+        assert_eq!(Picture::black(size(6, 4)).shrunk(2), None);
     }
 
     #[test]

@@ -27,6 +27,8 @@ use tokio::sync::watch;
 /// How long the thread rests between two turns: what it adds, at most, to how late a
 /// picture is shown.
 const REST: Duration = Duration::from_millis(5);
+/// The rate a picture is coded at when its track does not say, in bits a second.
+const BITRATE: u32 = 500_000;
 /// A key frame by itself this often, in pictures: ten seconds. Whoever needs one sooner
 /// asks.
 const KEY_EVERY: u32 = 300;
@@ -364,24 +366,17 @@ impl Projector {
             return;
         };
         self.seen = seen;
-        if self.pictures.wanted() && !self.pictures.has_camera() {
+        let filmed = self.pictures.film_all(&picture, |track, size| {
+            let bitrate = track.shape.map_or(BITRATE, |shape| shape.bitrate);
             let settings = Settings {
                 key_every: Some(KEY_EVERY),
-                ..Settings::new(picture.size(), self.screen.offer.shape.bitrate)
+                ..Settings::new(size, bitrate)
             };
-            match SoftwareEncoder::new(settings) {
-                Ok(codec) => {
-                    let count = Arc::clone(&meter.sent);
-                    self.pictures.set_camera(Timed { codec, count });
-                }
-                Err(error) => {
-                    meter.fail(&error);
-                    self.screen.camera = None;
-                    return;
-                }
-            }
-        }
-        if let Err(error) = self.pictures.film(&picture) {
+            let codec = SoftwareEncoder::new(settings)?;
+            let count = Arc::clone(&meter.sent);
+            Ok(Timed { codec, count })
+        });
+        if let Err(error) = filmed {
             meter.fail(&error);
             self.screen.camera = None;
         }
