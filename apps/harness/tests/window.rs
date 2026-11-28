@@ -440,3 +440,49 @@ fn the_ticket_coming_back_has_both_its_ends() {
     desk.show(|view| view.notice = Some(String::from("Reaching for whoever sent that back.")));
     assert!(desk.shows("Reaching for whoever sent that back."));
 }
+
+#[test]
+fn long_names_do_not_push_the_details_over_the_meeting() {
+    let mut desk = Desk::named("Ana");
+    let long = "Microphone Array (Realtek High Definition Audio(SST)) and then some";
+    desk.show(|view| {
+        in_a_meeting(view);
+        view.microphone = String::from(long);
+        view.speaker = String::from(long);
+        let named = |name: &str| VoiceLine {
+            name: name.into(),
+            playing: true,
+            ..VoiceLine::default()
+        };
+        view.details.voices = vec![named("Bartholomew Fitzgerald-Montgomery the Third")];
+        view.details.links = vec![LinkLine {
+            name: String::from("Bartholomew Fitzgerald-Montgomery the Third"),
+            ..LinkLine::default()
+        }];
+    });
+    desk.click("Details");
+    desk.harness.step();
+    // Whatever tab is open, the details stay where they are and inside the window.
+    let left = desk.harness.get_by_label("Audio").rect().left();
+    for tab in ["Video", "Network", "System", "Audio"] {
+        desk.click(tab);
+        let now = desk.harness.get_by_label("Audio").rect().left();
+        assert!(
+            (now - left).abs() < 0.5,
+            "{tab}: moved from {left} to {now}"
+        );
+        let right = desk.harness.get_by_label("System").rect().right();
+        assert!(right < 800.0, "{tab}: the last tab ends at {right}");
+    }
+    // The devices' names are cut to the room there is.
+    desk.click("System");
+    let name = desk.harness.get_all_by_label(long).next().unwrap().rect();
+    assert!(
+        name.right() <= 800.0,
+        "a device's name ends at {}",
+        name.right()
+    );
+    desk.click("Audio");
+    // A name that was cut is still said whole, where the pointer finds it.
+    assert!(desk.shows("Bartholomew Fit…"));
+}
