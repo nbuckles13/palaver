@@ -17,7 +17,7 @@ use palaver_media::video::{
 };
 use palaver_proto::ParticipantId;
 use palaver_sdk::{Offer, Pictures, Status, VideoPort, VideoTrack};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -70,12 +70,46 @@ impl Count {
 /// What a meeting's pictures cost, for whoever shows it.
 #[derive(Debug, Default)]
 pub struct Meter {
-    /// Frames coded to send.
-    pub sent: Arc<Count>,
+    /// Frames coded to send, for each size of the camera, by what the size is called.
+    sent: Mutex<BTreeMap<Vec<u8>, Arc<Count>>>,
     failed: Mutex<Option<String>>,
 }
 
 impl Meter {
+    /// Where what is coded of the size called `name` is counted.
+    #[must_use]
+    pub fn sent_of(&self, name: &[u8]) -> Arc<Count> {
+        let Ok(mut sent) = self.sent.lock() else {
+            return Arc::default();
+        };
+        Arc::clone(sent.entry(name.to_vec()).or_default())
+    }
+
+    /// What has been coded of each size so far, by what the size is called.
+    #[must_use]
+    pub fn sent_by_size(&self) -> Vec<(Vec<u8>, Counted)> {
+        self.sent.lock().map_or_else(
+            |_| Vec::new(),
+            |sent| {
+                sent.iter()
+                    .map(|(name, count)| (name.clone(), count.read()))
+                    .collect()
+            },
+        )
+    }
+
+    /// What has been coded of every size together.
+    #[must_use]
+    pub fn sent_total(&self) -> Counted {
+        self.sent_by_size()
+            .into_iter()
+            .fold(Counted::default(), |sum, (_, each)| Counted {
+                frames: sum.frames.saturating_add(each.frames),
+                bytes: sum.bytes.saturating_add(each.bytes),
+                spent: sum.spent.saturating_add(each.spent),
+            })
+    }
+
     /// Why the pictures stopped, one way or both, if they did.
     #[must_use]
     pub fn failed(&self) -> Option<String> {
@@ -85,58 +119,6 @@ impl Meter {
     fn fail(&self, why: &Error) {
         if let Ok(mut failed) = self.failed.lock() {
             *failed = Some(why.to_string());
-        }
-    }
-}
-
-/// How pictures have flowed one way over the last second or so.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Flow {
-    /// Bits a second.
-    pub bitrate: u64,
-    /// Frames a second.
-    pub per_second: u64,
-    /// How long each frame took to code, on average.
-    pub each: Duration,
-}
-
-/// Turns counts read from time to time into a [`Flow`] over the last few readings.
-#[derive(Debug, Clone)]
-pub struct Flowing {
-    past: VecDeque<(Duration, Counted)>,
-    kept: usize,
-}
-
-impl Flowing {
-    /// Over the last `kept` readings.
-    #[must_use]
-    pub const fn over(kept: usize) -> Self {
-        Self {
-            past: VecDeque::new(),
-            kept,
-        }
-    }
-
-    /// Take the count as it stands `at` this time since some beginning.
-    pub fn after(&mut self, at: Duration, now: Counted) -> Flow {
-        self.past.push_back((at, now));
-        while self.past.len() > self.kept.max(1).saturating_add(1) {
-            self.past.pop_front();
-        }
-        let Some((from, then)) = self.past.front().copied() else {
-            return Flow::default();
-        };
-        let millis = u64::try_from(at.saturating_sub(from).as_millis()).unwrap_or(u64::MAX);
-        let frames = now.frames.saturating_sub(then.frames);
-        if millis == 0 || frames == 0 {
-            return Flow::default();
-        }
-        let bytes = now.bytes.saturating_sub(then.bytes);
-        let spent = now.spent.saturating_sub(then.spent);
-        Flow {
-            bitrate: bytes.saturating_mul(8000) / millis,
-            per_second: (frames.saturating_mul(1000).saturating_add(millis / 2)) / millis,
-            each: spent / u32::try_from(frames).unwrap_or(u32::MAX),
         }
     }
 }
@@ -176,6 +158,35 @@ impl<D: Decode> Decode for Timed<D> {
 pub struct Seat {
     pub slot: Arc<Slot>,
     pub count: Arc<Count>,
+    /// How large the newest picture is: its width above its height.
+    size: AtomicU64,
+    /// How many key frames have been asked for.
+    keys: AtomicU64,
+}
+
+impl Seat {
+    /// Put a picture in the seat's slot, and remember how large it is.
+    pub fn put(&self, picture: Picture) {
+        let size = picture.size();
+        let both = u64::from(size.width()) << 32 | u64::from(size.height());
+        self.size.store(both, Ordering::Relaxed);
+        self.slot.put(picture);
+    }
+
+    /// How large the newest picture is, across and down, if there has been one.
+    #[must_use]
+    pub fn size(&self) -> Option<(u32, u32)> {
+        let both = self.size.load(Ordering::Relaxed);
+        let across = u32::try_from(both >> 32).ok()?;
+        let down = u32::try_from(both & u64::from(u32::MAX)).ok()?;
+        (across > 0).then_some((across, down))
+    }
+
+    /// How many key frames have been asked for of whoever sits here.
+    #[must_use]
+    pub fn keys(&self) -> u64 {
+        self.keys.load(Ordering::Relaxed)
+    }
 }
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -445,13 +456,22 @@ impl Projector {
                     watched.coming = None;
                 }
                 if watched.showing == Some(alias) {
-                    watched.seat.slot.put(picture);
+                    watched.seat.put(picture);
                     return;
                 }
             }
         });
         for alias in replaced {
             self.pictures.unwatch(alias);
+        }
+        for alias in self.pictures.take_asked() {
+            let asked = self
+                .watching
+                .values()
+                .find(|watched| [watched.showing, watched.coming].contains(&Some(alias)));
+            if let Some(watched) = asked {
+                watched.seat.keys.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -488,7 +508,7 @@ impl Projector {
                 ..Settings::new(size, bitrate)
             };
             let codec = SoftwareEncoder::new(settings)?;
-            let count = Arc::clone(&meter.sent);
+            let count = meter.sent_of(&track.rendition);
             Ok(Timed { codec, count })
         });
         if let Err(error) = filmed {
@@ -545,34 +565,6 @@ mod tests {
             bytes,
             spent: Duration::from_millis(millis),
         }
-    }
-
-    #[test]
-    fn a_flow_is_what_was_counted_over_the_last_readings() {
-        let mut flowing = Flowing::over(5);
-        // One reading is no stretch of time to measure over.
-        assert_eq!(
-            flowing.after(Duration::ZERO, Counted::default()),
-            Flow::default()
-        );
-        // Thirty frames and 60 000 bytes in a second, 90 ms spent on them.
-        let flow = flowing.after(Duration::from_secs(1), counted(30, 60_000, 90));
-        assert_eq!(
-            flow,
-            Flow {
-                bitrate: 480_000,
-                per_second: 30,
-                each: Duration::from_millis(3),
-            }
-        );
-        // Nothing more made: once the busy second is forgotten, nothing flows.
-        for second in 2..=6 {
-            flowing.after(Duration::from_secs(second), counted(30, 60_000, 90));
-        }
-        assert_eq!(
-            flowing.after(Duration::from_secs(7), counted(30, 60_000, 90)),
-            Flow::default()
-        );
     }
 
     fn track(alias: u64, who: u8, tall: Option<u32>, own: bool) -> VideoTrack {

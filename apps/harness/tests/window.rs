@@ -8,9 +8,10 @@ use egui_kittest::kittest::Queryable;
 use palaver_harness::check::Finding;
 use palaver_harness::picture::Slot;
 use palaver_harness::session::{
-    Details, LinkLine, Order, Person, Pictured, Session, Stage, View, VoiceLine,
+    Details, Flowed, LinkLine, Map, Order, Person, PictureLine, Pictured, Place, SentLine, Session,
+    Stage, View, VoiceLine,
 };
-use palaver_harness::show::{Flow, Wall};
+use palaver_harness::show::Wall;
 use palaver_harness::ui::{Setup, Window};
 use palaver_harness::words;
 use palaver_media::jitter::Stats;
@@ -56,6 +57,13 @@ impl Desk {
     fn click(&mut self, label: &str) {
         self.harness.get_by_label(label).click();
         // One step for the click to land, one for what it changed to be drawn.
+        self.harness.step();
+        self.harness.step();
+    }
+
+    /// Click the first of several things with the same label.
+    fn click_first(&mut self, label: &str) {
+        self.harness.get_all_by_label(label).next().unwrap().click();
         self.harness.step();
         self.harness.step();
     }
@@ -224,13 +232,11 @@ fn this_machines_own_picture_is_shown_in_a_meeting_only_when_asked_for() {
     assert!(desk.shows("Your picture"));
     desk.click(words::self_view(true));
     assert!(!desk.shows("Your picture"));
-    // And the details say how large it is.
+    // And the details say how large it is, and what drawing it costs.
     desk.click("Details");
-    assert!(
-        desk.harness
-            .query_by_label_contains("your picture: 64 × 36")
-            .is_some()
-    );
+    desk.click("System");
+    assert!(desk.shows("a moving pattern, 64 × 36"));
+    assert!(desk.shows("Drawing your picture"));
 }
 
 #[test]
@@ -244,7 +250,6 @@ fn the_others_pictures_are_shown_under_their_names_while_the_meeting_has_them() 
     let pictured = |seed: u8, name: &str| Pictured {
         id: ParticipantId::from_key_hash([seed; 16]),
         name: name.into(),
-        flow: Flow::default(),
     };
     let (bo, cy) = (pictured(2, "Bo"), pictured(3, "Cy"));
     wall.of(&bo.id)
@@ -263,19 +268,49 @@ fn the_others_pictures_are_shown_under_their_names_while_the_meeting_has_them() 
         .put(Pattern::new(size, 3).next_picture());
     desk.show(|_| {});
     assert!(desk.shows("Cy's picture"));
-    // The details say how each way is going.
-    for line in [
-        "picture sent: nobody is watching",
-        "picture of Bo: nothing yet",
-        "picture of Cy: nothing yet",
+    // The details say how each way is going, a row for each and a total under them.
+    let shown = |pictured: &Pictured, rate, keys| PictureLine {
+        id: pictured.id.clone(),
+        name: pictured.name.clone(),
+        size: Some((320, 180)),
+        flowed: Flowed {
+            rate,
+            pace: 30,
+            cost: Duration::from_micros(200),
+        },
+        keys,
+        rate_past: vec![Some(140), Some(rate)],
+        pace_past: vec![Some(29), Some(30)],
+    };
+    desk.show(|view| {
+        view.details.sent = vec![SentLine {
+            name: String::from("360p"),
+            size: Some((640, 360)),
+            ..SentLine::default()
+        }];
+        view.details.shown = vec![shown(&bo, 150, 2), shown(&cy, 148, 1)];
+    });
+    desk.click("Video");
+    for cell in [
+        "640 × 360",
+        "nobody watching",
+        "150",
+        "148",
+        "298",
+        "0.4 ms",
+        "3",
     ] {
-        assert!(
-            desk.harness.query_by_label_contains(line).is_some(),
-            "{line}"
-        );
+        assert!(desk.shows(cell), "{cell}");
     }
+    // The first row's lines are drawn until another is chosen.
+    assert!(desk.shows("Bo over two minutes"));
+    assert!(desk.shows("kbit/s · now 150 · most 150"));
+    // (Cy's name is under the picture too; the one in the table comes first.)
+    desk.click_first("Cy");
+    assert!(desk.shows("Cy over two minutes"));
+    assert!(desk.shows("kbit/s · now 148 · most 148"));
     desk.show(|view| view.details.picture_trouble = Some(String::from("no codec")));
-    assert!(desk.shows("pictures: no codec"));
+    assert!(desk.shows("Pictures stopped: no codec"));
     // Someone who leaves takes their picture along.
     desk.show(|view| view.pictures.truncate(1));
     assert!(desk.shows("Bo's picture") && !desk.shows("Cy's picture"));
@@ -317,39 +352,75 @@ fn the_details_are_closed_until_asked_for_and_then_say_how_each_voice_is_faring(
                 rtt: Duration::from_millis(7),
                 sent: 2000,
                 lost: 3,
+                up: 640,
+                down: 86,
                 rtt_past: vec![Some(7), Some(9)],
                 lost_past: vec![Some(0), Some(1)],
+                up_past: vec![Some(600), Some(640)],
+                down_past: vec![Some(80), Some(86)],
             }],
+            map: Map {
+                places: vec![
+                    Place {
+                        name: String::from("Ana"),
+                        me: true,
+                        conducts: false,
+                    },
+                    Place {
+                        name: String::from("Bo"),
+                        me: false,
+                        conducts: true,
+                    },
+                ],
+                links: vec![(0, 1, true)],
+            },
             ..Details::default()
         };
     });
-    let voice = "Bo: heard 110 ms after arriving (buffer 60 ms) · played 500 · rebuilt 0 · lost 0 · skipped 0 · late 0";
-    assert!(!desk.shows(voice));
+    assert!(!desk.shows("Heard after"));
     desk.click("Details");
-    assert!(desk.shows(voice));
-    assert!(desk.shows("a microphone → a speaker"));
-    assert!(desk.shows("network thread: timers up to 2 ms late"));
-    assert!(desk.shows("link to Bo: round trip 7 ms · lost 3 of 2000 packets sent (0.1%)"));
-    assert!(desk.shows(
-        "sound thread: longest wait 11 ms · most frames at once 1 · speaker ran dry for 0 ms · fell behind by 0 ms"
-    ));
-    // Each number that is drawn over time says what it is and where it stands.
-    assert!(desk.shows("sound thread's longest wait, ms · now 12 · most 12"));
-    assert!(desk.shows("round trip, ms · now 9 · most 9"));
-    assert!(desk.shows("packets lost a second · now 1 · most 1"));
+    // Sound first: a row for each voice, with what it adds up to under them.
+    for cell in ["Heard after", "110 ms", "60 ms", "Speaker holds", "Ran dry"] {
+        assert!(desk.shows(cell), "{cell}");
+    }
+    // The first voice's lines are drawn, each saying what it is and where it stands.
+    assert!(desk.shows("Bo over two minutes"));
+    assert!(desk.shows("heard after arriving, ms · now 90 · most 110"));
     assert!(desk.shows("frames lost or late a second · now 2 · most 2"));
     // A voice heard in the last two minutes and silent now is still there, and says so.
-    assert!(desk.shows(
-        "Cy: heard 90 ms after arriving (buffer 40 ms) · played 0 · rebuilt 0 · lost 0 · skipped 0 · late 0 · not playing now"
-    ));
-    // Harder noise suppression is said only when it is on.
-    let harder = words::noise_line(true).unwrap();
-    assert!(!desk.shows(harder));
+    assert!(desk.shows("Cy · not playing now"));
+    // Harder noise removal is said when it is on.
+    assert!(desk.shows("Low") && !desk.shows("High"));
     desk.show(|view| view.sound.noise_high = true);
-    assert!(desk.shows(harder));
+    assert!(desk.shows("High"));
+
+    desk.click("Network");
+    for cell in [
+        "Bo conducts · 2 here · 1 links, sound on 1",
+        "7 ms",
+        "0.1%",
+        "round trip, ms · now 9 · most 9",
+        "packets lost a second · now 1 · most 1",
+        "up, kbit/s · now 640 · most 640",
+    ] {
+        assert!(desk.shows(cell), "{cell}");
+    }
+
+    desk.click("System");
+    for cell in [
+        "a microphone",
+        "a speaker",
+        "Sound thread waits",
+        "11.0 ms",
+        "Network timers late",
+        "2.0 ms",
+        "longest wait, ms · now 12 · most 12",
+    ] {
+        assert!(desk.shows(cell), "{cell}");
+    }
     // And they close again.
     desk.click("Details");
-    assert!(!desk.shows(voice));
+    assert!(!desk.shows("Sound thread waits"));
 }
 
 #[test]

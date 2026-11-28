@@ -114,7 +114,7 @@ async fn everyone_with_a_camera_is_shown_to_everyone_else() {
         assert!(shown >= 10, "only {shown} pictures shown");
         assert_eq!(picture.size(), Size::new(160, 90).unwrap());
         assert_eq!(seat.count.read().frames, shown);
-        let coded = filmed.screen.meter.sent.read();
+        let coded = filmed.screen.meter.sent_total();
         assert!(coded.frames >= shown && coded.bytes > 0);
         assert_eq!(filmed.screen.meter.failed(), None);
     }
@@ -123,7 +123,7 @@ async fn everyone_with_a_camera_is_shown_to_everyone_else() {
     // offered none and sent nothing.
     assert!(ana.screen.wall.get(&id(&cy)).is_some());
     assert!(ana.screen.wall.get(&id(&bo)).is_none());
-    assert_eq!(bo.screen.meter.sent.read().frames, 0);
+    assert_eq!(bo.screen.meter.sent_total().frames, 0);
 }
 
 #[tokio::test(start_paused = true)]

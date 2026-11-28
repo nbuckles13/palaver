@@ -13,11 +13,13 @@
 //!                                           machine's own picture, in place of a camera;
 //!                                           --coded shows it also as it would be sent,
 //!                                           encoded at that rate and decoded again
-//! palaver-harness shot <file.png> [name [pattern|coded|plain [ticket-file]]]
+//! palaver-harness shot <file.png> [name [pattern|coded|plain [ticket-file|- [tab]]]]
 //!                                           a picture of the window, taken by itself:
 //!                                           of the first screen, or with a name, of a
 //!                                           meeting started under it, or joined by
-//!                                           the ticket in the file
+//!                                           the ticket in the file; with a tab
+//!                                           (audio, video, network, system), that
+//!                                           tab of the details
 //! palaver-harness create [options]          start a meeting; prints a ticket to hand on
 //! palaver-harness join <ticket> [options]   join one
 //!
@@ -51,6 +53,7 @@
 //! A joiner nobody can answer prints a `reply` ticket to send back to whoever invited
 //! it; paste that into the inviter's terminal and it reaches for the joiner.
 
+use palaver_harness::details::Tab;
 use palaver_harness::live::{Live, Tuning};
 use palaver_harness::ui::{Setup, Shot};
 use palaver_media::Channels;
@@ -309,6 +312,7 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
         setup.shot = Some(Shot {
             path: args.next().ok_or("shot needs a file to write")?,
             name: args.next(),
+            tab: Tab::default(),
         });
         match args.next().as_deref() {
             Some("pattern") => setup.pattern = true,
@@ -318,7 +322,10 @@ fn window(first: Option<&str>, mut args: impl Iterator<Item = String>) -> Result
             }
             _ => {}
         }
-        setup.ticket_file = args.next();
+        setup.ticket_file = args.next().filter(|path| path != "-");
+        if let (Some(shot), Some(name)) = (setup.shot.as_mut(), args.next()) {
+            shot.tab = Tab::named(&name).ok_or_else(|| format!("no such tab: {name}"))?;
+        }
         return Ok(setup);
     }
     while let Some(arg) = args.next() {

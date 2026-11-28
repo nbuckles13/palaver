@@ -5,6 +5,7 @@
 //! The look is "Ember": warm dark, one ember colour for what matters.
 
 use crate::check::{Finding, Found, MicCheck};
+use crate::details::{self, Own};
 use crate::picture::{Coding, Feed, Slot};
 use crate::session::{Order, Person, Session, Stage, View};
 use crate::show::{Screen, Wall};
@@ -21,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// The colours of the Ember look.
-mod ember {
+pub(crate) mod ember {
     use eframe::egui::Color32;
 
     pub const GROUND: Color32 = Color32::from_rgb(0x1A, 0x16, 0x13);
@@ -44,6 +45,8 @@ const REDRAW: Duration = Duration::from_millis(100);
 pub struct Shot {
     /// Where the PNG goes.
     pub path: String,
+    /// The tab of the details to show.
+    pub tab: details::Tab,
     /// If given, start a meeting under this name first, so the picture is of a meeting.
     pub name: Option<String>,
 }
@@ -196,8 +199,9 @@ pub struct Window {
     /// screen holds it.
     wall: Option<Arc<Wall>>,
     tiles: BTreeMap<ParticipantId, Tile>,
-    /// Whether the details stand beside the meeting.
+    /// Whether the details stand beside the meeting, and what of them is looked at.
     details: Drawer,
+    chosen: details::Chosen,
     ticket_file: Option<String>,
     /// The ticket last written to the file, so that it is written once.
     written: Option<String>,
@@ -317,6 +321,9 @@ impl Window {
             feed: None,
             sent: None,
             // Closed until asked for; open in a picture, so that the picture shows them.
+            chosen: details::Chosen::on(
+                setup.shot.as_ref().map(|shot| shot.tab).unwrap_or_default(),
+            ),
             details: if setup.shot.is_some() {
                 Drawer::Open
             } else {
@@ -700,167 +707,12 @@ impl Window {
             });
         }
     }
-
-    /// The details: this machine, each link and each voice, as they are now and as they
-    /// have been over the last two minutes.
-    fn details(ui: &mut Ui, view: &View, pictures: Vec<String>) {
-        let small = |text: String| RichText::new(text).small().monospace().color(ember::QUIET);
-        let heading = |ui: &mut Ui, text: &str| {
-            ui.add_space(6.0);
-            ui.label(RichText::new(text).small().color(ember::DIM));
-        };
-        ui.label(RichText::new("DETAILS").strong().color(ember::TEXT));
-        ui.label(
-            RichText::new("Each line is drawn over the last two minutes.")
-                .small()
-                .color(ember::DIM),
-        );
-
-        heading(ui, "THIS MACHINE");
-        ui.label(small(format!("{} → {}", view.microphone, view.speaker)));
-        ui.label(small(words::sound_line(
-            view.details.sound_gap,
-            view.details.sound_burst,
-            view.sound.starved,
-            view.sound.dropped,
-        )));
-        ui.label(small(words::network_line(view.details.network_late)));
-        if let Some(line) = words::noise_line(view.sound.noise_high) {
-            ui.label(small(String::from(line)));
-        }
-        for line in pictures {
-            ui.label(small(line));
-        }
-        plot(
-            ui,
-            "sound thread's longest wait, ms",
-            &view.details.sound_gap_past,
-            50,
-        );
-
-        heading(ui, "LINKS");
-        for link in &view.details.links {
-            ui.label(small(words::link_line(
-                &link.name, link.rtt, link.sent, link.lost,
-            )));
-            plot(ui, "round trip, ms", &link.rtt_past, 50);
-            plot(ui, "packets lost a second", &link.lost_past, 5);
-        }
-        if view.details.links.is_empty() {
-            ui.label(small(String::from("no links yet")));
-        }
-
-        heading(ui, "VOICES");
-        for voice in &view.details.voices {
-            let line = words::voice_line(
-                &voice.name,
-                voice.delay,
-                view.details.speaker_lead,
-                &voice.stats,
-            );
-            ui.label(small(words::resting(line, voice.playing)));
-            plot(ui, "heard after arriving, ms", &voice.delay_past, 100);
-            plot(ui, "frames lost or late a second", &voice.trouble_past, 5);
-        }
-        if view.details.voices.is_empty() {
-            ui.label(small(String::from("no voices are being played")));
-        }
-    }
 }
 
 /// How wide the details are, beside the meeting.
-const DETAILS_WIDTH: f32 = 400.0;
+const DETAILS_WIDTH: f32 = 460.0;
 /// The least width the window is given.
 const MIN_WIDTH: f32 = 420.0;
-
-/// How much of a plot's width is kept for the numbers of its scale.
-const SCALE_WIDTH: f32 = 34.0;
-
-/// One number over the last two minutes: a caption, and under it a line against a scale,
-/// with the value under the pointer said beside it. `least` is the least the top of the
-/// scale may be, so that a small number is not drawn as a large one.
-fn plot(ui: &mut Ui, what: &str, past: &[Option<u32>], least: u32) {
-    let top = words::plot_top(past, least);
-    ui.label(
-        RichText::new(words::plot_caption(what, past))
-            .small()
-            .color(ember::DIM),
-    );
-    let size = Vec2::new(ui.available_width().min(360.0), 44.0);
-    let (area, _) = ui.allocate_exact_size(size, Sense::hover());
-    let painter = ui.painter();
-    // A little room above and below, so that a line at either edge is seen whole.
-    let field = Rect::from_min_max(
-        Pos2::new(area.left() + SCALE_WIDTH, area.top()),
-        area.right_bottom(),
-    );
-    let inner = field.shrink2(Vec2::new(2.0, 4.0));
-    painter.rect_filled(field, CornerRadius::same(2), ember::GROUND);
-    // The scale: its top, its middle and nought, each with a faint line across.
-    let font = FontId::monospace(9.0);
-    // The middle of an odd top is not a whole number, and is left unmarked.
-    let middle = top.is_multiple_of(2).then_some(top / 2);
-    for (share, mark) in [(0.0, Some(top)), (0.5, middle), (1.0, Some(0))] {
-        let y = inner.top() + share * inner.height();
-        if let Some(mark) = mark {
-            painter.text(
-                Pos2::new(field.left() - 5.0, y),
-                Align2::RIGHT_CENTER,
-                mark.to_string(),
-                font.clone(),
-                ember::QUIET,
-            );
-        }
-        painter.line_segment(
-            [Pos2::new(inner.left(), y), Pos2::new(inner.right(), y)],
-            Stroke::new(1.0, ember::PANEL),
-        );
-    }
-    let place = |(x, y): (f32, f32)| {
-        Pos2::new(
-            inner.left() + x * inner.width(),
-            inner.top() + y * inner.height(),
-        )
-    };
-    let runs = words::plot_runs(past, top, crate::history::KEPT);
-    for run in &runs {
-        let points: Vec<Pos2> = run.iter().copied().map(place).collect();
-        match points.as_slice() {
-            [alone] => {
-                painter.circle_filled(*alone, 1.5, ember::EMBER);
-            }
-            _ => {
-                painter.line(points, Stroke::new(1.5, ember::EMBER));
-            }
-        }
-    }
-    // Under the pointer: a line down the plot, and the value there, written beside the
-    // line on whichever side has the room.
-    let pointed = ui
-        .ctx()
-        .pointer_hover_pos()
-        .filter(|at| field.contains(*at) && ui.rect_contains_pointer(field))
-        .and_then(|at| {
-            let across = (at.x - inner.left()) / inner.width().max(1.0);
-            words::plot_at(past, crate::history::KEPT, across).map(|found| (at.x, found))
-        });
-    if let Some((x, (value, ago))) = pointed {
-        painter.line_segment(
-            [Pos2::new(x, inner.top()), Pos2::new(x, inner.bottom())],
-            Stroke::new(1.0, ember::QUIET),
-        );
-        let (anchor, beside) = if x > field.center().x {
-            (Align2::RIGHT_TOP, x - 5.0)
-        } else {
-            (Align2::LEFT_TOP, x + 5.0)
-        };
-        let words = words::plot_pointed(value, ago);
-        let said = painter.layout_no_wrap(words, FontId::monospace(10.0), ember::TEXT);
-        let at = anchor.anchor_size(Pos2::new(beside, field.top() + 2.0), said.size());
-        painter.rect_filled(at.expand(2.0), CornerRadius::same(2), ember::PANEL);
-        painter.galley(at.min, said, ember::TEXT);
-    }
-}
 
 /// Open the system's settings at one of the addresses the words give.
 fn open_settings(link: words::SettingsLink) {
@@ -982,34 +834,16 @@ impl Window {
         let frame = egui::Frame::new()
             .fill(ember::GROUND)
             .inner_margin(egui::Margin::symmetric(28, 20));
-        let own = self
-            .own
-            .as_ref()
-            .and_then(|tile| tile.shown)
-            .map(|(width, height, cost)| words::picture_line(width, height, cost));
-        let sent = self.sent.as_ref().map(|(_, coding)| {
-            let cost = coding.cost();
-            cost.failed.map_or_else(
-                || words::coding_line(cost.bitrate, cost.encode, cost.decode, cost.let_go),
-                |why| format!("as sent: {why}"),
-            )
-        });
-        let mut pictures: Vec<String> = own.into_iter().chain(sent).collect();
-        if self.own.is_some() {
-            pictures.push(words::picture_sent_line(view.details.picture_sent));
-        }
-        for pictured in &view.pictures {
-            let size = self
-                .tiles
-                .get(&pictured.id)
-                .and_then(|tile| tile.shown)
-                .map(|(width, height, _)| (width, height));
-            let line = words::picture_shown_line(&pictured.name, pictured.flow, size);
-            pictures.push(line);
-        }
-        if let Some(why) = &view.details.picture_trouble {
-            pictures.push(format!("pictures: {why}"));
-        }
+        let own = Own {
+            drawn: self.own.as_ref().and_then(|tile| tile.shown),
+            looped: self.sent.as_ref().map(|(_, coding)| {
+                let cost = coding.cost();
+                cost.failed.map_or_else(
+                    || words::coding_line(cost.bitrate, cost.encode, cost.decode, cost.let_go),
+                    |why| format!("as sent: {why}"),
+                )
+            }),
+        };
         if self.details != Drawer::Shut && view.stage == Stage::In {
             let beside = egui::Frame::new()
                 .fill(ember::PANEL)
@@ -1023,7 +857,7 @@ impl Window {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("details")
-                        .show(ui, |ui| Self::details(ui, &view, pictures));
+                        .show(ui, |ui| details::draw(ui, &view, &mut self.chosen, &own));
                 });
         }
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
