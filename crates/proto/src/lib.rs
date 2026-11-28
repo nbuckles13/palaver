@@ -10,7 +10,9 @@ mod ticket;
 mod time;
 
 pub use fields::{DecodeError, MAX_ENTRIES};
-pub use names::{MediaTrack, MeetingTag, PLAN_ALIAS, ParticipantId, Source, Track, TrackName};
+pub use names::{
+    MediaTrack, MeetingTag, PLAN_ALIAS, ParticipantId, Shape, Source, Track, TrackName,
+};
 pub use plan::{AssignedTrack, Edge, Member, Plan, PlanStamp, WIDE_ALIAS_START};
 pub use report::{Link, MAX_ADDRESSES, MAX_NAME_BYTES, MAX_TRACKS, Report, advertisable};
 pub use sensitive::{Redacted, Secret};

@@ -7,8 +7,8 @@ use palaver_khef_core::{
 };
 use palaver_moq_wire::Setup;
 use palaver_proto::{
-    Edge, Link, MediaTrack, MeetingTag, ParticipantId, Plan, Redacted, Report, Signer, Source,
-    Timestamp, Track, TrackName, Verifier,
+    Edge, Link, MediaTrack, MeetingTag, ParticipantId, Plan, Redacted, Report, Shape, Signer,
+    Source, Timestamp, Track, TrackName, Verifier,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
@@ -75,7 +75,10 @@ pub struct VideoTrack {
     pub alias: u64,
     pub participant: ParticipantId,
     pub source: Source,
+    /// What its participant calls it: a label, with no meaning.
     pub rendition: Vec<u8>,
+    /// What its pictures are, if whoever offers it has said.
+    pub shape: Option<Shape>,
     /// This node's own: made here, not watched.
     pub own: bool,
 }
@@ -255,6 +258,15 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
     pub fn set_addresses(&mut self, addresses: Vec<Redacted<SocketAddr>>, now: Timestamp) {
         if self.addresses != addresses {
             self.addresses = addresses;
+            self.refresh_view();
+            self.service(now);
+        }
+    }
+
+    /// The tracks this node can send have changed. Its next report says so.
+    pub fn set_tracks(&mut self, tracks: Vec<MediaTrack>, now: Timestamp) {
+        if self.tracks != tracks {
+            self.tracks = tracks;
             self.refresh_view();
             self.service(now);
         }
@@ -709,6 +721,7 @@ impl<S: Signer, V: Verifier + Clone> Node<S, V> {
                     participant: participant.clone(),
                     source: assigned.track.source,
                     rendition: assigned.track.rendition.clone(),
+                    shape: assigned.track.shape,
                     own,
                 });
                 // A track of someone the tree does not reach yet is listed, and has no way.

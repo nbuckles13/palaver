@@ -434,12 +434,12 @@ impl<S: Signer, V: Verifier> Node<S, V> {
                 if member
                     .tracks
                     .iter()
-                    .any(|assigned| assigned.track == *track)
+                    .any(|assigned| assigned.track.same_name(track))
                 {
                     continue; // offered twice
                 }
                 let alias =
-                    if let Some(assigned) = held.iter().find(|assigned| assigned.track == *track) {
+                    if let Some(assigned) = held.iter().find(|held| held.track.same_name(track)) {
                         assigned.alias
                     } else {
                         // When the small ones run out, audio takes wide ones too.
@@ -1568,6 +1568,7 @@ mod tests {
             audio: true,
             source: palaver_proto::Source::Main,
             rendition: b"opus".to_vec(),
+            shape: None,
         }
     }
 
@@ -1576,6 +1577,7 @@ mod tests {
             audio: false,
             source: palaver_proto::Source::Main,
             rendition: rendition.as_bytes().to_vec(),
+            shape: None,
         }
     }
 
@@ -1667,6 +1669,35 @@ mod tests {
             Some(WIDE_ALIAS_START + 4)
         );
         assert_eq!(aliases(&c), before);
+    }
+
+    #[test]
+    fn a_track_whose_shape_changes_keeps_its_alias_and_the_plan_says_the_new_shape() {
+        let [mut c, mut j] = two_with_tracks();
+        let before = alias(&c, 2, &video("180p")).unwrap();
+        let shaped = |bitrate| MediaTrack {
+            shape: Some(palaver_proto::Shape {
+                width: 320,
+                height: 180,
+                per_second: 30,
+                bitrate,
+            }),
+            ..video("180p")
+        };
+        let listed = |plan: &Plan| {
+            let member = plan.member(&id_of(2), &FakeVerifier).unwrap();
+            let low = member.tracks.iter().find(|t| t.alias == before).unwrap();
+            low.track.shape.map(|shape| shape.bitrate)
+        };
+        assert_eq!(listed(c.plan().unwrap()), None);
+        // 2 says what its low rendition is, and then lowers its rate.
+        for (when, bitrate) in [(1000, 150_000), (2000, 100_000)] {
+            offers(&mut j, &[mic(), shaped(bitrate), video("1080p")]);
+            report(&mut j, &mut c, at(when));
+            let plan = issued(c.poll(at(when)));
+            assert_eq!(listed(&plan), Some(bitrate));
+            assert_eq!(plan.next_wide_alias, WIDE_ALIAS_START + 4, "no new alias");
+        }
     }
 
     #[test]

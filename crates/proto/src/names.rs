@@ -136,6 +136,25 @@ const MEDIA_RENDITION: u64 = 1;
 const MEDIA_KIND: u64 = 2;
 const MEDIA_SOURCE: u64 = 4;
 const MEDIA_ALIAS: u64 = 6;
+const MEDIA_WIDTH: u64 = 8;
+const MEDIA_HEIGHT: u64 = 10;
+const MEDIA_PER_SECOND: u64 = 12;
+const MEDIA_BITRATE: u64 = 14;
+
+/// What a video track's pictures are, as whoever makes them says.
+///
+/// Whoever watches chooses among a participant's tracks by this, and never by what a
+/// track is called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Shape {
+    /// In pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Pictures a second.
+    pub per_second: u32,
+    /// The rate it is coded at, in bits a second.
+    pub bitrate: u32,
+}
 
 /// One of a participant's media tracks, without saying whose: what a node lists in its
 /// report as the tracks it can send, and what the plan gives an alias to.
@@ -144,10 +163,21 @@ pub struct MediaTrack {
     /// Audio, as opposed to video. Audio packets are small, so their alias should be too.
     pub audio: bool,
     pub source: Source,
+    /// What the track is called among its participant's: a label, with no meaning.
     pub rendition: Vec<u8>,
+    /// What a video track's pictures are. Whoever offers the track may change it and
+    /// the track stays the same one: see [`same_name`](Self::same_name).
+    pub shape: Option<Shape>,
 }
 
 impl MediaTrack {
+    /// Whether this is the track `other` is, whatever each says of its shape: a track
+    /// is the one its name says.
+    #[must_use]
+    pub fn same_name(&self, other: &Self) -> bool {
+        (self.audio, self.source, &self.rendition) == (other.audio, other.source, &other.rendition)
+    }
+
     /// This track as `participant`'s.
     #[must_use]
     pub fn of(&self, participant: ParticipantId) -> Track {
@@ -176,11 +206,19 @@ impl MediaTrack {
         if let Some(alias) = alias {
             w.int(MEDIA_ALIAS, alias);
         }
+        if let Some(shape) = self.shape {
+            w.int(MEDIA_WIDTH, u64::from(shape.width));
+            w.int(MEDIA_HEIGHT, u64::from(shape.height));
+            w.int(MEDIA_PER_SECOND, u64::from(shape.per_second));
+            w.int(MEDIA_BITRATE, u64::from(shape.bitrate));
+        }
         w.finish()
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<(Self, Option<u64>), DecodeError> {
         let (mut rendition, mut audio, mut source, mut alias) = (None, None, None, None);
+        let mut shape: [Option<u32>; 4] = [None; 4];
+        let small = |v: u64| u32::try_from(v).map_err(|_| DecodeError::Invalid("track shape"));
         for pair in fields(bytes) {
             let pair = pair?;
             match (pair.ty, pair.value) {
@@ -192,6 +230,10 @@ impl MediaTrack {
                 (MEDIA_SOURCE, Value::Int(1)) => source = Some(Source::Screen),
                 (MEDIA_SOURCE, _) => return Err(DecodeError::Invalid("track source")),
                 (MEDIA_ALIAS, Value::Int(v)) => alias = Some(v),
+                (MEDIA_WIDTH, Value::Int(v)) => shape[0] = Some(small(v)?),
+                (MEDIA_HEIGHT, Value::Int(v)) => shape[1] = Some(small(v)?),
+                (MEDIA_PER_SECOND, Value::Int(v)) => shape[2] = Some(small(v)?),
+                (MEDIA_BITRATE, Value::Int(v)) => shape[3] = Some(small(v)?),
                 _ => {}
             }
         }
@@ -199,6 +241,17 @@ impl MediaTrack {
             audio: audio.ok_or(DecodeError::Missing("track kind"))?,
             source: source.ok_or(DecodeError::Missing("track source"))?,
             rendition: rendition.ok_or(DecodeError::Invalid("track rendition"))?,
+            // All of a shape or none of it.
+            shape: match shape {
+                [Some(width), Some(height), Some(per_second), Some(bitrate)] => Some(Shape {
+                    width,
+                    height,
+                    per_second,
+                    bitrate,
+                }),
+                [None, None, None, None] => None,
+                _ => return Err(DecodeError::Invalid("track shape")),
+            },
         };
         Ok((track, alias))
     }
@@ -216,7 +269,8 @@ impl Track {
         }
     }
 
-    /// This track without its participant, if it is a media track.
+    /// This track without its participant, if it is a media track. A name says nothing
+    /// of a shape.
     #[must_use]
     pub fn media(&self) -> Option<MediaTrack> {
         let (audio, source, rendition) = match self {
@@ -232,6 +286,7 @@ impl Track {
             audio,
             source,
             rendition: rendition.clone(),
+            shape: None,
         })
     }
 
@@ -390,6 +445,42 @@ mod tests {
 
     fn p(id: &str) -> ParticipantId {
         ParticipantId::new(id.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_video_tracks_shape_is_carried_whole_or_not_at_all() {
+        let shape = Shape {
+            width: 1280,
+            height: 720,
+            per_second: 30,
+            bitrate: 1_500_000,
+        };
+        let camera = |shape| MediaTrack {
+            audio: false,
+            source: Source::Main,
+            rendition: b"large".to_vec(),
+            shape,
+        };
+        for track in [camera(Some(shape)), camera(None)] {
+            let read = MediaTrack::decode(&track.encode(Some(9))).unwrap();
+            assert_eq!(read, (track, Some(9)));
+        }
+        // The same track, whatever is said of its shape.
+        assert!(camera(Some(shape)).same_name(&camera(None)));
+        assert!(!camera(None).same_name(&MediaTrack {
+            rendition: b"small".to_vec(),
+            ..camera(None)
+        }));
+        // A width with nothing else is not a shape.
+        let mut w = Writer::default();
+        w.bytes(MEDIA_RENDITION, b"large");
+        w.int(MEDIA_KIND, 1);
+        w.int(MEDIA_SOURCE, 0);
+        w.int(MEDIA_WIDTH, 1280);
+        assert_eq!(
+            MediaTrack::decode(&w.finish()),
+            Err(DecodeError::Invalid("track shape"))
+        );
     }
 
     fn rendered(name: &FullTrackName) -> String {
@@ -562,6 +653,7 @@ mod tests {
             audio,
             source,
             rendition: rendition.as_bytes().to_vec(),
+            shape: None,
         }
     }
 

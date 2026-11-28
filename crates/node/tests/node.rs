@@ -30,6 +30,7 @@ fn node(seed: u8) -> Node<FakeIdentity, FakeVerifier> {
             audio: true,
             source: Source::Main,
             rendition: b"opus".to_vec(),
+            shape: None,
         }],
         addresses: vec![],
     };

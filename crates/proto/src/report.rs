@@ -229,7 +229,9 @@ impl Report {
                 }
                 (TRACK, Value::Bytes(b)) => {
                     let (track, _) = MediaTrack::decode(b)?;
-                    if tracks.len() < MAX_TRACKS && !tracks.contains(&track) {
+                    if tracks.len() < MAX_TRACKS
+                        && !tracks.iter().any(|had: &MediaTrack| had.same_name(&track))
+                    {
                         tracks.push(track);
                     }
                 }
@@ -326,11 +328,13 @@ mod tests {
                     audio: true,
                     source: crate::Source::Main,
                     rendition: b"opus".to_vec(),
+                    shape: None,
                 },
                 MediaTrack {
                     audio: false,
                     source: crate::Source::Screen,
                     rendition: b"1080p".to_vec(),
+                    shape: None,
                 },
             ],
         }
@@ -578,6 +582,7 @@ mod tests {
             audio: false,
             source: crate::Source::Main,
             rendition: format!("r{n}").into_bytes(),
+            shape: None,
         };
         let mut report = sample();
         report.tracks = (0..40).map(track).collect();

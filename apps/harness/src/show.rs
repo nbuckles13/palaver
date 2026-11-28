@@ -10,13 +10,13 @@
 //! network nor the window has to spare. The work of each turn is in [`Projector`], which
 //! never waits, so that tests can turn it by hand.
 
-use crate::picture::Slot;
+use crate::picture::{PER_SECOND, Slot};
 use palaver_media::picture::Picture;
 use palaver_media::video::{
     Decode, Encode, Error, Kind, Settings, SoftwareDecoder, SoftwareEncoder,
 };
 use palaver_proto::ParticipantId;
-use palaver_sdk::{Pictures, Status, VideoPort, VideoTrack};
+use palaver_sdk::{Offer, Pictures, Shape, Status, VideoPort, VideoTrack};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -238,23 +238,29 @@ pub struct Screen {
     /// Where this machine's own pictures are put, if it makes any: they are sent to
     /// whoever watches.
     pub camera: Option<Arc<Slot>>,
-    /// What the meeting calls this machine's picture, and the rate to code it at, in
-    /// bits a second.
-    pub rendition: Vec<u8>,
-    pub bitrate: u32,
+    /// What this machine offers the meeting of its camera, if it has one.
+    pub offer: Offer,
     /// Where the pictures of the others are put.
     pub wall: Arc<Wall>,
     pub meter: Arc<Meter>,
 }
 
 impl Screen {
-    /// A screen for a camera whose pictures are `tall` high, or for none.
+    /// A screen for a camera whose pictures are `size` large (across and down), coded
+    /// at `bitrate`, or for none.
     #[must_use]
-    pub fn new(camera: Option<Arc<Slot>>, tall: u32, bitrate: u32) -> Self {
+    pub fn new(camera: Option<Arc<Slot>>, size: (u32, u32), bitrate: u32) -> Self {
         Self {
             camera,
-            rendition: format!("{tall}p").into_bytes(),
-            bitrate,
+            offer: Offer {
+                name: format!("{}p", size.1).into_bytes(),
+                shape: Shape {
+                    width: size.0,
+                    height: size.1,
+                    per_second: PER_SECOND,
+                    bitrate,
+                },
+            },
             wall: Arc::new(Wall::default()),
             meter: Arc::new(Meter::default()),
         }
@@ -361,7 +367,7 @@ impl Projector {
         if self.pictures.wanted() && !self.pictures.has_camera() {
             let settings = Settings {
                 key_every: Some(KEY_EVERY),
-                ..Settings::new(picture.size(), self.screen.bitrate)
+                ..Settings::new(picture.size(), self.screen.offer.shape.bitrate)
             };
             match SoftwareEncoder::new(settings) {
                 Ok(codec) => {

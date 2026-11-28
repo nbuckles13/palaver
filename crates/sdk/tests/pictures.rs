@@ -10,7 +10,7 @@ use palaver_media::picture::{Pattern, Picture, Size};
 use palaver_media::video::{Settings, SoftwareDecoder, SoftwareEncoder};
 use palaver_net::identity::Identity;
 use palaver_net::memory::MemoryNetwork;
-use palaver_sdk::{Call, Options, Participant, Pictures, Status, entry_points};
+use palaver_sdk::{Call, Offer, Options, Participant, Pictures, Shape, Status, entry_points};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -23,9 +23,22 @@ struct Seat {
     _call: Call,
 }
 
+/// The small size of a camera, coded at `bitrate`.
+fn low(bitrate: u32) -> Offer {
+    Offer {
+        name: b"low".to_vec(),
+        shape: Shape {
+            width: 320,
+            height: 180,
+            per_second: 30,
+            bitrate,
+        },
+    }
+}
+
 fn seat(network: &MemoryNetwork, secret: &Identity, name: &str, camera: bool) -> Seat {
     let options = Options {
-        camera: camera.then(|| b"180p".to_vec()),
+        cameras: camera.then(|| low(150_000)).into_iter().collect(),
         ..Options::named(name)
     };
     let (mut participant, call) =
@@ -101,4 +114,52 @@ async fn a_camera_is_coded_only_while_watched_and_shown_at_the_other_end() {
     }
     assert!(!ana.pictures.wanted());
     assert!(!ana.pictures.film(&pattern.next_picture()).unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_a_camera_offers_is_said_in_full_and_can_change_while_the_meeting_lasts() {
+    let network = MemoryNetwork::new();
+    let secret = Identity::generate().unwrap();
+    let ana = seat(&network, &secret, "Ana", true);
+    let bo = seat(&network, &secret, "Bo", false);
+    ana.participant.create_meeting().await;
+    let ticket = ana.participant.ticket(&secret.secret());
+    bo.participant.join(entry_points(&ticket)).await;
+    // Bo is told what the picture is, not left to read it from the name.
+    until_tracks(bo.participant.control().status(), 1).await;
+    let first = bo.pictures.tracks().remove(0);
+    assert_eq!(first.rendition, b"low");
+    assert_eq!(first.shape, Some(low(150_000).shape));
+
+    // Ana lowers the rate of that size and adds a larger one.
+    let high = Offer {
+        name: b"high".to_vec(),
+        shape: Shape {
+            width: 640,
+            height: 360,
+            per_second: 30,
+            bitrate: 500_000,
+        },
+    };
+    ana.participant
+        .offer_cameras(vec![low(100_000), high.clone()])
+        .await;
+    until_tracks(bo.participant.control().status(), 2).await;
+    let tracks = bo.pictures.tracks();
+    let again = tracks
+        .iter()
+        .find(|track| track.rendition == b"low")
+        .unwrap();
+    // The same track, under the same alias, with what it now is.
+    assert_eq!(again.alias, first.alias);
+    assert_eq!(again.shape, Some(low(100_000).shape));
+    let larger = tracks
+        .iter()
+        .find(|track| track.rendition == b"high")
+        .unwrap();
+    assert_eq!(larger.shape, Some(high.shape));
+
+    // And then has no camera at all.
+    ana.participant.offer_cameras(Vec::new()).await;
+    until_tracks(bo.participant.control().status(), 0).await;
 }
