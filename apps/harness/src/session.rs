@@ -10,17 +10,17 @@
 //! sound that only says it is there, so that everything the session decides is tested
 //! without a network or a sound card.
 
-use crate::history::{Heard, History, Linked, Past};
-pub use crate::history::{LinkLine, VoiceLine};
+use crate::history::{Filmed, Heard, History, Linked, Past, Shown};
+pub use crate::history::{Flowed, LinkLine, PictureLine, SentLine, VoiceLine};
 use crate::live::{Live, Reading, Tuning};
-use crate::show::{Flow, Flowing, Meter, Screen, Show, Wall, others};
+use crate::show::{Meter, Screen, Show, Wall, others};
 use palaver_media::Channels;
 use palaver_net::quic::QuicOptions;
 use palaver_net::reach::{DEFAULT_STUN_SERVERS, Network};
 use palaver_proto::SECRET_BYTES;
 use palaver_proto::{ParticipantId, Secret, Ticket};
 use palaver_sdk::{Call, LinkGauge, Options, Participant, Status, entry_points};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -110,8 +110,12 @@ pub struct Details {
     pub voices: Vec<VoiceLine>,
     /// The connections this node has, as they are now.
     pub links: Vec<LinkLine>,
-    /// This machine's picture as it is sent, over the last second.
-    pub picture_sent: Flow,
+    /// Each size of this machine's camera, as it is sent; and everyone else's picture,
+    /// as it is shown.
+    pub sent: Vec<SentLine>,
+    pub shown: Vec<PictureLine>,
+    /// Who conducts, and how the meeting is wired.
+    pub map: Map,
     /// Why the pictures stopped, if they did.
     pub picture_trouble: Option<String>,
 }
@@ -121,12 +125,79 @@ pub struct Details {
 pub struct Pictured {
     pub id: ParticipantId,
     pub name: String,
-    /// How their picture has arrived over the last second.
-    pub flow: Flow,
 }
 
-/// How many refreshes a picture's flow is taken over: a second.
-const FLOW_OVER: usize = 5;
+/// One of the people on the map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub name: String,
+    pub me: bool,
+    /// Whether they issued the plan in force.
+    pub conducts: bool,
+}
+
+/// How the meeting is wired, by the plan in force.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Map {
+    /// Everyone in the plan, in its order.
+    pub places: Vec<Place>,
+    /// The connections the plan asks for, each between two of the places by their
+    /// number, and whether sound travels along it.
+    pub links: Vec<(usize, usize, bool)>,
+}
+
+impl Map {
+    fn of(status: &Status, me: &ParticipantId, name_of: impl Fn(&ParticipantId) -> String) -> Self {
+        let places = status
+            .roster
+            .iter()
+            .map(|id| Place {
+                name: name_of(id),
+                me: id == me,
+                conducts: status.conducts.as_ref() == Some(id),
+            })
+            .collect();
+        let place = |id: &ParticipantId| status.roster.iter().position(|member| member == id);
+        let same = |one: &(ParticipantId, ParticipantId),
+                    other: &(ParticipantId, ParticipantId)| {
+            (one.0 == other.0 && one.1 == other.1) || (one.0 == other.1 && one.1 == other.0)
+        };
+        let links = status
+            .peerings
+            .iter()
+            .filter_map(|link| {
+                let sound = status.audio_tree.iter().any(|tree| same(tree, link));
+                Some((place(&link.0)?, place(&link.1)?, sound))
+            })
+            .collect();
+        Self { places, links }
+    }
+
+    /// The name of whoever conducts, if the plan is known.
+    #[must_use]
+    pub fn conductor(&self) -> Option<&str> {
+        let place = self.places.iter().find(|place| place.conducts)?;
+        Some(place.name.as_str())
+    }
+}
+
+/// Everyone else whose picture there is to show, on a machine that shows pictures.
+fn pictured(
+    shows: bool,
+    status: &Status,
+    name_of: impl Fn(&ParticipantId) -> String,
+) -> Vec<Pictured> {
+    if !shows {
+        return Vec::new();
+    }
+    others(&status.videos)
+        .into_iter()
+        .map(|(who, _)| Pictured {
+            id: who.clone(),
+            name: name_of(who),
+        })
+        .collect()
+}
 
 /// The gauges as they are remembered between refreshes.
 struct Gauges {
@@ -142,52 +213,56 @@ struct Gauges {
     /// What the meeting's pictures cost, if it has any.
     meter: Option<Arc<Meter>>,
     wall: Option<Arc<Wall>>,
-    picture_sent: Flowing,
-    /// The same for each of the others' pictures.
-    shown: BTreeMap<ParticipantId, Flowing>,
 }
 
 impl Gauges {
-    /// Whose pictures there are to show at `at`, on a machine that shows pictures, and
-    /// how each has arrived.
-    fn pictured(
-        &mut self,
-        at: Duration,
+    /// The pictures as they stand: each size of this machine's camera the plan lists,
+    /// and everyone else's.
+    fn pictures(
+        &self,
         status: &Status,
         name_of: impl Fn(&ParticipantId) -> String,
-    ) -> Vec<Pictured> {
-        let Some(wall) = &self.wall else {
-            return Vec::new();
+    ) -> (Vec<Filmed>, Vec<Shown>) {
+        let (Some(meter), Some(wall)) = (&self.meter, &self.wall) else {
+            return (Vec::new(), Vec::new());
         };
-        let tracks = others(&status.videos);
-        self.shown
-            .retain(|id, _| tracks.iter().any(|(who, _)| *who == id));
-        tracks
+        let coded = meter.sent_by_size();
+        let filmed = status
+            .videos
+            .iter()
+            .filter(|track| track.own)
+            .map(|track| Filmed {
+                name: String::from_utf8_lossy(&track.rendition).into_owned(),
+                size: track.shape.map(|shape| (shape.width, shape.height)),
+                counted: coded
+                    .iter()
+                    .find(|(name, _)| *name == track.rendition)
+                    .map_or_else(Default::default, |(_, counted)| *counted),
+            })
+            .collect();
+        let shown = others(&status.videos)
             .into_iter()
             .map(|(who, _)| {
-                let id = who.clone();
-                let counted = wall
-                    .get(&id)
-                    .map_or_else(Default::default, |seat| seat.count.read());
-                let flowing = self
-                    .shown
-                    .entry(id.clone())
-                    .or_insert_with(|| Flowing::over(FLOW_OVER));
-                Pictured {
-                    name: name_of(&id),
-                    flow: flowing.after(at, counted),
-                    id,
+                let seat = wall.get(who);
+                Shown {
+                    id: who.clone(),
+                    name: name_of(who),
+                    size: seat.as_ref().and_then(|seat| seat.size()),
+                    counted: seat
+                        .as_ref()
+                        .map_or_else(Default::default, |seat| seat.count.read()),
+                    keys: seat.as_ref().map_or(0, |seat| seat.keys()),
                 }
             })
-            .collect()
+            .collect();
+        (filmed, shown)
     }
 
     fn new(screen: Option<&Screen>) -> Self {
         Self {
             meter: screen.map(|screen| Arc::clone(&screen.meter)),
             wall: screen.map(|screen| Arc::clone(&screen.wall)),
-            picture_sent: Flowing::over(FLOW_OVER),
-            shown: BTreeMap::new(),
+
             sound_gap: Worst::of_last(REMEMBERED),
             sound_burst: Worst::of_last(REMEMBERED),
             network_late: Worst::of_last(REMEMBERED),
@@ -451,6 +526,8 @@ fn refresh(
             rtt: link.rtt,
             sent: link.sent,
             lost: link.lost,
+            bytes_sent: link.bytes_sent,
+            bytes_received: link.bytes_received,
         })
         .collect();
     // Whose voice each alias is, by the plan.
@@ -470,10 +547,8 @@ fn refresh(
         .collect();
     let speaker_lead = gauges.speaker_lead.after(sound.lead);
     let at = gauges.began.elapsed();
-    let sent = gauges
-        .meter
-        .as_ref()
-        .map_or_else(Default::default, |meter| meter.sent.read());
+    let (filmed, shown) = gauges.pictures(status, name_of);
+    gauges.history.note_pictures(filmed, shown);
     gauges
         .history
         .note(at, sound.longest_gap, speaker_lead, heard, linked);
@@ -487,10 +562,12 @@ fn refresh(
         sound_gap_past: gauges.history.sound_gap(),
         voices: gauges.history.voices(),
         links: gauges.history.links(),
-        picture_sent: gauges.picture_sent.after(at, sent),
+        sent: gauges.history.sent(),
+        shown: gauges.history.shown(),
+        map: Map::of(status, participant.control().me(), name_of),
         picture_trouble: gauges.meter.as_ref().and_then(|meter| meter.failed()),
     };
-    let pictures = gauges.pictured(at, status, name_of);
+    let pictures = pictured(gauges.wall.is_some(), status, name_of);
     let me = participant.control().me().clone();
     let people: Vec<Person> = status
         .roster

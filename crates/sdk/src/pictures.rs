@@ -33,6 +33,8 @@ pub struct Pictures<E, D> {
     watched: BTreeMap<u64, VideoReceiver<D>>,
     pieces: Vec<Piece>,
     shown: Vec<Picture>,
+    /// The tracks a key frame has been asked of since they were last taken.
+    asked: Vec<u64>,
 }
 
 impl<E: Encode, D: Decode> Pictures<E, D> {
@@ -48,6 +50,7 @@ impl<E: Encode, D: Decode> Pictures<E, D> {
             watched: BTreeMap::new(),
             pieces: Vec::new(),
             shown: Vec::new(),
+            asked: Vec::new(),
         }
     }
 
@@ -208,6 +211,12 @@ impl<E: Encode, D: Decode> Pictures<E, D> {
         self.watched.keys().copied()
     }
 
+    /// The tracks a key frame has been asked of since this was last called, once for
+    /// each asking: for whoever counts them.
+    pub fn take_asked(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.asked)
+    }
+
     /// Take everything the engine has to say: `show` is given each picture that is now
     /// whole, with the alias of its track.
     pub fn turn(&mut self, mut show: impl FnMut(u64, Picture)) {
@@ -255,6 +264,7 @@ impl<E: Encode, D: Decode> Pictures<E, D> {
                     }
                     if let Some(lost) = lost {
                         self.port.ask_key_frame(alias, lost);
+                        self.asked.push(alias);
                     }
                 }
                 VideoIn::Reset { alias, group } => {
@@ -264,6 +274,7 @@ impl<E: Encode, D: Decode> Pictures<E, D> {
                         .and_then(|receiver| receiver.given_up(group));
                     if let Some(lost) = lost {
                         self.port.ask_key_frame(alias, lost);
+                        self.asked.push(alias);
                     }
                 }
             }

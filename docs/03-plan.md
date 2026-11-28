@@ -400,17 +400,27 @@ target where it was when the lateness is a trend and not a scatter, and shed soo
 
 ### The statistics panel
 
-A first pass is in: the details slide out beside the meeting (the window grows by their
-width), in three parts: this machine, each direct link, each voice. Each has its numbers
-as they stand and, for the ones worth watching, a line over the last two minutes, one
-value a second: the sound thread's longest wait; a link's round trip and packets lost a
-second; a voice's delay from arriving to being heard and its frames lost or late a
-second. The history is kept by the session and only read by the window. A voice that
-stops stays listed, with a gap in its line, until it has been silent two minutes.
+The details slide out beside the meeting (the window grows by their width), in tabs:
+Audio, Video, Network, System. Each is a table of the numbers as they stand, with a
+total under the columns that add up (frames lost, kbit/s, key frames asked for; not a
+delay or a size), a small line in each row, and under the table the lines of whichever
+row is chosen, over the last two minutes, one value a second. The history is kept by
+the session and only read by the window.
 
-Each plot has a scale down its side and says the value under the pointer. In a window
-that fills its screen the details take their width from the meeting; otherwise the
-window grows for them.
+- Audio: the microphone and the speaker (noise removal, what waits for the speaker,
+  how long it ran dry or fell behind), and a row for each voice: delay from arriving to
+  being heard, its buffer, frames lost, late and rebuilt. A voice that stops stays
+  listed, with a gap in its line, until it has been silent two minutes.
+- Video: a row for each size this machine offers (rate, pictures a second, time to
+  encode, or that nobody watches it), and a row for each picture shown (its size, rate,
+  pictures a second, time to decode, key frames asked for).
+- Network: who conducts and how many links the plan has; the meeting's wiring as a
+  small map, this machine at the bottom; a row for each of this machine's links (round
+  trip, loss, kbit/s each way).
+- System: the devices, and how this machine is keeping up as bars against what each
+  may take (the sound thread's wait, the network's timers, coding, drawing).
+
+Each plot has a scale down its side and says the value under the pointer.
 
 A voice's plots stop when its sender is muted: nothing at all is sent then, and there
 is nothing to measure. A sender who is only silent still sends the small packet Opus
@@ -419,27 +429,24 @@ whether a muted sender should send the same, for the measurements' sake.
 
 To do:
 
-- Gauges for the numbers as they stand, in place of sentences; the sentences are a
-  developer's.
-- A plot's line only says its scale in words. Marks along its edge, and the value under
-  the pointer.
-- More to draw as it comes: the speaker's lead, what the microphone sends, the plan's
-  changes, each hop of a voice that came by more than one.
-- Video, once it crosses a network, in place of today's "your picture" and "as sent"
-  lines (which are of a loop on one machine): for what this machine sends, the time to
-  encode and the rate sent, for each size; for each picture received, the rate
-  received, the time to decode, and how long from a frame's arrival to its being on
-  the screen (the like of a voice's "heard after arriving"), with frames lost, late or
-  let go and key frames asked for. The same two kinds of line as sound has: one for
-  this machine, one for each track received.
+- A Lab tab: the numbers that are fixed in the code today, each to be changed while
+  the meeting runs (noise removal, the jitter buffer's floor and margin, the speaker's
+  lead, voices heard at once, the wait before changing a picture's size, the sizes on
+  offer and their rates, key frames). Keeping what was chosen from one run to the next
+  comes after.
+- An Events tab: the plan's changes, links made and lost, sizes changed.
+- More to draw as it comes: what the microphone sends, each hop of a voice that came
+  by more than one, how many watch each size (a sender knows only whether anyone does).
+- How long from a frame's arrival to its being on the screen (the like of a voice's
+  "heard after arriving"), with frames lost, late or let go.
+- How a link was made (direct, or punched through a router), and who would conduct
+  next: neither is reported yet.
 - Further off (wanted, 2026-11-23): end-to-end numbers, from a camera or a microphone
   on one machine to the screen or the speaker on another. What is shown today starts
   at a frame's arrival, because two machines' clocks are not compared. Ways to get
   there: compare the clocks over the link (as the round trip is already measured), or
   measure from outside with a pattern that carries the time and a sound made at a
   known moment.
-- Names: a link line is for a direct connection, and a voice line for a voice however
-  many hops it came. To be made plain on the page.
 
 ### What stands for someone whose camera is off
 

@@ -4,8 +4,6 @@
 //! window. The drawing code in [`crate::ui`] decides nothing but colours and layout.
 
 use crate::check::Finding;
-use crate::show::Flow;
-use palaver_media::jitter::Stats;
 use std::time::Duration;
 
 /// The quietest and the loudest level the meter shows, on the scale of
@@ -189,21 +187,6 @@ pub fn millis(time: Duration) -> String {
     format!("{} ms", time.as_millis())
 }
 
-/// How the sound thread is keeping up.
-///
-/// Its longest wait between turns and the most frames the microphone had waiting at
-/// once; then how much sound the speaker wanted and did not get since the meeting's
-/// sound began, and how much it was too slow to take.
-#[must_use]
-pub fn sound_line(gap: Duration, burst: usize, starved: Duration, dropped: Duration) -> String {
-    format!(
-        "sound thread: longest wait {} · most frames at once {burst} · speaker ran dry for {} · fell behind by {}",
-        millis(gap),
-        millis(starved),
-        millis(dropped)
-    )
-}
-
 /// What is said of a noisy microphone while it is being tried: that more noise
 /// suppression will be added, where that is left to Palaver, and nothing where the
 /// strength was fixed by whoever started it.
@@ -216,28 +199,6 @@ pub const fn noisy_hint(noisy: bool, by_ear: bool) -> Option<&'static str> {
     } else {
         None
     }
-}
-
-/// What the details say when extra noise suppression is on.
-#[must_use]
-pub const fn noise_line(high: bool) -> Option<&'static str> {
-    if high {
-        Some("noise suppression: high, to compensate for background noise")
-    } else {
-        None
-    }
-}
-
-/// What the details say of this machine's own picture: how large it is, and how long
-/// each takes to make ready for the screen.
-#[must_use]
-pub fn picture_line(width: u32, height: u32, cost: Duration) -> String {
-    let tenths = cost.as_micros() / 100;
-    format!(
-        "your picture: {width} × {height} · {}.{} ms each to make ready for the screen",
-        tenths / 10,
-        tenths % 10
-    )
 }
 
 /// What the details say of this machine's picture as it would be sent: the rate, and
@@ -299,42 +260,107 @@ pub fn tiles_tall(count: usize, across: usize, tall: f32) -> f32 {
     count.div_ceil(across.max(1)) as f32 * (tall + 36.0)
 }
 
+/// A length of time in milliseconds, to a tenth.
+#[must_use]
+pub fn tenths(time: Duration) -> String {
+    let tenths = time.as_micros() / 100;
+    format!("{}.{} ms", tenths / 10, tenths % 10)
+}
+
+/// How much of `most` a length of time is: nought to one, and one for anything over.
+#[must_use]
+pub fn share(value: Duration, most: Duration) -> f32 {
+    if most.is_zero() {
+        return 1.0;
+    }
+    (value.as_secs_f32() / most.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+/// The share of the packets sent on a link that were lost, to a tenth of a percent.
+#[must_use]
+pub fn lost_share(sent: u64, lost: u64) -> String {
+    let tenths = lost.saturating_mul(1000) / sent.max(1);
+    format!("{}.{}%", tenths / 10, tenths % 10)
+}
+
+/// The most frames the microphone had waiting at once: one is right.
+#[must_use]
+pub fn burst_line(burst: usize) -> String {
+    format!("microphone: {burst} at once at most (1 is right)")
+}
+
+/// What the plan in force comes to: who conducts, how many are here, and the links.
+#[must_use]
+pub fn plan_line(conductor: Option<&str>, here: usize, links: usize, sound: usize) -> String {
+    let conducts = conductor.map_or_else(String::new, |name| format!("{name} conducts · "));
+    format!("{conducts}{here} here · {links} links, sound on {sound}")
+}
+
+/// Where each of `count` people is drawn on a map, across and down, each from nought to
+/// one.
+///
+/// `me` is at the bottom; everyone else stands a row higher for each link sound takes
+/// to reach them, those of a row spread evenly across. `links` are pairs of people by
+/// number, with whether sound travels along each. Someone sound does not reach is put
+/// by the spare links, and failing that in a row above everyone.
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "counts of people in a meeting, as places on the screen"
+)]
+pub fn map_places(count: usize, links: &[(usize, usize, bool)], me: usize) -> Vec<(f32, f32)> {
+    let mut row: Vec<Option<usize>> = vec![None; count];
+    if let Some(mine) = row.get_mut(me) {
+        *mine = Some(0);
+    }
+    // Rows by sound's links first, then by the spare ones for whoever is left.
+    for sound_only in [true, false] {
+        loop {
+            let mut reached = false;
+            for (one, other, sound) in links {
+                if sound_only && !sound {
+                    continue;
+                }
+                let rows = (
+                    row.get(*one).copied().flatten(),
+                    row.get(*other).copied().flatten(),
+                );
+                let (found, from) = match rows {
+                    (Some(from), None) => (*other, from),
+                    (None, Some(from)) => (*one, from),
+                    _ => continue,
+                };
+                if let Some(place) = row.get_mut(found) {
+                    *place = Some(from + 1);
+                    reached = true;
+                }
+            }
+            if !reached {
+                break;
+            }
+        }
+    }
+    let top = row.iter().flatten().max().copied().unwrap_or(0);
+    let rows: Vec<usize> = row.iter().map(|place| place.unwrap_or(top + 1)).collect();
+    let most = rows.iter().max().copied().unwrap_or(0).max(1);
+    let mut seen = vec![0usize; most + 1];
+    let in_row = |which: usize| rows.iter().filter(|row| **row == which).count();
+    rows.iter()
+        .map(|which| {
+            let place = seen.get(*which).copied().unwrap_or(0);
+            if let Some(count) = seen.get_mut(*which) {
+                *count += 1;
+            }
+            let across = (place + 1) as f32 / (in_row(*which) + 1) as f32;
+            (across, 1.0 - *which as f32 / most as f32)
+        })
+        .collect()
+}
+
 /// What someone else's picture is called.
 #[must_use]
 pub fn far_name(name: &str) -> String {
     format!("{name}'s picture")
-}
-
-fn flow_line(flow: Flow, coding: &str) -> String {
-    let tenths = flow.each.as_micros() / 100;
-    format!(
-        "{} kbit/s · {} a second · {}.{} ms to {coding}",
-        flow.bitrate / 1000,
-        flow.per_second,
-        tenths / 10,
-        tenths % 10
-    )
-}
-
-/// What the details say of this machine's picture as the meeting is sent it.
-#[must_use]
-pub fn picture_sent_line(flow: Flow) -> String {
-    if flow.per_second == 0 {
-        return String::from("picture sent: nobody is watching");
-    }
-    format!("picture sent: {}", flow_line(flow, "encode"))
-}
-
-/// What the details say of someone else's picture as it arrives.
-#[must_use]
-pub fn picture_shown_line(name: &str, flow: Flow, size: Option<(u32, u32)>) -> String {
-    if flow.per_second == 0 {
-        return format!("picture of {name}: nothing yet");
-    }
-    let size = size.map_or_else(String::new, |(width, height)| {
-        format!("{width} × {height} · ")
-    });
-    format!("picture of {name}: {size}{}", flow_line(flow, "decode"))
 }
 
 /// A length on the screen in its pixels, for a screen with `scale` of them to a point.
@@ -358,12 +384,6 @@ pub fn tile_width(width: u32, height: u32, tall: f32) -> f32 {
     tall * width as f32 / height.max(1) as f32
 }
 
-/// How the network thread is keeping up.
-#[must_use]
-pub fn network_line(late: Duration) -> String {
-    format!("network thread: timers up to {} late", millis(late))
-}
-
 /// What the speaker's own buffer adds to what waits for it: the device is asked to work
 /// in pieces of this length.
 pub const SPEAKER_PIECE: Duration = Duration::from_millis(10);
@@ -375,38 +395,6 @@ pub const fn heard_after(delay: Duration, speaker_lead: Duration) -> Duration {
     delay
         .saturating_add(speaker_lead)
         .saturating_add(SPEAKER_PIECE)
-}
-
-/// One voice being played.
-///
-/// How long after arriving it is heard, the delay its buffer aims for, and what became
-/// of its frames. "Lost" are frames that could not be rebuilt; the fade at the start of
-/// each pause is not among them.
-#[must_use]
-pub fn voice_line(name: &str, delay: Duration, speaker_lead: Duration, stats: &Stats) -> String {
-    format!(
-        "{name}: heard {} after arriving (buffer {}) · played {} · rebuilt {} · lost {} · skipped {} · late {}",
-        millis(heard_after(delay, speaker_lead)),
-        millis(delay),
-        stats.played,
-        stats.recovered_fec.saturating_add(stats.recovered_dred),
-        stats.lost,
-        stats.skipped,
-        stats.late
-    )
-}
-
-/// How the connection to one of the others is faring: the round trip, and how many of
-/// the packets sent to them were lost on the way, in tenths of a percent.
-#[must_use]
-pub fn link_line(name: &str, rtt: Duration, sent: u64, lost: u64) -> String {
-    let tenths = lost.saturating_mul(1000).checked_div(sent).unwrap_or(0);
-    format!(
-        "link to {name}: round trip {} · lost {lost} of {sent} packets sent ({}.{}%)",
-        millis(rtt),
-        tenths / 10,
-        tenths % 10
-    )
 }
 
 /// A voice's line, with a word added when it is not being played and the line is of how
@@ -600,42 +588,6 @@ mod tests {
     }
 
     #[test]
-    fn the_details_say_how_the_threads_and_each_voice_are_faring() {
-        assert_eq!(
-            sound_line(
-                Duration::from_micros(14_900),
-                2,
-                Duration::from_millis(20),
-                Duration::ZERO
-            ),
-            "sound thread: longest wait 14 ms · most frames at once 2 · speaker ran dry for 20 ms · fell behind by 0 ms"
-        );
-        assert_eq!(
-            network_line(Duration::from_millis(3)),
-            "network thread: timers up to 3 ms late"
-        );
-        let stats = Stats {
-            played: 1200,
-            recovered_fec: 3,
-            recovered_dred: 1,
-            concealed: 12,
-            lost: 2,
-            skipped: 2,
-            late: 5,
-            ..Stats::default()
-        };
-        assert_eq!(
-            voice_line(
-                "Bo",
-                Duration::from_millis(60),
-                Duration::from_millis(45),
-                &stats
-            ),
-            "Bo: heard 115 ms after arriving (buffer 60 ms) · played 1200 · rebuilt 4 · lost 2 · skipped 2 · late 5"
-        );
-    }
-
-    #[test]
     fn the_microphone_is_warned_of_in_a_meeting_only_for_what_stays_wrong() {
         let here = System::Windows;
         for finding in [Finding::NoSignal, Finding::Processed] {
@@ -780,34 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn extra_noise_suppression_is_said_only_where_it_is_added() {
-        assert_eq!(
-            noise_line(true),
-            Some("noise suppression: high, to compensate for background noise")
-        );
-        assert_eq!(noise_line(false), None);
-        // Before a meeting: only for a noisy microphone, and only where the strength is
-        // left to Palaver.
-        assert!(
-            noisy_hint(true, true).is_some_and(|hint| hint.contains("extra noise suppression"))
-        );
-        assert_eq!(noisy_hint(true, false), None);
-        assert_eq!(noisy_hint(false, true), None);
-    }
-
-    #[test]
-    fn a_picture_line_gives_its_size_and_its_cost_to_a_tenth() {
-        assert_eq!(
-            picture_line(640, 360, Duration::from_micros(1260)),
-            "your picture: 640 × 360 · 1.2 ms each to make ready for the screen"
-        );
-        assert_eq!(
-            picture_line(1920, 1080, Duration::from_millis(11)),
-            "your picture: 1920 × 1080 · 11.0 ms each to make ready for the screen"
-        );
-    }
-
-    #[test]
     fn a_coding_line_gives_the_rate_and_the_costs() {
         assert_eq!(
             coding_line(
@@ -830,39 +754,6 @@ mod tests {
     }
 
     #[test]
-    fn the_lines_for_pictures_in_a_meeting_give_rate_pace_and_cost() {
-        let flow = Flow {
-            bitrate: 487_300,
-            per_second: 30,
-            each: Duration::from_micros(3140),
-        };
-        assert_eq!(
-            picture_sent_line(flow),
-            "picture sent: 487 kbit/s · 30 a second · 3.1 ms to encode"
-        );
-        assert_eq!(
-            picture_shown_line("Bo", flow, None),
-            "picture of Bo: 487 kbit/s · 30 a second · 3.1 ms to decode"
-        );
-        assert_eq!(
-            picture_shown_line("Bo", flow, Some((640, 360))),
-            "picture of Bo: 640 × 360 · 487 kbit/s · 30 a second · 3.1 ms to decode"
-        );
-        // A picture 90 points high on a screen with two pixels to the point.
-        assert_eq!(pixels(90.0, 2.0), 180);
-        assert_eq!(pixels(101.25, 1.0), 101);
-        assert_eq!(
-            picture_sent_line(Flow::default()),
-            "picture sent: nobody is watching"
-        );
-        assert_eq!(
-            picture_shown_line("Bo", Flow::default(), Some((640, 360))),
-            "picture of Bo: nothing yet"
-        );
-        assert_eq!(far_name("Bo"), "Bo's picture");
-    }
-
-    #[test]
     fn the_others_pictures_are_smaller_the_more_there_are() {
         // One is as large as it may be; a narrow window makes it smaller.
         assert_eq!(tiles(1, 464.0), (1, 320.0, 180.0));
@@ -879,22 +770,55 @@ mod tests {
     }
 
     #[test]
-    fn a_tile_keeps_the_shape_of_its_picture() {
-        assert!((tile_width(640, 360, 90.0) - 160.0).abs() < 0.001);
-        assert!((tile_width(480, 640, 80.0) - 60.0).abs() < 0.001);
+    fn times_and_shares_are_said_shortly() {
+        assert_eq!(tenths(Duration::from_micros(3140)), "3.1 ms");
+        assert_eq!(tenths(Duration::ZERO), "0.0 ms");
+        let ms = Duration::from_millis;
+        assert!((share(ms(5), ms(20)) - 0.25).abs() < 0.001);
+        assert!((share(ms(50), ms(20)) - 1.0).abs() < 0.001);
+        assert!((share(ms(5), Duration::ZERO) - 1.0).abs() < 0.001);
+        assert_eq!(lost_share(4000, 30), "0.7%");
+        assert_eq!(lost_share(0, 0), "0.0%");
+        assert_eq!(
+            plan_line(Some("Ana"), 8, 11, 7),
+            "Ana conducts · 8 here · 11 links, sound on 7"
+        );
+        assert_eq!(plan_line(None, 1, 0, 0), "1 here · 0 links, sound on 0");
     }
 
     #[test]
-    fn a_link_line_gives_the_round_trip_and_the_share_of_packets_lost() {
-        assert_eq!(
-            link_line("Bo", Duration::from_millis(12), 4000, 30),
-            "link to Bo: round trip 12 ms · lost 30 of 4000 packets sent (0.7%)"
-        );
-        // Nothing sent yet is nothing lost.
-        assert_eq!(
-            link_line("Bo", Duration::ZERO, 0, 0),
-            "link to Bo: round trip 0 ms · lost 0 of 0 packets sent (0.0%)"
-        );
+    fn a_map_puts_me_at_the_bottom_and_the_rest_by_how_far_sound_goes() {
+        // 0 is me; 1 and 2 hear me directly; 3 through 1; 4 only has a spare link to 2.
+        let links = [
+            (0, 1, true),
+            (2, 0, true),
+            (1, 3, true),
+            (1, 2, false),
+            (2, 4, false),
+        ];
+        let places = map_places(5, &links, 0);
+        let near = |got: (f32, f32), want: (f32, f32)| {
+            (got.0 - want.0).abs() < 0.001 && (got.1 - want.1).abs() < 0.001
+        };
+        assert!(near(places[0], (0.5, 1.0)), "{places:?}");
+        // The two beside me share a row, a third and two thirds across.
+        assert!(near(places[1], (1.0 / 3.0, 0.5)), "{places:?}");
+        assert!(near(places[2], (2.0 / 3.0, 0.5)), "{places:?}");
+        // Two links away, by sound or by a spare link.
+        assert!(near(places[3], (1.0 / 3.0, 0.0)), "{places:?}");
+        assert!(near(places[4], (2.0 / 3.0, 0.0)), "{places:?}");
+        // Alone is in the middle at the bottom; nobody is nothing.
+        assert!(near(map_places(1, &[], 0)[0], (0.5, 1.0)));
+        assert!(map_places(0, &[], 0).is_empty());
+        // Someone no link reaches is put above the rest.
+        let apart = map_places(3, &[(0, 1, true)], 0);
+        assert!(near(apart[2], (0.5, 0.0)), "{apart:?}");
+    }
+
+    #[test]
+    fn a_tile_keeps_the_shape_of_its_picture() {
+        assert!((tile_width(640, 360, 90.0) - 160.0).abs() < 0.001);
+        assert!((tile_width(480, 640, 80.0) - 60.0).abs() < 0.001);
     }
 
     #[test]
