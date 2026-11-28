@@ -219,6 +219,16 @@ impl<E: Encode, D: Decode> Pictures<E, D> {
                     } else {
                         self.wanted.remove(&alias);
                     }
+                    // Whatever it says, what was being made is over: a track wanted
+                    // again begins again, even when no picture came in between to
+                    // notice that it was not wanted.
+                    let sender = self
+                        .cameras
+                        .values_mut()
+                        .find(|sender| sender.alias() == alias);
+                    if let Some(sender) = sender {
+                        sender.set_wanted(false);
+                    }
                 }
                 VideoIn::KeyFrame { alias } => {
                     let asked = self

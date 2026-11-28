@@ -256,3 +256,55 @@ async fn each_size_on_offer_is_made_only_while_it_is_watched() {
     });
     assert_eq!(refused, Err(palaver_media::video::Error::Size));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_camera_asked_for_again_at_once_begins_again_with_a_key_frame() {
+    let network = MemoryNetwork::new();
+    let secret = Identity::generate().unwrap();
+    let mut ana = seat(&network, &secret, "Ana", true);
+    let mut bo = seat(&network, &secret, "Bo", false);
+    ana.participant.create_meeting().await;
+    let ticket = ana.participant.ticket(&secret.secret());
+    bo.participant.join(entry_points(&ticket)).await;
+    until_tracks(bo.participant.control().status(), 1).await;
+    let alias = bo.pictures.tracks().remove(0).alias;
+    let size = Size::new(320, 180).unwrap();
+    let mut pattern = Pattern::new(size, 1);
+    // An encoder that makes a key frame only when one is asked for.
+    let encoder = |_: &palaver_sdk::VideoTrack, size| {
+        SoftwareEncoder::new(Settings {
+            key_every: None,
+            ..Settings::new(size, 150_000)
+        })
+    };
+    let mut shown = 0usize;
+
+    bo.pictures.watch(alias, SoftwareDecoder::new().unwrap());
+    for _ in 0..15 {
+        tokio::time::sleep(Duration::from_millis(33)).await;
+        ana.pictures.turn(|_, _| {});
+        ana.pictures
+            .film_all(&pattern.next_picture(), encoder)
+            .unwrap();
+        bo.pictures.turn(|_, _| shown += 1);
+    }
+    assert!(shown >= 5, "only {shown} pictures shown");
+
+    // Bo stops watching and begins again before Ana has made another picture: as a
+    // khef does when the way to a track changes. Ana hears of both at once.
+    bo.pictures.unwatch(alias);
+    bo.pictures.watch(alias, SoftwareDecoder::new().unwrap());
+    shown = 0;
+    for _ in 0..15 {
+        tokio::time::sleep(Duration::from_millis(33)).await;
+        ana.pictures.turn(|_, _| {});
+        ana.pictures
+            .film_all(&pattern.next_picture(), encoder)
+            .unwrap();
+        bo.pictures.turn(|_, _| shown += 1);
+    }
+    assert!(
+        shown >= 5,
+        "only {shown} pictures shown after watching again"
+    );
+}
