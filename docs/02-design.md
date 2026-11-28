@@ -551,8 +551,12 @@ subscriber and the smaller size; the paused tile; the conductor's part; going ba
   receiver shows each frame as soon as it is whole; a group that begins takes the place
   of an older one still arriving; when a frame cannot be decoded or a group is given up
   it asks once for a group after the one it lost, and waits for one to begin.
-- **One node's pictures** (`sdk::pictures`): the sender and the receivers behind the
-  engine's door for video, for one thread to turn. A participant offers a camera by
+- **One node's pictures** (`sdk::pictures`): the senders and the receivers behind the
+  engine's door for video, for one thread to turn. There is a sender, with an encoder
+  of its own, for each size of the camera on offer that somebody watches; the
+  camera's picture is made smaller for each by the mean of whole blocks of pixels
+  (`Picture::shrunk`), so a size on offer must be the camera's divided by a whole
+  number. A participant offers a camera by
   naming it in its options; nothing is coded until somebody watches.
 - **The app and the bot**. The app's pattern (`--pattern`) is offered as its camera
   and coded at 500 kbit/s, with a key frame by itself every ten seconds. It watches

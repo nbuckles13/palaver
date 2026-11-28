@@ -99,7 +99,6 @@ fn offer() -> Offer {
 struct Film {
     pictures: Pictures<SoftwareEncoder, SoftwareDecoder>,
     pattern: Pattern,
-    size: Size,
     /// Pictures that were due so far, at thirty a second.
     due: u64,
 }
@@ -111,14 +110,16 @@ impl Film {
         if !self.pictures.wanted() {
             return Ok(false);
         }
-        if !self.pictures.has_camera() {
-            let settings = Settings {
-                key_every: Some(KEY_EVERY),
-                ..Settings::new(self.size, PICTURE_BITRATE)
-            };
-            self.pictures.set_camera(SoftwareEncoder::new(settings)?);
-        }
-        self.pictures.film(&self.pattern.next_picture())
+        let sent = self
+            .pictures
+            .film_all(&self.pattern.next_picture(), |track, size| {
+                let bitrate = track.shape.map_or(PICTURE_BITRATE, |shape| shape.bitrate);
+                SoftwareEncoder::new(Settings {
+                    key_every: Some(KEY_EVERY),
+                    ..Settings::new(size, bitrate)
+                })
+            })?;
+        Ok(sent > 0)
     }
 }
 
@@ -193,7 +194,6 @@ impl Bot {
                 Box::new(Film {
                     pictures: Pictures::new(port, status),
                     pattern: Pattern::new(size, script.speaker),
-                    size,
                     due: 0,
                 })
             });

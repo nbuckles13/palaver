@@ -85,7 +85,7 @@ async fn a_camera_is_coded_only_while_watched_and_shown_at_the_other_end() {
     // Nobody watches: nothing is coded, and no encoder is needed.
     ana.pictures.turn(|_, _| {});
     assert!(!ana.pictures.wanted());
-    assert!(!ana.pictures.film(&pattern.next_picture()).unwrap());
+    assert!(!ana.pictures.film(b"low", &pattern.next_picture()).unwrap());
 
     bo.pictures
         .watch(track.alias, SoftwareDecoder::new().unwrap());
@@ -93,11 +93,12 @@ async fn a_camera_is_coded_only_while_watched_and_shown_at_the_other_end() {
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(33)).await;
         ana.pictures.turn(|_, _| {});
-        if ana.pictures.wanted() && !ana.pictures.has_camera() {
-            let encoder = SoftwareEncoder::new(Settings::new(size, 300_000)).unwrap();
-            ana.pictures.set_camera(encoder);
-        }
-        ana.pictures.film(&pattern.next_picture()).unwrap();
+        ana.pictures
+            .film_all(&pattern.next_picture(), |track, size| {
+                let shape = track.shape.unwrap();
+                SoftwareEncoder::new(Settings::new(size, shape.bitrate))
+            })
+            .unwrap();
         bo.pictures.turn(|alias, picture| {
             assert_eq!(alias, track.alias);
             shown.push(picture);
@@ -113,7 +114,7 @@ async fn a_camera_is_coded_only_while_watched_and_shown_at_the_other_end() {
         ana.pictures.turn(|_, _| {});
     }
     assert!(!ana.pictures.wanted());
-    assert!(!ana.pictures.film(&pattern.next_picture()).unwrap());
+    assert!(!ana.pictures.film(b"low", &pattern.next_picture()).unwrap());
 }
 
 #[tokio::test(start_paused = true)]
@@ -162,4 +163,96 @@ async fn what_a_camera_offers_is_said_in_full_and_can_change_while_the_meeting_l
     // And then has no camera at all.
     ana.participant.offer_cameras(Vec::new()).await;
     until_tracks(bo.participant.control().status(), 0).await;
+}
+
+/// A size of a camera `across` wide, in the shape of a screen.
+fn sized(name: &str, across: u32) -> Offer {
+    Offer {
+        name: name.as_bytes().to_vec(),
+        shape: Shape {
+            width: across,
+            height: across * 9 / 16,
+            per_second: 30,
+            bitrate: across * 500,
+        },
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_size_on_offer_is_made_only_while_it_is_watched() {
+    let network = MemoryNetwork::new();
+    let secret = Identity::generate().unwrap();
+    let mut ana = seat(&network, &secret, "Ana", false);
+    let mut bo = seat(&network, &secret, "Bo", false);
+    ana.participant.create_meeting().await;
+    let ticket = ana.participant.ticket(&secret.secret());
+    bo.participant.join(entry_points(&ticket)).await;
+    until_tracks(bo.participant.control().status(), 0).await;
+    // Ana's camera is 640 across, offered whole, halved and quartered; and at a size
+    // it cannot be made into.
+    let offers = vec![
+        sized("large", 640),
+        sized("middle", 320),
+        sized("small", 160),
+        sized("odd", 480),
+    ];
+    ana.participant.offer_cameras(offers).await;
+    until_tracks(bo.participant.control().status(), 4).await;
+    let alias_of = |pictures: &Both, name: &[u8]| {
+        let tracks = pictures.tracks();
+        tracks.iter().find(|t| t.rendition == name).unwrap().alias
+    };
+    let (large, small) = (
+        alias_of(&bo.pictures, b"large"),
+        alias_of(&bo.pictures, b"small"),
+    );
+
+    // Bo watches the largest and the smallest.
+    for alias in [large, small] {
+        bo.pictures.watch(alias, SoftwareDecoder::new().unwrap());
+    }
+    let mut pattern = Pattern::new(Size::new(640, 360).unwrap(), 1);
+    let mut shown: Vec<(u64, Size)> = Vec::new();
+    let mut made: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(33)).await;
+        ana.pictures.turn(|_, _| {});
+        ana.pictures
+            .film_all(&pattern.next_picture(), |track, size| {
+                made.push(track.rendition.clone());
+                SoftwareEncoder::new(Settings::new(size, track.shape.unwrap().bitrate))
+            })
+            .unwrap();
+        bo.pictures
+            .turn(|alias, picture| shown.push((alias, picture.size())));
+    }
+    // Each came at the size it said, and nothing was coded for the size nobody watches.
+    made.sort();
+    assert_eq!(made, [b"large".to_vec(), b"small".to_vec()]);
+    assert!(!ana.pictures.has_camera(b"middle"));
+    for (alias, across) in [(large, 640), (small, 160)] {
+        let sizes: Vec<Size> = shown
+            .iter()
+            .filter(|(of, _)| *of == alias)
+            .map(|(_, size)| *size)
+            .collect();
+        assert!(
+            sizes.len() >= 10,
+            "only {} pictures of {across}",
+            sizes.len()
+        );
+        assert!(sizes.iter().all(|size| size.width() == across));
+    }
+
+    // A size the camera's pictures cannot be made into is refused when it is wanted.
+    let odd = alias_of(&bo.pictures, b"odd");
+    bo.pictures.watch(odd, SoftwareDecoder::new().unwrap());
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(33)).await;
+        ana.pictures.turn(|_, _| {});
+    }
+    let refused = ana.pictures.film_all(&pattern.next_picture(), |_, size| {
+        SoftwareEncoder::new(Settings::new(size, 100_000))
+    });
+    assert_eq!(refused, Err(palaver_media::video::Error::Size));
 }

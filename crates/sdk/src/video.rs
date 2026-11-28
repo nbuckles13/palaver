@@ -69,6 +69,12 @@ impl<E: Encode> VideoSender<E> {
         }
     }
 
+    /// What the plan calls the track, as this sender was last told.
+    #[must_use]
+    pub const fn alias(&self) -> u64 {
+        self.alias
+    }
+
     /// The number the next group to begin will have.
     #[must_use]
     pub const fn next_group(&self) -> u64 {
