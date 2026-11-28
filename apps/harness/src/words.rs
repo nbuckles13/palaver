@@ -260,6 +260,17 @@ pub fn tiles_tall(count: usize, across: usize, tall: f32) -> f32 {
     count.div_ceil(across.max(1)) as f32 * (tall + 36.0)
 }
 
+/// `text` if it is at most `most` letters long, and otherwise its beginning with a
+/// mark that there was more.
+#[must_use]
+pub fn shortened(text: &str, most: usize) -> String {
+    if text.chars().count() <= most {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(most.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
+}
+
 /// A length of time in milliseconds, to a tenth.
 #[must_use]
 pub fn tenths(time: Duration) -> String {
@@ -767,6 +778,14 @@ mod tests {
         // Five at three to a row are two rows, each with its name under it.
         assert!((tiles_tall(5, 3, 90.0) - 252.0).abs() < 0.001);
         assert!(tiles_tall(0, 1, 180.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_long_name_is_cut_and_a_short_one_left() {
+        assert_eq!(shortened("Bo", 16), "Bo");
+        assert_eq!(shortened("exactly sixteen!", 16), "exactly sixteen!");
+        assert_eq!(shortened("Bartholomew the Third", 16), "Bartholomew the…");
+        assert_eq!(shortened("añoñoñoñ", 4), "año…");
     }
 
     #[test]

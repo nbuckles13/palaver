@@ -109,8 +109,16 @@ fn table(ui: &mut Ui, id: &str, heads: &[&str], rows: impl FnOnce(&mut Ui)) {
 
 /// The first cell of a row: its name, which chooses the row when clicked.
 fn name_cell(ui: &mut Ui, name: &str, chosen: bool) -> bool {
-    let text = if chosen { strong(name) } else { number(name) };
+    named_cell(ui, name, "", chosen)
+}
+
+/// The same, with `after` added to the name: a long name is cut short, so that the
+/// table keeps to the room it has, and what is added is kept whole.
+fn named_cell(ui: &mut Ui, name: &str, after: &str, chosen: bool) -> bool {
+    let short = format!("{}{after}", words::shortened(name, 16));
+    let text = if chosen { strong(short) } else { number(short) };
     ui.add(egui::Label::new(text).sense(Sense::click()))
+        .on_hover_text(name)
         .clicked()
 }
 
@@ -188,6 +196,8 @@ fn size_cell(size: Option<(u32, u32)>) -> String {
 
 /// Draw the details as things stand.
 pub fn draw(ui: &mut Ui, view: &View, chosen: &mut Chosen, own: &Own) {
+    // Nothing here may be wider than the room it is given: what is, is cut.
+    ui.set_max_width(ui.available_width());
     ui.horizontal(|ui| {
         for tab in Tab::ALL {
             if ui.selectable_label(chosen.tab == tab, tab.name()).clicked() {
@@ -287,8 +297,8 @@ fn voice_row(
     picked: Option<&String>,
     chosen: &mut Chosen,
 ) {
-    let name = words::resting(voice.name.clone(), voice.playing);
-    if name_cell(ui, &name, Some(&voice.name) == picked) {
+    let after = words::resting(String::new(), voice.playing);
+    if named_cell(ui, &voice.name, &after, Some(&voice.name) == picked) {
         chosen.voice = Some(voice.name.clone());
     }
     let heard = words::heard_after(voice.delay, speaker_lead);
@@ -516,17 +526,19 @@ fn system(ui: &mut Ui, view: &View, own: &Own) {
         || String::from("none"),
         |(width, height, _)| format!("a moving pattern, {width} × {height}"),
     );
-    table(ui, "devices", &["", ""], |ui| {
-        for (what, name) in [
-            ("Microphone", view.microphone.as_str()),
-            ("Speaker", view.speaker.as_str()),
-            ("Camera", camera.as_str()),
-        ] {
-            ui.label(dim(what));
-            ui.label(number(name));
-            ui.end_row();
-        }
-    });
+    // A device's name is as long as its maker liked: it is cut to the room there is,
+    // and said whole under the pointer.
+    for (what, name) in [
+        ("Microphone", view.microphone.as_str()),
+        ("Speaker", view.speaker.as_str()),
+        ("Camera", camera.as_str()),
+    ] {
+        ui.horizontal(|ui| {
+            ui.add_sized([70.0, 14.0], egui::Label::new(dim(what)));
+            ui.add(egui::Label::new(number(name)).truncate())
+                .on_hover_text(name);
+        });
+    }
 
     heading(ui, "How this machine is keeping up");
     // The speaker takes sound every 10 ms; a wait of two frames of sound is heard.
